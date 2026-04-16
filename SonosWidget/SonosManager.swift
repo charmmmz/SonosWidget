@@ -28,6 +28,14 @@ final class SonosManager {
     private var lastAlbumArtURL: String?
     private var consecutiveFailures = 0
     private var currentActivity: Activity<SonosActivityAttributes>?
+    private var albumArtTask: Task<Void, Never>?
+
+    private static let albumArtSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForResource = 10
+        return URLSession(configuration: config)
+    }()
 
     enum ConnectionState { case connected, disconnected, reconnecting }
 
@@ -42,7 +50,7 @@ final class SonosManager {
     // MARK: - Lifecycle
 
     func loadSavedState() {
-        speakers = SharedStorage.savedSpeakers
+        speakers = SharedStorage.savedSpeakers.filter(\.isCoordinator)
         if let ip = SharedStorage.speakerIP,
            let speaker = speakers.first(where: { $0.ipAddress == ip }) {
             selectedSpeaker = speaker
@@ -64,7 +72,8 @@ final class SonosManager {
         discovery.stopScan()
         speakers = discovery.discoveredSpeakers
         SharedStorage.savedSpeakers = speakers
-        await selectSpeaker(speaker)
+        let target = speaker.isCoordinator ? speaker : speakers.first(where: { $0.groupId == speaker.groupId && $0.isCoordinator }) ?? speaker
+        await selectSpeaker(target)
         isLoading = false
     }
 
@@ -82,7 +91,7 @@ final class SonosManager {
                 let name = try await SonosAPI.getDeviceName(ip: trimmed)
                 speakers = [SonosPlayer(id: UUID().uuidString, name: name, ipAddress: trimmed, isCoordinator: true)]
             } else {
-                speakers = discovered
+                speakers = discovered.filter(\.isCoordinator)
             }
             SharedStorage.savedSpeakers = speakers
             let speaker = speakers.first(where: { $0.isCoordinator }) ?? speakers.first
@@ -96,6 +105,13 @@ final class SonosManager {
     func selectSpeaker(_ speaker: SonosPlayer) async {
         selectedSpeaker = speaker
         syncSpeakerToStorage(speaker)
+
+        albumArtTask?.cancel()
+        lastAlbumArtURL = nil
+        albumArtImage = nil
+        trackInfo = nil
+        consecutiveFailures = 0
+
         await refreshState()
     }
 
@@ -286,17 +302,26 @@ final class SonosManager {
     private func loadAlbumArt() async {
         guard let urlStr = trackInfo?.albumArtURL, urlStr != lastAlbumArtURL else { return }
         lastAlbumArtURL = urlStr
+        albumArtTask?.cancel()
+
         guard let url = URL(string: urlStr) else {
             albumArtImage = nil
             SharedStorage.albumArtData = nil
             return
         }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            albumArtImage = UIImage(data: data)
-            SharedStorage.albumArtData = data
-        } catch {
-            albumArtImage = nil
+
+        let capturedURL = urlStr
+        albumArtTask = Task {
+            do {
+                let (data, _) = try await Self.albumArtSession.data(from: url)
+                guard !Task.isCancelled, lastAlbumArtURL == capturedURL else { return }
+                albumArtImage = UIImage(data: data)
+                SharedStorage.albumArtData = data
+            } catch {
+                guard !Task.isCancelled else { return }
+                albumArtImage = nil
+            }
         }
+        await albumArtTask?.value
     }
 }

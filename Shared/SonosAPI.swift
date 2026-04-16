@@ -2,11 +2,11 @@ import Foundation
 
 enum SonosAPI {
 
-    static let port = 1400
-    private static let avTransport = "/MediaRenderer/AVTransport/Control"
-    private static let renderingControl = "/MediaRenderer/RenderingControl/Control"
-    private static let zoneGroupTopology = "/ZoneGroupTopology/Control"
-    private static let contentDirectory = "/MediaServer/ContentDirectory/Control"
+    nonisolated static let port = 1400
+    private nonisolated static let avTransport = "/MediaRenderer/AVTransport/Control"
+    private nonisolated static let renderingControl = "/MediaRenderer/RenderingControl/Control"
+    private nonisolated static let zoneGroupTopology = "/ZoneGroupTopology/Control"
+    private nonisolated static let contentDirectory = "/MediaServer/ContentDirectory/Control"
 
     // MARK: - Playback Controls
 
@@ -58,11 +58,15 @@ enum SonosAPI {
 
         if let raw = extractTag("TrackMetaData", from: xml) {
             let meta = decodeXMLEntities(raw)
-            title = extractTag("dc:title", from: meta) ?? "Unknown"
-            artist = extractTag("dc:creator", from: meta) ?? "Unknown"
-            album = extractTag("upnp:album", from: meta) ?? "Unknown"
+            title = decodeXMLEntities(extractTag("dc:title", from: meta) ?? "Unknown")
+            artist = decodeXMLEntities(extractTag("dc:creator", from: meta) ?? "Unknown")
+            album = decodeXMLEntities(extractTag("upnp:album", from: meta) ?? "")
             if let artPath = extractTag("upnp:albumArtURI", from: meta) {
-                albumArtURL = artPath.hasPrefix("http") ? artPath : "http://\(ip):\(port)\(artPath)"
+                var decoded = decodeXMLEntities(artPath)
+                if decoded.contains("%25") {
+                    decoded = decoded.removingPercentEncoding ?? decoded
+                }
+                albumArtURL = decoded.hasPrefix("http") ? decoded : "http://\(ip):\(port)\(decoded)"
             }
         }
 
@@ -114,7 +118,10 @@ enum SonosAPI {
     }
 
     nonisolated static func getDeviceName(ip: String) async throws -> String {
-        let url = URL(string: "http://\(ip):\(port)/xml/device_description.xml")!
+        let cleanIP = ip.contains(":") ? "[\(ip.split(separator: "%").first ?? Substring(ip))]" : ip
+        guard let url = URL(string: "http://\(cleanIP):\(port)/xml/device_description.xml") else {
+            throw URLError(.badURL)
+        }
         var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "GET"
         let (data, _) = try await URLSession.shared.data(for: request)
@@ -140,7 +147,10 @@ enum SonosAPI {
 
     private nonisolated static func soap(ip: String, endpoint: String, service: String,
                                          action: String, body: String) async throws -> String {
-        let url = URL(string: "http://\(ip):\(port)\(endpoint)")!
+        let cleanIP = ip.contains(":") ? "[\(ip.split(separator: "%").first ?? Substring(ip))]" : ip
+        guard let url = URL(string: "http://\(cleanIP):\(port)\(endpoint)") else {
+            throw URLError(.badURL)
+        }
         var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "POST"
         request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
@@ -166,7 +176,7 @@ enum SonosAPI {
 
     nonisolated static func extractTag(_ tag: String, from xml: String) -> String? {
         let escaped = NSRegularExpression.escapedPattern(for: tag)
-        let pattern = "<\(escaped)[^>]*>(.*?)</\(escaped)>"
+        let pattern = "<\(escaped)(?:\\s[^>]*)?>(.*?)</\(escaped)>"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators),
               let match = regex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)),
               let range = Range(match.range(at: 1), in: xml) else { return nil }
@@ -268,12 +278,16 @@ enum SonosAPI {
             guard let range = Range(match.range(at: 1), in: xml) else { return nil }
             let item = String(xml[range])
 
-            let title = extractTag("dc:title", from: item) ?? "Unknown"
-            let artist = extractTag("dc:creator", from: item) ?? extractTag("upnp:artist", from: item) ?? "Unknown"
-            let album = extractTag("upnp:album", from: item) ?? ""
+            let title = decodeXMLEntities(extractTag("dc:title", from: item) ?? "Unknown")
+            let artist = decodeXMLEntities(extractTag("dc:creator", from: item) ?? extractTag("upnp:artist", from: item) ?? "Unknown")
+            let album = decodeXMLEntities(extractTag("upnp:album", from: item) ?? "")
             var art: String?
             if let p = extractTag("upnp:albumArtURI", from: item) {
-                art = p.hasPrefix("http") ? p : "http://\(speakerIP):\(port)\(p)"
+                var decoded = decodeXMLEntities(p)
+                if decoded.contains("%25") {
+                    decoded = decoded.removingPercentEncoding ?? decoded
+                }
+                art = decoded.hasPrefix("http") ? decoded : "http://\(speakerIP):\(port)\(decoded)"
             }
             return QueueItem(id: "\(idx)", title: title, artist: artist, album: album, albumArtURL: art)
         }

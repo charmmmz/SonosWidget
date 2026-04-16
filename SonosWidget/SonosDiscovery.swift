@@ -62,7 +62,9 @@ final class SonosDiscovery {
             if case .ready = state {
                 if let remote = conn.currentPath?.remoteEndpoint,
                    case .hostPort(let host, _) = remote {
-                    let ip = "\(host)"
+                    let raw = "\(host)"
+                    let ip = raw.split(separator: "%").first.map(String.init) ?? raw
+                    guard !ip.contains(":") else { conn.cancel(); return }
                     Task { @MainActor in
                         self.didResolveIP(ip)
                     }
@@ -81,8 +83,11 @@ final class SonosDiscovery {
         Task {
             do {
                 let allSpeakers = try await SonosAPI.getZoneGroupState(ip: ip)
-                if !allSpeakers.isEmpty && discoveredSpeakers.isEmpty {
-                    discoveredSpeakers = allSpeakers
+                let coordinators = allSpeakers.filter(\.isCoordinator)
+                if !coordinators.isEmpty {
+                    for speaker in coordinators where !discoveredSpeakers.contains(where: { $0.id == speaker.id }) {
+                        discoveredSpeakers.append(speaker)
+                    }
                     return
                 }
             } catch { /* fall through to single-speaker path */ }

@@ -2,13 +2,13 @@ import Foundation
 
 enum SharedStorage {
 
-    static let appGroupID = "group.com.charm.SonosWidget"
+    nonisolated static let appGroupID = "group.com.charm.SonosWidget"
 
-    private static var defaults: UserDefaults {
+    private nonisolated static var defaults: UserDefaults {
         UserDefaults(suiteName: appGroupID) ?? .standard
     }
 
-    private static var containerURL: URL? {
+    private nonisolated static var containerURL: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
     }
 

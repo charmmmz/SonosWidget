@@ -1,3 +1,4 @@
+import AppIntents
 import WidgetKit
 import SwiftUI
 
@@ -72,10 +73,13 @@ struct SonosProvider: TimelineProvider {
             SharedStorage.cachedAlbumArtURL = info.albumArtURL
 
             var artData = SharedStorage.albumArtData
-            if let urlStr = info.albumArtURL, let url = URL(string: urlStr),
-               let (data, _) = try? await URLSession.shared.data(from: url) {
-                artData = data
-                SharedStorage.albumArtData = data
+            if let urlStr = info.albumArtURL, let url = URL(string: urlStr) {
+                var req = URLRequest(url: url, timeoutInterval: 5)
+                req.httpMethod = "GET"
+                if let (data, _) = try? await URLSession.shared.data(for: req) {
+                    artData = data
+                    SharedStorage.albumArtData = data
+                }
             }
 
             return SonosEntry(date: .now, trackTitle: info.title, artist: info.artist,
@@ -104,7 +108,7 @@ struct SonosWidgetSmallView: View {
                     if let name = entry.speakerName {
                         Text(name)
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.white.opacity(0.6))
                             .lineLimit(1)
                     }
                 }
@@ -113,10 +117,11 @@ struct SonosWidgetSmallView: View {
 
                 Text(entry.trackTitle)
                     .font(.caption.bold())
+                    .foregroundStyle(.white)
                     .lineLimit(2)
                 Text(entry.artist)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.7))
                     .lineLimit(1)
 
                 HStack(spacing: 16) {
@@ -130,6 +135,7 @@ struct SonosWidgetSmallView: View {
                         Image(systemName: "forward.fill").font(.caption)
                     }.buttonStyle(.plain)
                 }
+                .foregroundStyle(.white)
             }
         }
     }
@@ -149,10 +155,11 @@ struct SonosWidgetSmallView: View {
             Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+                .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
         } else {
-            RoundedRectangle(cornerRadius: 6).fill(.quaternary)
+            RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.15))
                 .frame(width: size, height: size)
-                .overlay { Image(systemName: "music.note").font(.caption).foregroundStyle(.tertiary) }
+                .overlay { Image(systemName: "music.note").font(.caption).foregroundStyle(.white.opacity(0.4)) }
         }
     }
 }
@@ -171,21 +178,21 @@ struct SonosWidgetMediumView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     if let name = entry.speakerName {
-                        Text(name).font(.caption2).foregroundStyle(.secondary)
+                        Text(name).font(.caption2).foregroundStyle(.white.opacity(0.6))
                     }
 
                     Spacer()
 
-                    Text(entry.trackTitle).font(.subheadline.bold()).lineLimit(2)
-                    Text(entry.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Text(entry.album).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                    Text(entry.trackTitle).font(.subheadline.bold()).foregroundStyle(.white).lineLimit(2)
+                    Text(entry.artist).font(.caption).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                    Text(entry.album).font(.caption2).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
 
                     Spacer()
 
                     HStack(spacing: 12) {
                         Button(intent: VolumeDownIntent()) {
                             Image(systemName: "speaker.minus.fill").font(.caption2)
-                        }.buttonStyle(.plain).foregroundStyle(.secondary)
+                        }.buttonStyle(.plain).foregroundStyle(.white.opacity(0.5))
 
                         Spacer()
 
@@ -204,8 +211,9 @@ struct SonosWidgetMediumView: View {
 
                         Button(intent: VolumeUpIntent()) {
                             Image(systemName: "speaker.plus.fill").font(.caption2)
-                        }.buttonStyle(.plain).foregroundStyle(.secondary)
+                        }.buttonStyle(.plain).foregroundStyle(.white.opacity(0.5))
                     }
+                    .foregroundStyle(.white)
                 }
 
                 Spacer(minLength: 0)
@@ -232,10 +240,11 @@ struct SonosWidgetMediumView: View {
             Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
                 .frame(width: 120, height: 120)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
+                .shadow(color: .black.opacity(0.4), radius: 8, y: 4)
         } else {
-            RoundedRectangle(cornerRadius: 12).fill(.quaternary)
+            RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.15))
                 .frame(width: 120, height: 120)
-                .overlay { Image(systemName: "music.note").font(.largeTitle).foregroundStyle(.tertiary) }
+                .overlay { Image(systemName: "music.note").font(.largeTitle).foregroundStyle(.white.opacity(0.4)) }
         }
     }
 }
@@ -248,11 +257,38 @@ struct SonosWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: SonosProvider()) { entry in
             SonosWidgetContainerView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(for: .widget) {
+                    WidgetBlurredBackground(albumArtData: entry.albumArtData)
+                }
         }
         .configurationDisplayName("Sonos Controller")
         .description("Control your Sonos speakers and see what's playing.")
         .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+struct WidgetBlurredBackground: View {
+    let albumArtData: Data?
+
+    var body: some View {
+        if let data = albumArtData, let img = UIImage(data: data) {
+            ZStack {
+                Image(uiImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .blur(radius: 40)
+                    .scaleEffect(1.5)
+                    .clipped()
+
+                LinearGradient(
+                    colors: [.black.opacity(0.5), .black.opacity(0.7)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        } else {
+            Color(.systemBackground).opacity(0.3)
+        }
     }
 }
 
