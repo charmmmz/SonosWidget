@@ -5,5 +5,6 @@ import SwiftUI
 struct TheWidgetBundle: WidgetBundle {
     var body: some Widget {
         SonosWidget()
+        SonosLiveActivity()
     }
 }

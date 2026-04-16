@@ -29,9 +29,7 @@ struct SonosEntry: TimelineEntry {
 // MARK: - Timeline Provider
 
 struct SonosProvider: TimelineProvider {
-    func placeholder(in context: Context) -> SonosEntry {
-        .placeholder
-    }
+    func placeholder(in context: Context) -> SonosEntry { .placeholder }
 
     func getSnapshot(in context: Context, completion: @escaping (SonosEntry) -> Void) {
         completion(cachedEntry())
@@ -40,8 +38,8 @@ struct SonosProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<SonosEntry>) -> Void) {
         Task {
             let entry = await fetchLiveEntry()
-            let nextUpdate = Calendar.current.date(byAdding: .minute, value: 10, to: .now)!
-            completion(Timeline(entries: [entry], policy: .after(nextUpdate)))
+            let next = Calendar.current.date(byAdding: .minute, value: 5, to: .now)!
+            completion(Timeline(entries: [entry], policy: .after(next)))
         }
     }
 
@@ -60,7 +58,8 @@ struct SonosProvider: TimelineProvider {
     }
 
     private func fetchLiveEntry() async -> SonosEntry {
-        guard let ip = SharedStorage.speakerIP else { return .unconfigured }
+        let playIP = SharedStorage.coordinatorIP ?? SharedStorage.speakerIP
+        guard let ip = playIP else { return .unconfigured }
 
         do {
             let state = try await SonosAPI.getTransportInfo(ip: ip)
@@ -73,30 +72,23 @@ struct SonosProvider: TimelineProvider {
             SharedStorage.cachedAlbumArtURL = info.albumArtURL
 
             var artData = SharedStorage.albumArtData
-            if let urlStr = info.albumArtURL, let url = URL(string: urlStr) {
-                if let (data, _) = try? await URLSession.shared.data(from: url) {
-                    artData = data
-                    SharedStorage.albumArtData = data
-                }
+            if let urlStr = info.albumArtURL, let url = URL(string: urlStr),
+               let (data, _) = try? await URLSession.shared.data(from: url) {
+                artData = data
+                SharedStorage.albumArtData = data
             }
 
-            return SonosEntry(
-                date: .now,
-                trackTitle: info.title,
-                artist: info.artist,
-                album: info.album,
-                isPlaying: state == .playing,
-                albumArtData: artData,
-                isConfigured: true,
-                speakerName: SharedStorage.speakerName
-            )
+            return SonosEntry(date: .now, trackTitle: info.title, artist: info.artist,
+                              album: info.album, isPlaying: state == .playing,
+                              albumArtData: artData, isConfigured: true,
+                              speakerName: SharedStorage.speakerName)
         } catch {
             return cachedEntry()
         }
     }
 }
 
-// MARK: - Widget Views
+// MARK: - Small Widget
 
 struct SonosWidgetSmallView: View {
     let entry: SonosEntry
@@ -107,7 +99,7 @@ struct SonosWidgetSmallView: View {
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
-                    albumArtThumb(size: 44)
+                    artThumb(size: 44)
                     Spacer()
                     if let name = entry.speakerName {
                         Text(name)
@@ -122,7 +114,6 @@ struct SonosWidgetSmallView: View {
                 Text(entry.trackTitle)
                     .font(.caption.bold())
                     .lineLimit(2)
-
                 Text(entry.artist)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -130,22 +121,14 @@ struct SonosWidgetSmallView: View {
 
                 HStack(spacing: 16) {
                     Button(intent: PreviousTrackIntent()) {
-                        Image(systemName: "backward.fill")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-
+                        Image(systemName: "backward.fill").font(.caption)
+                    }.buttonStyle(.plain)
                     Button(intent: PlayPauseIntent()) {
-                        Image(systemName: entry.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.body)
-                    }
-                    .buttonStyle(.plain)
-
+                        Image(systemName: entry.isPlaying ? "pause.fill" : "play.fill").font(.body)
+                    }.buttonStyle(.plain)
                     Button(intent: NextTrackIntent()) {
-                        Image(systemName: "forward.fill")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
+                        Image(systemName: "forward.fill").font(.caption)
+                    }.buttonStyle(.plain)
                 }
             }
         }
@@ -153,37 +136,28 @@ struct SonosWidgetSmallView: View {
 
     private var unconfiguredView: some View {
         VStack(spacing: 8) {
-            Image(systemName: "hifispeaker.fill")
-                .font(.title2)
-                .foregroundStyle(.secondary)
+            Image(systemName: "hifispeaker.fill").font(.title2).foregroundStyle(.secondary)
             Text("Open app to set up Sonos")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
-    private func albumArtThumb(size: CGFloat) -> some View {
+    private func artThumb(size: CGFloat) -> some View {
         if let data = entry.albumArtData, let img = UIImage(data: data) {
-            Image(uiImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
+            Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
                 .frame(width: size, height: size)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         } else {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(.quaternary)
+            RoundedRectangle(cornerRadius: 6).fill(.quaternary)
                 .frame(width: size, height: size)
-                .overlay {
-                    Image(systemName: "music.note")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                .overlay { Image(systemName: "music.note").font(.caption).foregroundStyle(.tertiary) }
         }
     }
 }
+
+// MARK: - Medium Widget
 
 struct SonosWidgetMediumView: View {
     let entry: SonosEntry
@@ -195,49 +169,42 @@ struct SonosWidgetMediumView: View {
             HStack(spacing: 12) {
                 albumArt
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     if let name = entry.speakerName {
-                        Text(name)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Text(name).font(.caption2).foregroundStyle(.secondary)
                     }
 
                     Spacer()
 
-                    Text(entry.trackTitle)
-                        .font(.subheadline.bold())
-                        .lineLimit(2)
-
-                    Text(entry.artist)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    Text(entry.album)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                    Text(entry.trackTitle).font(.subheadline.bold()).lineLimit(2)
+                    Text(entry.artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(entry.album).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
 
                     Spacer()
 
-                    HStack(spacing: 20) {
-                        Button(intent: PreviousTrackIntent()) {
-                            Image(systemName: "backward.fill")
-                                .font(.callout)
-                        }
-                        .buttonStyle(.plain)
+                    HStack(spacing: 12) {
+                        Button(intent: VolumeDownIntent()) {
+                            Image(systemName: "speaker.minus.fill").font(.caption2)
+                        }.buttonStyle(.plain).foregroundStyle(.secondary)
 
+                        Spacer()
+
+                        Button(intent: PreviousTrackIntent()) {
+                            Image(systemName: "backward.fill").font(.callout)
+                        }.buttonStyle(.plain)
                         Button(intent: PlayPauseIntent()) {
                             Image(systemName: entry.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                                 .font(.title2)
-                        }
-                        .buttonStyle(.plain)
-
+                        }.buttonStyle(.plain)
                         Button(intent: NextTrackIntent()) {
-                            Image(systemName: "forward.fill")
-                                .font(.callout)
-                        }
-                        .buttonStyle(.plain)
+                            Image(systemName: "forward.fill").font(.callout)
+                        }.buttonStyle(.plain)
+
+                        Spacer()
+
+                        Button(intent: VolumeUpIntent()) {
+                            Image(systemName: "speaker.plus.fill").font(.caption2)
+                        }.buttonStyle(.plain).foregroundStyle(.secondary)
                     }
                 }
 
@@ -248,15 +215,11 @@ struct SonosWidgetMediumView: View {
 
     private var unconfiguredView: some View {
         HStack(spacing: 12) {
-            Image(systemName: "hifispeaker.2.fill")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
+            Image(systemName: "hifispeaker.2.fill").font(.largeTitle).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Sonos Widget")
-                    .font(.headline)
+                Text("Sonos Widget").font(.headline)
                 Text("Open the app to connect to your Sonos speakers.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
         }
@@ -266,20 +229,13 @@ struct SonosWidgetMediumView: View {
     @ViewBuilder
     private var albumArt: some View {
         if let data = entry.albumArtData, let img = UIImage(data: data) {
-            Image(uiImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
+            Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
                 .frame(width: 120, height: 120)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         } else {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.quaternary)
+            RoundedRectangle(cornerRadius: 12).fill(.quaternary)
                 .frame(width: 120, height: 120)
-                .overlay {
-                    Image(systemName: "music.note")
-                        .font(.largeTitle)
-                        .foregroundStyle(.tertiary)
-                }
+                .overlay { Image(systemName: "music.note").font(.largeTitle).foregroundStyle(.tertiary) }
         }
     }
 }
@@ -291,16 +247,8 @@ struct SonosWidget: Widget {
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: SonosProvider()) { entry in
-            Group {
-                if #available(iOSApplicationExtension 17.0, *) {
-                    SonosWidgetContainerView(entry: entry)
-                        .containerBackground(.fill.tertiary, for: .widget)
-                } else {
-                    SonosWidgetContainerView(entry: entry)
-                        .padding()
-                        .background()
-                }
-            }
+            SonosWidgetContainerView(entry: entry)
+                .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Sonos Controller")
         .description("Control your Sonos speakers and see what's playing.")
@@ -314,26 +262,11 @@ struct SonosWidgetContainerView: View {
 
     var body: some View {
         switch family {
-        case .systemSmall:
-            SonosWidgetSmallView(entry: entry)
-        case .systemMedium:
-            SonosWidgetMediumView(entry: entry)
-        default:
-            SonosWidgetMediumView(entry: entry)
+        case .systemSmall: SonosWidgetSmallView(entry: entry)
+        default: SonosWidgetMediumView(entry: entry)
         }
     }
 }
 
-// MARK: - Previews
-
-#Preview("Small", as: .systemSmall) {
-    SonosWidget()
-} timeline: {
-    SonosEntry.placeholder
-}
-
-#Preview("Medium", as: .systemMedium) {
-    SonosWidget()
-} timeline: {
-    SonosEntry.placeholder
-}
+#Preview("Small", as: .systemSmall) { SonosWidget() } timeline: { SonosEntry.placeholder }
+#Preview("Medium", as: .systemMedium) { SonosWidget() } timeline: { SonosEntry.placeholder }

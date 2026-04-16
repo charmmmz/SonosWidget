@@ -24,6 +24,11 @@ enum SharedStorage {
         set { defaults.set(newValue, forKey: "speakerName") }
     }
 
+    nonisolated static var coordinatorIP: String? {
+        get { defaults.string(forKey: "coordinatorIP") }
+        set { defaults.set(newValue, forKey: "coordinatorIP") }
+    }
+
     // MARK: - Cached Playback State
 
     nonisolated static var isPlaying: Bool {
@@ -49,6 +54,11 @@ enum SharedStorage {
     nonisolated static var cachedAlbumArtURL: String? {
         get { defaults.string(forKey: "albumArtURL") }
         set { defaults.set(newValue, forKey: "albumArtURL") }
+    }
+
+    nonisolated static var cachedVolume: Int {
+        get { defaults.integer(forKey: "volume") }
+        set { defaults.set(newValue, forKey: "volume") }
     }
 
     // MARK: - Album Art File
