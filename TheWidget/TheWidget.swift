@@ -1,88 +1,339 @@
-//
-//  TheWidget.swift
-//  TheWidget
-//
-//  Created by Charm Xu on 2026/4/16.
-//
-
 import WidgetKit
 import SwiftUI
 
-struct Provider: AppIntentTimelineProvider {
-    func placeholder(in context: Context) -> SimpleEntry {
-        SimpleEntry(date: Date(), configuration: ConfigurationAppIntent())
-    }
+// MARK: - Timeline Entry
 
-    func snapshot(for configuration: ConfigurationAppIntent, in context: Context) async -> SimpleEntry {
-        SimpleEntry(date: Date(), configuration: configuration)
-    }
-    
-    func timeline(for configuration: ConfigurationAppIntent, in context: Context) async -> Timeline<SimpleEntry> {
-        var entries: [SimpleEntry] = []
-
-        // Generate a timeline consisting of five entries an hour apart, starting from the current date.
-        let currentDate = Date()
-        for hourOffset in 0 ..< 5 {
-            let entryDate = Calendar.current.date(byAdding: .hour, value: hourOffset, to: currentDate)!
-            let entry = SimpleEntry(date: entryDate, configuration: configuration)
-            entries.append(entry)
-        }
-
-        return Timeline(entries: entries, policy: .atEnd)
-    }
-
-//    func relevances() async -> WidgetRelevances<ConfigurationAppIntent> {
-//        // Generate a list containing the contexts this widget is relevant in.
-//    }
-}
-
-struct SimpleEntry: TimelineEntry {
+struct SonosEntry: TimelineEntry {
     let date: Date
-    let configuration: ConfigurationAppIntent
+    let trackTitle: String
+    let artist: String
+    let album: String
+    let isPlaying: Bool
+    let albumArtData: Data?
+    let isConfigured: Bool
+    let speakerName: String?
+
+    static var placeholder: SonosEntry {
+        SonosEntry(date: .now, trackTitle: "Song Title", artist: "Artist Name",
+                   album: "Album", isPlaying: true, albumArtData: nil,
+                   isConfigured: true, speakerName: "Living Room")
+    }
+
+    static var unconfigured: SonosEntry {
+        SonosEntry(date: .now, trackTitle: "", artist: "", album: "",
+                   isPlaying: false, albumArtData: nil,
+                   isConfigured: false, speakerName: nil)
+    }
 }
 
-struct TheWidgetEntryView : View {
-    var entry: Provider.Entry
+// MARK: - Timeline Provider
+
+struct SonosProvider: TimelineProvider {
+    func placeholder(in context: Context) -> SonosEntry {
+        .placeholder
+    }
+
+    func getSnapshot(in context: Context, completion: @escaping (SonosEntry) -> Void) {
+        completion(cachedEntry())
+    }
+
+    func getTimeline(in context: Context, completion: @escaping (Timeline<SonosEntry>) -> Void) {
+        Task {
+            let entry = await fetchLiveEntry()
+            let nextUpdate = Calendar.current.date(byAdding: .minute, value: 10, to: .now)!
+            completion(Timeline(entries: [entry], policy: .after(nextUpdate)))
+        }
+    }
+
+    private func cachedEntry() -> SonosEntry {
+        guard SharedStorage.speakerIP != nil else { return .unconfigured }
+        return SonosEntry(
+            date: .now,
+            trackTitle: SharedStorage.cachedTrackTitle ?? "Not Playing",
+            artist: SharedStorage.cachedArtist ?? "—",
+            album: SharedStorage.cachedAlbum ?? "",
+            isPlaying: SharedStorage.isPlaying,
+            albumArtData: SharedStorage.albumArtData,
+            isConfigured: true,
+            speakerName: SharedStorage.speakerName
+        )
+    }
+
+    private func fetchLiveEntry() async -> SonosEntry {
+        guard let ip = SharedStorage.speakerIP else { return .unconfigured }
+
+        do {
+            let state = try await SonosAPI.getTransportInfo(ip: ip)
+            let info = try await SonosAPI.getPositionInfo(ip: ip)
+
+            SharedStorage.isPlaying = (state == .playing)
+            SharedStorage.cachedTrackTitle = info.title
+            SharedStorage.cachedArtist = info.artist
+            SharedStorage.cachedAlbum = info.album
+            SharedStorage.cachedAlbumArtURL = info.albumArtURL
+
+            var artData = SharedStorage.albumArtData
+            if let urlStr = info.albumArtURL, let url = URL(string: urlStr) {
+                if let (data, _) = try? await URLSession.shared.data(from: url) {
+                    artData = data
+                    SharedStorage.albumArtData = data
+                }
+            }
+
+            return SonosEntry(
+                date: .now,
+                trackTitle: info.title,
+                artist: info.artist,
+                album: info.album,
+                isPlaying: state == .playing,
+                albumArtData: artData,
+                isConfigured: true,
+                speakerName: SharedStorage.speakerName
+            )
+        } catch {
+            return cachedEntry()
+        }
+    }
+}
+
+// MARK: - Widget Views
+
+struct SonosWidgetSmallView: View {
+    let entry: SonosEntry
 
     var body: some View {
-        VStack {
-            Text("Time:")
-            Text(entry.date, style: .time)
+        if !entry.isConfigured {
+            unconfiguredView
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    albumArtThumb(size: 44)
+                    Spacer()
+                    if let name = entry.speakerName {
+                        Text(name)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
 
-            Text("Favorite Emoji:")
-            Text(entry.configuration.favoriteEmoji)
+                Spacer()
+
+                Text(entry.trackTitle)
+                    .font(.caption.bold())
+                    .lineLimit(2)
+
+                Text(entry.artist)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                HStack(spacing: 16) {
+                    Button(intent: PreviousTrackIntent()) {
+                        Image(systemName: "backward.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(intent: PlayPauseIntent()) {
+                        Image(systemName: entry.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.body)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(intent: NextTrackIntent()) {
+                        Image(systemName: "forward.fill")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var unconfiguredView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "hifispeaker.fill")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+            Text("Open app to set up Sonos")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func albumArtThumb(size: CGFloat) -> some View {
+        if let data = entry.albumArtData, let img = UIImage(data: data) {
+            Image(uiImage: img)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        } else {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.quaternary)
+                .frame(width: size, height: size)
+                .overlay {
+                    Image(systemName: "music.note")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
         }
     }
 }
 
-struct TheWidget: Widget {
-    let kind: String = "TheWidget"
+struct SonosWidgetMediumView: View {
+    let entry: SonosEntry
+
+    var body: some View {
+        if !entry.isConfigured {
+            unconfiguredView
+        } else {
+            HStack(spacing: 12) {
+                albumArt
+
+                VStack(alignment: .leading, spacing: 4) {
+                    if let name = entry.speakerName {
+                        Text(name)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Text(entry.trackTitle)
+                        .font(.subheadline.bold())
+                        .lineLimit(2)
+
+                    Text(entry.artist)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    Text(entry.album)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    HStack(spacing: 20) {
+                        Button(intent: PreviousTrackIntent()) {
+                            Image(systemName: "backward.fill")
+                                .font(.callout)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(intent: PlayPauseIntent()) {
+                            Image(systemName: entry.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.title2)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(intent: NextTrackIntent()) {
+                            Image(systemName: "forward.fill")
+                                .font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var unconfiguredView: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "hifispeaker.2.fill")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Sonos Widget")
+                    .font(.headline)
+                Text("Open the app to connect to your Sonos speakers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var albumArt: some View {
+        if let data = entry.albumArtData, let img = UIImage(data: data) {
+            Image(uiImage: img)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: 120, height: 120)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        } else {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.quaternary)
+                .frame(width: 120, height: 120)
+                .overlay {
+                    Image(systemName: "music.note")
+                        .font(.largeTitle)
+                        .foregroundStyle(.tertiary)
+                }
+        }
+    }
+}
+
+// MARK: - Widget Definition
+
+struct SonosWidget: Widget {
+    let kind: String = "SonosWidget"
 
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: kind, intent: ConfigurationAppIntent.self, provider: Provider()) { entry in
-            TheWidgetEntryView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+        StaticConfiguration(kind: kind, provider: SonosProvider()) { entry in
+            Group {
+                if #available(iOSApplicationExtension 17.0, *) {
+                    SonosWidgetContainerView(entry: entry)
+                        .containerBackground(.fill.tertiary, for: .widget)
+                } else {
+                    SonosWidgetContainerView(entry: entry)
+                        .padding()
+                        .background()
+                }
+            }
+        }
+        .configurationDisplayName("Sonos Controller")
+        .description("Control your Sonos speakers and see what's playing.")
+        .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+struct SonosWidgetContainerView: View {
+    @Environment(\.widgetFamily) var family
+    let entry: SonosEntry
+
+    var body: some View {
+        switch family {
+        case .systemSmall:
+            SonosWidgetSmallView(entry: entry)
+        case .systemMedium:
+            SonosWidgetMediumView(entry: entry)
+        default:
+            SonosWidgetMediumView(entry: entry)
         }
     }
 }
 
-extension ConfigurationAppIntent {
-    fileprivate static var smiley: ConfigurationAppIntent {
-        let intent = ConfigurationAppIntent()
-        intent.favoriteEmoji = "😀"
-        return intent
-    }
-    
-    fileprivate static var starEyes: ConfigurationAppIntent {
-        let intent = ConfigurationAppIntent()
-        intent.favoriteEmoji = "🤩"
-        return intent
-    }
+// MARK: - Previews
+
+#Preview("Small", as: .systemSmall) {
+    SonosWidget()
+} timeline: {
+    SonosEntry.placeholder
 }
 
-#Preview(as: .systemSmall) {
-    TheWidget()
+#Preview("Medium", as: .systemMedium) {
+    SonosWidget()
 } timeline: {
-    SimpleEntry(date: .now, configuration: .smiley)
-    SimpleEntry(date: .now, configuration: .starEyes)
+    SonosEntry.placeholder
 }
