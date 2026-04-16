@@ -32,17 +32,12 @@ struct PlayerView: View {
         ZStack(alignment: .bottom) {
             NavigationStack {
                 speakersHomeView
+                    .background {
+                        blurredArtBackground.ignoresSafeArea()
+                    }
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbarBackground(.hidden, for: .navigationBar)
                     .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button {
-                                manager.showingQueue = true
-                                Task { await manager.loadQueue() }
-                            } label: {
-                                Image(systemName: "list.bullet")
-                            }
-                        }
                         ToolbarItem(placement: .principal) {
                             Text("Sonos").fontWeight(.semibold)
                         }
@@ -63,6 +58,7 @@ struct PlayerView: View {
                         QueueView(manager: manager)
                     }
             }
+            .scrollContentBackground(.hidden)
 
             if !manager.showFullPlayer {
                 miniPlayerBar
@@ -70,6 +66,21 @@ struct PlayerView: View {
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: manager.showFullPlayer)
+    }
+
+    private var blurredArtBackground: some View {
+        ZStack {
+            if let image = manager.albumArtImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .blur(radius: 80)
+                    .scaleEffect(1.5)
+                Color.black.opacity(0.6)
+            } else {
+                Color.black
+            }
+        }
     }
 
     // MARK: - Mini Player Bar
@@ -130,7 +141,7 @@ struct PlayerView: View {
     // MARK: - Speakers Home View
 
     private var speakersHomeView: some View {
-        ScrollView {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 20) {
                 Text("My Speakers")
                     .font(.title2.bold())
@@ -177,6 +188,7 @@ struct PlayerView: View {
         let isCurrentGroup = group.coordinator.id == manager.selectedSpeaker?.id
                 || group.coordinator.groupId == manager.selectedSpeaker?.groupId
         let accent = manager.groupAlbumColors[group.id] ?? .secondary
+        let artImage = manager.groupAlbumImages[group.id]
 
         return Button {
             if !isCurrentGroup {
@@ -184,42 +196,51 @@ struct PlayerView: View {
             }
             manager.showFullPlayer = true
         } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    Image(systemName: visibleMembers.count > 1 ? "hifispeaker.2.fill" : "hifispeaker.fill")
-                        .font(.title2)
-                        .foregroundStyle(isCurrentGroup ? accent : .secondary)
-                        .frame(width: 36)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(visibleMembers.map(\.name).joined(separator: " + "))
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-
-                        if let track = group.trackInfo, track.title != "Unknown" {
-                            Text("\(track.title) — \(track.artist)")
-                                .font(.caption)
+            HStack(spacing: 12) {
+                if let img = artImage {
+                    Image(uiImage: img)
+                        .resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(.white.opacity(0.1))
+                        .frame(width: 44, height: 44)
+                        .overlay {
+                            Image(systemName: "hifispeaker.fill")
+                                .font(.body)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        } else {
-                            Text("Idle")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
                         }
-                    }
+                }
 
-                    Spacer()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(visibleMembers.map(\.name).joined(separator: " + "))
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
 
-                    if group.transportState == .playing {
-                        Image(systemName: "waveform")
-                            .font(.caption)
-                            .foregroundStyle(accent)
-                            .symbolEffect(.variableColor.iterative, isActive: true)
-                    } else if group.transportState == .paused {
-                        Image(systemName: "pause.fill")
+                    if let track = group.trackInfo, track.title != "Unknown" {
+                        Text("\(track.title) — \(track.artist)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Idle")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
+                }
+
+                Spacer()
+
+                if group.transportState == .playing {
+                    Image(systemName: "waveform")
+                        .font(.caption)
+                        .foregroundStyle(accent)
+                        .symbolEffect(.variableColor.iterative, isActive: true)
+                } else if group.transportState == .paused {
+                    Image(systemName: "pause.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(14)
@@ -414,16 +435,13 @@ struct NowPlayingOverlay: View {
             progressView
                 .padding(.top, 16)
 
-            audioQualityBadge
-                .padding(.top, 6)
-
             playbackControls
                 .padding(.top, 20)
 
             volumeControl
                 .padding(.top, 20)
 
-            speakerButton
+            bottomActions
                 .padding(.top, 14)
 
             Spacer(minLength: 8)
@@ -461,6 +479,9 @@ struct NowPlayingOverlay: View {
         )
         .sheet(isPresented: $manager.showingSpeakerPicker) {
             SpeakerPickerView(manager: manager)
+        }
+        .sheet(isPresented: $manager.showingQueue) {
+            QueueView(manager: manager)
         }
     }
 
@@ -509,7 +530,7 @@ struct NowPlayingOverlay: View {
                 .shadow(color: .black.opacity(0.3), radius: 20, y: 10)
                 .overlay(alignment: .bottomLeading) {
                     if let source = manager.trackInfo?.source, source != .unknown {
-                        SourceBadgeView(source: source)
+                        SourceBadgeView(source: source, tintColor: manager.albumArtDominantColor)
                             .padding(10)
                     }
                 }
@@ -539,24 +560,46 @@ struct NowPlayingOverlay: View {
 
     private var progressView: some View {
         VStack(spacing: 4) {
-            Slider(
+            ThumblessSlider(
                 value: Binding(
                     get: { isScrubbing ? scrubPosition : manager.positionSeconds },
                     set: { scrubPosition = $0; isScrubbing = true }
                 ),
-                in: 0...max(manager.durationSeconds, 1)
+                range: 0...max(manager.durationSeconds, 1)
             ) { editing in
                 if !editing {
                     isScrubbing = false
                     Task { await manager.seekTo(scrubPosition) }
                 }
             }
-            .tint(.white)
 
             HStack {
                 Text(SonosTime.display(isScrubbing ? scrubPosition : manager.positionSeconds))
                     .monospacedDigit()
+
                 Spacer()
+
+                if let quality = manager.trackInfo?.audioQuality {
+                    HStack(spacing: 3) {
+                        Image(systemName: quality.iconName)
+                            .font(.system(size: 9, weight: .semibold))
+                        Text(quality.label)
+                            .font(.system(size: 9, weight: .semibold))
+                        if let sr = quality.sampleRate, let bd = quality.bitDepth {
+                            Text("·")
+                                .font(.system(size: 9))
+                            Text("\(bd)/\(sr / 1000)kHz")
+                                .font(.system(size: 9, weight: .medium))
+                        }
+                    }
+                    .foregroundStyle(.white.opacity(0.5))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(.white.opacity(0.08), in: Capsule())
+                }
+
+                Spacer()
+
                 Text(SonosTime.display(manager.durationSeconds))
                     .monospacedDigit()
             }
@@ -564,30 +607,6 @@ struct NowPlayingOverlay: View {
             .foregroundStyle(.white.opacity(0.5))
         }
         .padding(.horizontal, 32)
-    }
-
-    // MARK: - Audio Quality Badge
-
-    @ViewBuilder
-    private var audioQualityBadge: some View {
-        if let quality = manager.trackInfo?.audioQuality {
-            HStack(spacing: 4) {
-                Image(systemName: quality.iconName)
-                    .font(.system(size: 10, weight: .semibold))
-                Text(quality.label)
-                    .font(.system(size: 10, weight: .semibold))
-                if let sr = quality.sampleRate, let bd = quality.bitDepth {
-                    Text("·")
-                        .font(.system(size: 10))
-                    Text("\(bd)/\(sr / 1000)kHz")
-                        .font(.system(size: 10, weight: .medium))
-                }
-            }
-            .foregroundStyle(.white.opacity(0.6))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(.white.opacity(0.1), in: Capsule())
-        }
     }
 
     // MARK: - Playback Controls
@@ -610,61 +629,135 @@ struct NowPlayingOverlay: View {
 
     // MARK: - Volume
 
+    private var currentVolume: Int {
+        isDraggingVolume ? Int(volumeSliderValue) : manager.volume
+    }
+
     private var volumeControl: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "speaker.fill")
+        HStack(spacing: 10) {
+            Image(systemName: currentVolume == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.4))
+                .frame(width: 24, height: 28)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    let newVol = max(0, currentVolume - 2)
+                    Task { await manager.updateVolume(newVol) }
+                }
+                .onLongPressGesture {
+                    Task { await manager.updateVolume(0) }
+                }
 
-            Slider(
+            ThumblessSlider(
                 value: Binding(
                     get: { isDraggingVolume ? volumeSliderValue : Double(manager.volume) },
                     set: { volumeSliderValue = $0; isDraggingVolume = true }
                 ),
-                in: 0...100, step: 1
+                range: 0...100,
+                tintColor: .white.opacity(0.8)
             ) { editing in
                 if !editing {
                     isDraggingVolume = false
                     Task { await manager.updateVolume(Int(volumeSliderValue)) }
                 }
             }
-            .tint(.white.opacity(0.8))
 
-            Image(systemName: "speaker.wave.3.fill")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.4))
+            Button {
+                let newVol = min(100, currentVolume + 2)
+                Task { await manager.updateVolume(newVol) }
+            } label: {
+                Text("\(currentVolume)")
+                    .font(.caption2.monospacedDigit().weight(.medium))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .frame(width: 24, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 32)
     }
 
-    // MARK: - Speaker Button (AirPlay-style)
+    // MARK: - Bottom Actions (Speaker + Queue)
 
-    private var speakerButton: some View {
-        Button {
-            manager.showingSpeakerPicker = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "hifispeaker.fill")
-                    .font(.subheadline)
-                Text(speakerLabel)
-                    .font(.subheadline.weight(.medium))
-                if manager.currentGroupMembers.count > 1 {
-                    Text("+ \(manager.currentGroupMembers.count - 1)")
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.white.opacity(0.2), in: Capsule())
+    private let bottomButtonHeight: CGFloat = 38
+
+    private var bottomActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                manager.showingSpeakerPicker = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "hifispeaker.fill")
+                        .font(.subheadline)
+                    Text(manager.selectedSpeaker?.name ?? "Select Speaker")
+                        .font(.subheadline.weight(.medium))
+                    if manager.currentGroupMembers.count > 1 {
+                        Text("+ \(manager.currentGroupMembers.count - 1)")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.white.opacity(0.2), in: Capsule())
+                    }
                 }
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(height: bottomButtonHeight)
+                .padding(.horizontal, 16)
+                .background(.white.opacity(0.1), in: Capsule())
             }
-            .foregroundStyle(.white.opacity(0.7))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.white.opacity(0.1), in: Capsule())
-        }
-        .buttonStyle(.plain)
-    }
+            .buttonStyle(.plain)
 
-    private var speakerLabel: String {
-        manager.selectedSpeaker?.name ?? "Select Speaker"
+            Button {
+                manager.showingQueue = true
+                Task { await manager.loadQueue() }
+            } label: {
+                Image(systemName: "list.bullet")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: bottomButtonHeight, height: bottomButtonHeight)
+                    .background(.white.opacity(0.1), in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: - Thumbless Slider
+
+private struct ThumblessSlider: View {
+    @Binding var value: Double
+    var range: ClosedRange<Double>
+    var tintColor: Color = .white
+    var trackHeight: CGFloat = 5
+    var onEditingChanged: (Bool) -> Void = { _ in }
+
+    var body: some View {
+        GeometryReader { geo in
+            let span = range.upperBound - range.lowerBound
+            let progress = span > 0 ? min(max((value - range.lowerBound) / span, 0), 1) : 0
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(tintColor.opacity(0.2))
+                    .frame(height: trackHeight)
+
+                Capsule()
+                    .fill(tintColor)
+                    .frame(width: max(0, geo.size.width * progress), height: trackHeight)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        let pct = min(max(0, gesture.location.x / geo.size.width), 1)
+                        value = range.lowerBound + pct * span
+                        onEditingChanged(true)
+                    }
+                    .onEnded { _ in
+                        onEditingChanged(false)
+                    }
+            )
+        }
+        .frame(height: 28)
     }
 }

@@ -18,8 +18,25 @@ struct SearchView: View {
                     searchResultsContent
                 }
             }
+            .background {
+                ZStack {
+                    if let image = manager.albumArtImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .blur(radius: 80)
+                            .scaleEffect(1.5)
+                        Color.black.opacity(0.6)
+                    } else {
+                        Color.black
+                    }
+                }
+                .ignoresSafeArea()
+            }
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.large)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .scrollContentBackground(.hidden)
             .preferredColorScheme(.dark)
             .searchable(text: $searchText, prompt: "Songs, artists, albums…")
             .onChange(of: searchText) { _, newValue in

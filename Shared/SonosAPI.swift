@@ -58,6 +58,9 @@ enum SonosAPI {
         var albumArtURL: String?
         var audioQuality: AudioQuality?
 
+        let decodedURI = decodeXMLEntities(trackURI)
+        let source = PlaybackSource.from(trackURI: decodedURI)
+
         if let raw = extractTag("TrackMetaData", from: xml) {
             let meta = decodeXMLEntities(raw)
             title = decodeXMLEntities(extractTag("dc:title", from: meta) ?? "Unknown")
@@ -70,10 +73,8 @@ enum SonosAPI {
                 }
                 albumArtURL = decoded.hasPrefix("http") ? decoded : "http://\(ip):\(port)\(decoded)"
             }
-            audioQuality = parseAudioQuality(from: meta)
+            audioQuality = parseAudioQuality(from: meta, source: source)
         }
-
-        let source = PlaybackSource.from(trackURI: decodeXMLEntities(trackURI))
 
         return TrackInfo(title: title, artist: artist, album: album,
                          albumArtURL: albumArtURL, duration: duration, position: position,
@@ -522,7 +523,7 @@ enum SonosAPI {
 
     // MARK: - Audio Quality Parsing
 
-    private nonisolated static func parseAudioQuality(from meta: String) -> AudioQuality? {
+    private nonisolated static func parseAudioQuality(from meta: String, source: PlaybackSource) -> AudioQuality? {
         let resPat = "<res\\s([^>]*)>"
         guard let regex = try? NSRegularExpression(pattern: resPat, options: .dotMatchesLineSeparators),
               let match = regex.firstMatch(in: meta, range: NSRange(meta.startIndex..., in: meta)),
@@ -533,7 +534,10 @@ enum SonosAPI {
         let sr = attr("sampleFrequency", in: attrs)
         let bd = attr("bitsPerSample", in: attrs)
         let ch = attr("nrAudioChannels", in: attrs)
-        return AudioQuality.from(protocolInfo: proto, sampleRate: sr, bitDepth: bd, channels: ch)
+        let streamContent = extractTag("r:streamContent", from: meta) ?? ""
+
+        return AudioQuality.from(protocolInfo: proto, sampleRate: sr, bitDepth: bd,
+                                 channels: ch, streamContent: streamContent, source: source)
     }
 
     // MARK: - XML Escape

@@ -21,6 +21,7 @@ final class SonosManager {
     var showingSpeakerPicker = false
     var showFullPlayer = true
     var groupAlbumColors: [String: Color] = [:]
+    var groupAlbumImages: [String: UIImage] = [:]
 
     var positionSeconds: TimeInterval = 0
     var durationSeconds: TimeInterval = 0
@@ -343,24 +344,28 @@ final class SonosManager {
             let key = status.id
             if status.coordinator.id == selectedSpeaker?.id {
                 if let color = albumArtDominantColor { groupAlbumColors[key] = color }
+                if let img = albumArtImage { groupAlbumImages[key] = img }
                 continue
             }
             guard let urlStr = status.trackInfo?.albumArtURL,
                   let url = URL(string: urlStr) else {
                 groupAlbumColors[key] = nil
+                groupAlbumImages[key] = nil
                 continue
             }
-            if groupAlbumColors[key] != nil,
+            if groupAlbumImages[key] != nil,
                status.trackInfo?.title == groupStatuses.first(where: { $0.id == key })?.trackInfo?.title {
                 continue
             }
             do {
                 let (data, _) = try await Self.albumArtSession.data(from: url)
-                if let image = UIImage(data: data), let color = image.dominantColor() {
-                    groupAlbumColors[key] = color
+                if let image = UIImage(data: data) {
+                    groupAlbumImages[key] = image
+                    groupAlbumColors[key] = image.dominantColor()
                 }
             } catch {
                 groupAlbumColors[key] = nil
+                groupAlbumImages[key] = nil
             }
         }
     }
@@ -518,9 +523,9 @@ final class SonosManager {
                 let image = UIImage(data: data)
                 albumArtImage = image
                 albumArtDominantColor = image?.dominantColor()
-                if let color = albumArtDominantColor,
-                   let gid = selectedSpeaker?.groupId ?? selectedSpeaker?.id {
-                    groupAlbumColors[gid] = color
+                if let gid = selectedSpeaker?.groupId ?? selectedSpeaker?.id {
+                    if let color = albumArtDominantColor { groupAlbumColors[gid] = color }
+                    if let img = image { groupAlbumImages[gid] = img }
                 }
                 SharedStorage.albumArtData = data
                 SharedStorage.cachedDominantColorHex = image?.dominantColorHex()

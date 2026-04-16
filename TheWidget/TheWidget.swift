@@ -226,8 +226,8 @@ struct SonosWidgetMediumView: View {
                             Image(systemName: "backward.fill").font(.callout)
                         }.buttonStyle(.plain)
                         Button(intent: PlayPauseIntent()) {
-                            Image(systemName: entry.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                                .font(.title2)
+                            Image(systemName: entry.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.title3)
                         }.buttonStyle(.plain)
                         Button(intent: NextTrackIntent()) {
                             Image(systemName: "forward.fill").font(.callout)

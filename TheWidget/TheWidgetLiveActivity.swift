@@ -25,7 +25,7 @@ struct SonosLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Button(intent: PlayPauseIntent()) {
-                        Image(systemName: context.state.isPlaying ? "pause.fill" : "play.fill")
+                        Image(systemName: context.state.isPlaying ? "pause" : "play")
                     }
                     .buttonStyle(.plain)
                 }
@@ -41,7 +41,7 @@ struct SonosLiveActivity: Widget {
                                 Image(systemName: "backward.fill")
                             }.buttonStyle(.plain)
                             Button(intent: PlayPauseIntent()) {
-                                Image(systemName: context.state.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                                Image(systemName: context.state.isPlaying ? "pause.circle" : "play.circle")
                                     .font(.title2)
                             }.buttonStyle(.plain)
                             Button(intent: NextTrackIntent()) {
@@ -57,7 +57,7 @@ struct SonosLiveActivity: Widget {
                     .font(.caption2)
                     .lineLimit(1)
             } minimal: {
-                Image(systemName: context.state.isPlaying ? "pause.fill" : "play.fill")
+                Image(systemName: context.state.isPlaying ? "pause" : "play")
                     .font(.caption2)
             }
         }
@@ -93,7 +93,7 @@ struct SonosLiveActivity: Widget {
                     Image(systemName: "backward.fill")
                 }.buttonStyle(.plain)
                 Button(intent: PlayPauseIntent()) {
-                    Image(systemName: context.state.isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: context.state.isPlaying ? "pause" : "play")
                         .font(.title3)
                 }.buttonStyle(.plain)
                 Button(intent: NextTrackIntent()) {

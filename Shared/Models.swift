@@ -166,9 +166,8 @@ struct AudioQuality: Codable, Equatable, Sendable {
             || c.contains("aiff") || c.contains("pcm") {
             return true
         }
-        // MP4/AAC container with explicit bitDepth+sampleRate = ALAC lossless
         if (c == "aac" || c.contains("mp4") || c.contains("m4a"))
-            && bitDepth != nil && sampleRate != nil {
+            && (bitDepth != nil || sampleRate != nil) {
             return true
         }
         return false
@@ -179,16 +178,56 @@ struct AudioQuality: Codable, Equatable, Sendable {
         return (sampleRate ?? 0) > 48000 || ((sampleRate ?? 0) >= 48000 && (bitDepth ?? 0) >= 24)
     }
 
-    nonisolated static func from(protocolInfo: String, sampleRate: String?, bitDepth: String?, channels: String?) -> AudioQuality? {
+    nonisolated static func from(protocolInfo: String, sampleRate: String?, bitDepth: String?,
+                                 channels: String?, streamContent: String = "",
+                                 source: PlaybackSource = .unknown) -> AudioQuality? {
         let parts = protocolInfo.split(separator: ":").map(String.init)
         guard parts.count >= 3 else { return nil }
         let mime = parts[2].lowercased()
+        let sc = streamContent.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
 
+        var parsedSR = sampleRate
+        var parsedBD = bitDepth
+
+        // Parse "bitDepth/sampleRateKHz" from streamContent (e.g. "FLAC 16/44.1", "ALAC 24/96")
+        if let regex = try? NSRegularExpression(pattern: "(\\d+)/(\\d+\\.?\\d*)"),
+           let match = regex.firstMatch(in: streamContent, range: NSRange(streamContent.startIndex..., in: streamContent)) {
+            if parsedBD == nil, let r = Range(match.range(at: 1), in: streamContent) {
+                parsedBD = String(streamContent[r])
+            }
+            if parsedSR == nil, let r = Range(match.range(at: 2), in: streamContent) {
+                let srStr = String(streamContent[r])
+                if let kHz = Double(srStr), kHz < 1000 {
+                    parsedSR = String(Int(kHz * 1000))
+                } else {
+                    parsedSR = srStr
+                }
+            }
+        }
+
+        // Determine codec — prefer streamContent, then MIME, then source-based heuristic
         let codec: String
-        if mime.contains("flac") { codec = "FLAC" }
+        if sc.contains("flac") { codec = "FLAC" }
+        else if sc.contains("alac") { codec = "ALAC" }
+        else if sc.contains("pcm") { codec = "PCM" }
+        else if sc.contains("aiff") { codec = "AIFF" }
+        else if sc.contains("wav") { codec = "WAV" }
+        else if sc.contains("dolby") || sc.contains("atmos") || sc.contains("ac3") || sc.contains("ec3") { codec = "Atmos" }
+        else if sc.contains("ogg") { codec = "OGG" }
+        else if mime.contains("flac") { codec = "FLAC" }
         else if mime.contains("wav") || mime.contains("wave") { codec = "WAV" }
         else if mime.contains("aiff") { codec = "AIFF" }
-        else if mime.contains("mp4") || mime.contains("m4a") { codec = "AAC" }
+        else if mime.contains("mp4") || mime.contains("m4a") {
+            if parsedBD != nil {
+                codec = "ALAC"
+            } else if parsedSR != nil {
+                codec = "ALAC"
+            } else {
+                // UPnP doesn't expose codec detail for streaming services —
+                // return nil so the UI hides the badge rather than guessing.
+                return nil
+            }
+        }
         else if mime.contains("mp3") || mime.contains("mpeg") { codec = "MP3" }
         else if mime.contains("ogg") { codec = "OGG" }
         else if mime.contains("wma") { codec = "WMA" }
@@ -196,8 +235,8 @@ struct AudioQuality: Codable, Equatable, Sendable {
 
         return AudioQuality(
             codec: codec,
-            sampleRate: sampleRate.flatMap(Int.init),
-            bitDepth: bitDepth.flatMap(Int.init),
+            sampleRate: parsedSR.flatMap(Int.init),
+            bitDepth: parsedBD.flatMap(Int.init),
             channels: channels.flatMap(Int.init)
         )
     }
