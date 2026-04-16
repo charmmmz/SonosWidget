@@ -4,6 +4,7 @@ struct PlayerView: View {
     @Bindable var manager: SonosManager
     @State private var newSpeakerIP = ""
     @State private var showManualEntry = false
+    @State private var isConnectingSonos = false
 
     var body: some View {
         Group {
@@ -48,6 +49,34 @@ struct PlayerView: View {
                                 }
                                 Button { manager.rescan() } label: {
                                     Label("Rescan Network", systemImage: "arrow.clockwise")
+                                }
+
+                                Divider()
+
+                                if SonosAuth.shared.isLoggedIn {
+                                    Button(role: .destructive) {
+                                        SonosAuth.shared.logout()
+                                    } label: {
+                                        Label("Disconnect Sonos Account", systemImage: "person.crop.circle.badge.minus")
+                                    }
+                                } else {
+                                    Button {
+                                        isConnectingSonos = true
+                                        Task {
+                                            let window = UIApplication.shared.connectedScenes
+                                                .compactMap { $0 as? UIWindowScene }
+                                                .first?.windows.first
+                                            await SonosAuth.shared.startLogin(from: window)
+                                            if SonosAuth.shared.isLoggedIn {
+                                                await manager.resolveCloudGroupId()
+                                                await manager.refreshState()
+                                            }
+                                            isConnectingSonos = false
+                                        }
+                                    } label: {
+                                        Label("Connect Sonos Account", systemImage: "person.crop.circle.badge.plus")
+                                    }
+                                    .disabled(isConnectingSonos)
                                 }
                             } label: {
                                 Image(systemName: "ellipsis.circle")

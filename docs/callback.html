@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SonosWidget — Redirecting</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; display: flex;
+               justify-content: center; align-items: center; height: 100vh;
+               margin: 0; background: #111; color: #aaa; }
+    </style>
+</head>
+<body>
+    <p>Redirecting to SonosWidget…</p>
+    <script>
+        window.location.href = 'sonoswidget://callback' + window.location.search;
+    </script>
+</body>
+</html>

@@ -37,6 +37,9 @@ final class SonosManager {
     private var currentActivity: Activity<SonosActivityAttributes>?
     private var albumArtTask: Task<Void, Never>?
 
+    /// Cloud API group ID resolved for the currently selected speaker.
+    private var cloudGroupId: String?
+
     private static let albumArtSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 5
@@ -128,8 +131,10 @@ final class SonosManager {
         albumArtImage = nil
         trackInfo = nil
         consecutiveFailures = 0
+        cloudGroupId = nil
 
         await refreshState()
+        await resolveCloudGroupId()
     }
 
     func rescan() {
@@ -399,6 +404,7 @@ final class SonosManager {
             connectionState = .connected
             errorMessage = nil
 
+            await enrichAudioQualityFromCloud()
             updateSharedCache()
             await loadAlbumArt()
             if queueLoaded { await loadQueue() }
@@ -412,6 +418,62 @@ final class SonosManager {
             } else {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    // MARK: - Sonos Cloud API
+
+    /// Resolve the cloud group ID by matching the selected speaker's RINCON UUID to cloud players.
+    func resolveCloudGroupId() async {
+        guard let speaker = selectedSpeaker,
+              let token = await SonosAuth.shared.validAccessToken() else { return }
+
+        do {
+            if SonosAuth.shared.householdId == nil {
+                let households = try await SonosCloudAPI.getHouseholds(token: token)
+                SonosAuth.shared.householdId = households.first?.id
+            }
+            guard let householdId = SonosAuth.shared.householdId else { return }
+
+            let response = try await SonosCloudAPI.getGroups(token: token, householdId: householdId)
+            let rincon = speaker.id
+
+            cloudGroupId = response.groups.first(where: { group in
+                group.playerIds.contains(where: { $0.contains(rincon) || rincon.contains($0) })
+            })?.id
+
+            if cloudGroupId == nil {
+                let speakerIP = speaker.ipAddress
+                cloudGroupId = response.groups.first(where: { group in
+                    response.players.filter { group.playerIds.contains($0.id) }
+                        .contains(where: { $0.name == speaker.name })
+                })?.id
+                if cloudGroupId == nil {
+                    print("[SonosCloud] Could not match speaker \(speaker.name) (ip: \(speakerIP), id: \(rincon)) to any cloud group")
+                }
+            }
+        } catch SonosCloudError.unauthorized {
+            _ = await SonosAuth.shared.refreshAccessToken()
+        } catch {
+            print("[SonosCloud] resolveCloudGroupId error: \(error)")
+        }
+    }
+
+    /// If UPnP didn't provide audio quality, fetch it from the Sonos Cloud API.
+    private func enrichAudioQualityFromCloud() async {
+        guard trackInfo?.audioQuality == nil,
+              let groupId = cloudGroupId,
+              let token = await SonosAuth.shared.validAccessToken() else { return }
+
+        do {
+            let metadata = try await SonosCloudAPI.getPlaybackMetadata(token: token, groupId: groupId)
+            if let quality = metadata.currentItem?.track?.quality {
+                trackInfo?.audioQuality = AudioQuality.from(cloudQuality: quality)
+            }
+        } catch SonosCloudError.unauthorized {
+            _ = await SonosAuth.shared.refreshAccessToken()
+        } catch {
+            print("[SonosCloud] playbackMetadata error: \(error)")
         }
     }
 

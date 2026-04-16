@@ -18,6 +18,10 @@ struct SonosWidgetApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onOpenURL { url in
+                    guard url.scheme == "sonoswidget" else { return }
+                    Task { await SonosAuth.shared.handleCallback(url: url) }
+                }
         }
     }
 }

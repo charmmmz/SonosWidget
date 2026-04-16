@@ -240,6 +240,32 @@ struct AudioQuality: Codable, Equatable, Sendable {
             channels: channels.flatMap(Int.init)
         )
     }
+
+    /// Map Sonos Cloud API track quality to our local model.
+    nonisolated static func from(cloudQuality q: SonosCloudAPI.CloudTrackQuality) -> AudioQuality? {
+        guard let codec = q.codec, !codec.isEmpty else { return nil }
+
+        let mappedCodec: String
+        let c = codec.lowercased()
+        if c.contains("dolby") || c.contains("atmos") || c.contains("ac3") || c.contains("ec3") {
+            mappedCodec = "Atmos"
+        } else if q.immersive == true {
+            mappedCodec = "Atmos"
+        } else if q.lossless == true {
+            if c.contains("flac") { mappedCodec = "FLAC" }
+            else if c.contains("alac") { mappedCodec = "ALAC" }
+            else { mappedCodec = codec.uppercased() }
+        } else {
+            mappedCodec = codec.uppercased()
+        }
+
+        return AudioQuality(
+            codec: mappedCodec,
+            sampleRate: q.sampleRate,
+            bitDepth: q.bitDepth,
+            channels: nil
+        )
+    }
 }
 
 // MARK: - Speaker Group Status
