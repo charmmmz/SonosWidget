@@ -6,6 +6,8 @@ import ActivityKit
 @Observable
 final class SonosManager {
     var speakers: [SonosPlayer] = []
+    var allSpeakers: [SonosPlayer] = []
+    var groupStatuses: [SpeakerGroupStatus] = []
     var selectedSpeaker: SonosPlayer?
     var trackInfo: TrackInfo?
     var transportState: TransportState = .stopped
@@ -16,6 +18,7 @@ final class SonosManager {
     var albumArtDominantColor: Color?
     var showingAddSpeaker = false
     var showingQueue = false
+    var showingSpeakerPicker = false
 
     var positionSeconds: TimeInterval = 0
     var durationSeconds: TimeInterval = 0
@@ -51,15 +54,22 @@ final class SonosManager {
     // MARK: - Lifecycle
 
     func loadSavedState() {
-        speakers = SharedStorage.savedSpeakers.filter(\.isCoordinator)
+        allSpeakers = SharedStorage.savedSpeakers
+        speakers = allSpeakers.filter(\.isCoordinator)
         if let ip = SharedStorage.speakerIP,
            let speaker = speakers.first(where: { $0.ipAddress == ip }) {
             selectedSpeaker = speaker
-            Task { await refreshState() }
+            Task {
+                await refreshState()
+                await refreshAllGroupStatuses()
+            }
         } else if let first = speakers.first {
             selectedSpeaker = first
             syncSpeakerToStorage(first)
-            Task { await refreshState() }
+            Task {
+                await refreshState()
+                await refreshAllGroupStatuses()
+            }
         } else {
             discovery.startScan()
         }
@@ -71,10 +81,12 @@ final class SonosManager {
         isLoading = true
         errorMessage = nil
         discovery.stopScan()
-        speakers = discovery.discoveredSpeakers
-        SharedStorage.savedSpeakers = speakers
+        allSpeakers = discovery.discoveredSpeakers
+        speakers = allSpeakers.filter(\.isCoordinator)
+        SharedStorage.savedSpeakers = allSpeakers
         let target = speaker.isCoordinator ? speaker : speakers.first(where: { $0.groupId == speaker.groupId && $0.isCoordinator }) ?? speaker
         await selectSpeaker(target)
+        await refreshAllGroupStatuses()
         isLoading = false
     }
 
@@ -90,11 +102,12 @@ final class SonosManager {
             }
             if discovered.isEmpty {
                 let name = try await SonosAPI.getDeviceName(ip: trimmed)
-                speakers = [SonosPlayer(id: UUID().uuidString, name: name, ipAddress: trimmed, isCoordinator: true)]
+                allSpeakers = [SonosPlayer(id: UUID().uuidString, name: name, ipAddress: trimmed, isCoordinator: true)]
             } else {
-                speakers = discovered.filter(\.isCoordinator)
+                allSpeakers = discovered
             }
-            SharedStorage.savedSpeakers = speakers
+            speakers = allSpeakers.filter(\.isCoordinator)
+            SharedStorage.savedSpeakers = allSpeakers
             let speaker = speakers.first(where: { $0.isCoordinator }) ?? speakers.first
             if let speaker { await selectSpeaker(speaker) }
         } catch {
@@ -173,11 +186,151 @@ final class SonosManager {
         } catch { errorMessage = error.localizedDescription }
     }
 
+    var queueUpdateID: String = "0"
+    private var queueLoaded = false
+
     // MARK: - Queue
 
     func loadQueue() async {
         guard let ip = playbackIP else { return }
-        queue = (try? await SonosAPI.getQueue(ip: ip)) ?? []
+        do {
+            let result = try await SonosAPI.getQueue(ip: ip)
+            queue = result.items
+            queueUpdateID = result.updateID
+            queueLoaded = true
+        } catch {
+            if queue.isEmpty { errorMessage = error.localizedDescription }
+        }
+    }
+
+    func deleteFromQueue(item: QueueItem) async {
+        guard let ip = playbackIP else { return }
+        do {
+            try await SonosAPI.removeTrackFromQueue(ip: ip, objectID: item.objectID, updateID: queueUpdateID)
+            await loadQueue()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func moveQueueItem(from source: IndexSet, to destination: Int) {
+        guard let ip = playbackIP else { return }
+        guard let fromIndex = source.first else { return }
+        let sonosFrom = fromIndex + 1
+        let sonosDest = destination > fromIndex ? destination + 1 : destination + 1
+        queue.move(fromOffsets: source, toOffset: destination)
+
+        let capturedUpdateID = queueUpdateID
+        Task {
+            do {
+                try await SonosAPI.reorderTracksInQueue(ip: ip, startIndex: sonosFrom,
+                                                         numTracks: 1, insertBefore: sonosDest,
+                                                         updateID: capturedUpdateID)
+                await loadQueue()
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    func playNext(uri: String, metadata: String) async {
+        guard let ip = playbackIP else { return }
+        do {
+            try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: metadata, asNext: true)
+            await loadQueue()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func playTrackInQueue(_ item: QueueItem) async {
+        guard let ip = playbackIP else { return }
+        do {
+            try await SonosAPI.seekToTrack(ip: ip, trackNumber: item.trackNumber)
+            try await SonosAPI.play(ip: ip)
+            try? await Task.sleep(for: .milliseconds(300))
+            await refreshState()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    // MARK: - Speaker Grouping
+
+    var currentGroupMembers: [SonosPlayer] {
+        guard let selected = selectedSpeaker else { return [] }
+        let groupId = selected.groupId ?? selected.id
+        return allSpeakers.filter { $0.groupId == groupId }
+    }
+
+    func addSpeakerToGroup(_ speaker: SonosPlayer) async {
+        guard let coordinator = selectedSpeaker else { return }
+        let coordUUID = coordinator.id
+        do {
+            try await SonosAPI.joinGroup(speakerIP: speaker.ipAddress, coordinatorUUID: coordUUID)
+            try? await Task.sleep(for: .milliseconds(500))
+            await reloadTopology()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func removeSpeakerFromGroup(_ speaker: SonosPlayer) async {
+        do {
+            try await SonosAPI.leaveGroup(speakerIP: speaker.ipAddress)
+            try? await Task.sleep(for: .milliseconds(500))
+            await reloadTopology()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func transferPlayback(to speaker: SonosPlayer) async {
+        guard let current = selectedSpeaker, current.id != speaker.id else { return }
+        do {
+            try await SonosAPI.leaveGroup(speakerIP: speaker.ipAddress)
+            try? await Task.sleep(for: .milliseconds(300))
+            try await SonosAPI.joinGroup(speakerIP: current.ipAddress, coordinatorUUID: speaker.id)
+            try? await Task.sleep(for: .milliseconds(500))
+            await reloadTopology()
+            if let updated = speakers.first(where: { $0.id == speaker.id }) {
+                await selectSpeaker(updated)
+            }
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func refreshAllGroupStatuses() async {
+        guard let anyIP = allSpeakers.first?.ipAddress ?? selectedSpeaker?.ipAddress else { return }
+
+        do {
+            let fresh = try await SonosAPI.getZoneGroupState(ip: anyIP)
+            allSpeakers = fresh
+            speakers = fresh.filter(\.isCoordinator)
+            SharedStorage.savedSpeakers = fresh
+
+            var statuses: [SpeakerGroupStatus] = []
+            let coordinators = fresh.filter(\.isCoordinator)
+
+            for coord in coordinators {
+                let members = fresh.filter { $0.groupId == coord.groupId }
+                do {
+                    async let t = SonosAPI.getTransportInfo(ip: coord.ipAddress)
+                    async let p = SonosAPI.getPositionInfo(ip: coord.ipAddress)
+                    let state = try await t
+                    let track = try await p
+                    statuses.append(SpeakerGroupStatus(
+                        id: coord.groupId ?? coord.id,
+                        coordinator: coord, members: members,
+                        trackInfo: track, transportState: state
+                    ))
+                } catch {
+                    statuses.append(SpeakerGroupStatus(
+                        id: coord.groupId ?? coord.id,
+                        coordinator: coord, members: members,
+                        trackInfo: nil, transportState: .unknown
+                    ))
+                }
+            }
+            groupStatuses = statuses
+        } catch { /* keep existing data */ }
+    }
+
+    private func reloadTopology() async {
+        guard let anyIP = allSpeakers.first?.ipAddress ?? selectedSpeaker?.ipAddress else { return }
+        if let fresh = try? await SonosAPI.getZoneGroupState(ip: anyIP) {
+            allSpeakers = fresh
+            speakers = fresh.filter(\.isCoordinator)
+            SharedStorage.savedSpeakers = fresh
+        }
+        await refreshAllGroupStatuses()
     }
 
     // MARK: - State Refresh
@@ -201,6 +354,7 @@ final class SonosManager {
 
             updateSharedCache()
             await loadAlbumArt()
+            if queueLoaded { await loadQueue() }
             managePositionTimer()
             manageLiveActivity()
         } catch {
