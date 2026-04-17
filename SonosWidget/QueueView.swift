@@ -2,6 +2,90 @@ import SwiftUI
 
 struct QueueView: View {
     @Bindable var manager: SonosManager
+    /// When false the NavigationStack chrome is omitted — used for the landscape inline panel.
+    var showNavigation: Bool = true
+
+    var body: some View {
+        if showNavigation {
+            NavigationStack {
+                queueContent
+                    .navigationTitle("Queue")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+        } else {
+            queueContent
+        }
+    }
+
+    // MARK: - Core content (shared between sheet and landscape inline)
+
+    var queueContent: some View {
+        Group {
+            if manager.queue.isEmpty {
+                ContentUnavailableView("Queue is empty",
+                                       systemImage: "music.note.list",
+                                       description: Text("Start playing music on your Sonos speaker."))
+            } else {
+                ScrollViewReader { proxy in
+                    List {
+                        ForEach(manager.queue) { item in
+                            let isNowPlaying = item.id == nowPlayingID
+
+                            queueRow(item, isNowPlaying: isNowPlaying)
+                                .id(item.id)
+                                // Make row background transparent when embedded so the
+                                // blurred album-art background shows through.
+                                .listRowBackground(
+                                    showNavigation ? nil : Color.white.opacity(isNowPlaying ? 0.08 : 0)
+                                )
+                                .swipeActions(edge: .trailing, allowsFullSwipe: !isNowPlaying) {
+                                    if !isNowPlaying {
+                                        Button(role: .destructive) {
+                                            Task { await manager.deleteFromQueue(item: item) }
+                                        } label: {
+                                            Image(systemName: "trash")
+                                        }
+                                    }
+                                }
+                                .swipeActions(edge: .leading, allowsFullSwipe: !isNowPlaying) {
+                                    if !isNowPlaying {
+                                        Button {
+                                            Task { await manager.playQueueItemNext(item) }
+                                        } label: {
+                                            Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                                        }
+                                        .tint(.blue)
+                                    }
+                                }
+                                .deleteDisabled(isNowPlaying)
+                        }
+                        .onMove { source, destination in
+                            manager.moveQueueItem(from: source, to: destination)
+                        }
+                    }
+                    .listStyle(.plain)
+                    // Hide List's own background when embedded so the blurred art shows through.
+                    .scrollContentBackground(showNavigation ? .automatic : .hidden)
+                    .onAppear {
+                        if let id = nowPlayingID {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                withAnimation { proxy.scrollTo(id, anchor: .center) }
+                            }
+                        }
+                    }
+                    .onChange(of: nowPlayingID) { _, newID in
+                        if let id = newID {
+                            withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
 
     private var nowPlayingID: String? {
         manager.queue.first(where: {
@@ -9,65 +93,7 @@ struct QueueView: View {
         })?.id
     }
 
-    var body: some View {
-        NavigationStack {
-            Group {
-                if manager.queue.isEmpty {
-                    ContentUnavailableView("Queue is empty",
-                                           systemImage: "music.note.list",
-                                           description: Text("Start playing music on your Sonos speaker."))
-                } else {
-                    ScrollViewReader { proxy in
-                        List {
-                            ForEach(manager.queue) { item in
-                                let isNowPlaying = item.id == nowPlayingID
-
-                                queueRow(item, isNowPlaying: isNowPlaying)
-                                    .id(item.id)
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: !isNowPlaying) {
-                                        if !isNowPlaying {
-                                            Button(role: .destructive) {
-                                                Task { await manager.deleteFromQueue(item: item) }
-                                            } label: {
-                                                Image(systemName: "trash")
-                                            }
-                                        }
-                                    }
-                                    .swipeActions(edge: .leading, allowsFullSwipe: !isNowPlaying) {
-                                        if !isNowPlaying {
-                                            Button {
-                                                Task { await manager.playQueueItemNext(item) }
-                                            } label: {
-                                                Image(systemName: "text.line.first.and.arrowtriangle.forward")
-                                            }
-                                            .tint(.blue)
-                                        }
-                                    }
-                                    .deleteDisabled(isNowPlaying)
-                            }
-                            .onMove { source, destination in
-                                manager.moveQueueItem(from: source, to: destination)
-                            }
-                        }
-                        .listStyle(.plain)
-                        .onAppear {
-                            if let id = nowPlayingID {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                    withAnimation {
-                                        proxy.scrollTo(id, anchor: .center)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Queue")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    private func queueRow(_ item: QueueItem, isNowPlaying: Bool) -> some View {
+    func queueRow(_ item: QueueItem, isNowPlaying: Bool) -> some View {
         let accent = manager.albumArtDominantColor ?? .accentColor
 
         return HStack(spacing: 12) {
@@ -104,7 +130,8 @@ struct QueueView: View {
 
             Spacer()
         }
-        .scaleEffect(isNowPlaying ? 1.06 : 1.0, anchor: .leading)
+        .scaleEffect(isNowPlaying ? 1.03 : 1.0, anchor: .leading)
+        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: isNowPlaying)
         .contentShape(Rectangle())
         .onTapGesture {
             Task { await manager.playTrackInQueue(item) }

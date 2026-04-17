@@ -20,6 +20,8 @@ final class SonosManager {
     var showingQueue = false
     var showingSpeakerPicker = false
     var showFullPlayer = true
+    var miniPlayerDragOffset: CGFloat = 0
+    var memberVolumes: [String: Int] = [:]
     var groupAlbumColors: [String: Color] = [:]
     var groupAlbumImages: [String: UIImage] = [:]
 
@@ -248,6 +250,60 @@ final class SonosManager {
         do {
             try await SonosAPI.setVolume(ip: ip, volume: newVolume)
             SharedStorage.cachedVolume = newVolume
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    func fetchMemberVolumes() async {
+        for player in currentGroupMembers {
+            if let vol = try? await SonosAPI.getVolume(ip: player.ipAddress) {
+                memberVolumes[player.ipAddress] = vol
+            }
+        }
+    }
+
+    func setMemberVolume(ip: String, volume: Int) async {
+        memberVolumes[ip] = volume
+        do {
+            try await SonosAPI.setVolume(ip: ip, volume: volume)
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    // MARK: - Per-Group Controls
+
+    func togglePlayPauseForGroup(groupID: String, coordinatorIP: String, currentState: TransportState) async {
+        guard let idx = groupStatuses.firstIndex(where: { $0.id == groupID }) else { return }
+        let prev = groupStatuses[idx].transportState
+        groupStatuses[idx].transportState = (prev == .playing) ? .paused : .playing
+        do {
+            if prev == .playing {
+                try await SonosAPI.pause(ip: coordinatorIP)
+            } else {
+                try await SonosAPI.play(ip: coordinatorIP)
+            }
+            try? await Task.sleep(for: .milliseconds(400))
+            if let state = try? await SonosAPI.getTransportInfo(ip: coordinatorIP) {
+                if let i = groupStatuses.firstIndex(where: { $0.id == groupID }) {
+                    groupStatuses[i].transportState = state
+                }
+            }
+        } catch {
+            if let i = groupStatuses.firstIndex(where: { $0.id == groupID }) {
+                groupStatuses[i].transportState = prev
+            }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setVolumeForGroup(groupID: String, coordinatorIP: String, newVolume: Int) async {
+        guard let idx = groupStatuses.firstIndex(where: { $0.id == groupID }) else { return }
+        groupStatuses[idx].volume = newVolume
+        do {
+            // Use GroupRenderingControl so all group members are adjusted proportionally.
+            try await SonosAPI.setGroupVolume(ip: coordinatorIP, volume: newVolume)
+            if coordinatorIP == volumeIP {
+                volume = newVolume
+                SharedStorage.cachedVolume = newVolume
+            }
         } catch { errorMessage = error.localizedDescription }
     }
 
@@ -552,18 +608,20 @@ final class SonosManager {
                 do {
                     async let t = SonosAPI.getTransportInfo(ip: coord.ipAddress)
                     async let p = SonosAPI.getPositionInfo(ip: coord.ipAddress)
+                    async let v = SonosAPI.getGroupVolume(ip: coord.ipAddress)
                     let state = try await t
                     let track = try await p
+                    let vol = (try? await v) ?? 0
                     statuses.append(SpeakerGroupStatus(
                         id: coord.groupId ?? coord.id,
                         coordinator: coord, members: members,
-                        trackInfo: track, transportState: state
+                        trackInfo: track, transportState: state, volume: vol
                     ))
                 } catch {
                     statuses.append(SpeakerGroupStatus(
                         id: coord.groupId ?? coord.id,
                         coordinator: coord, members: members,
-                        trackInfo: nil, transportState: .unknown
+                        trackInfo: nil, transportState: .unknown, volume: 0
                     ))
                 }
             }
@@ -767,11 +825,11 @@ final class SonosManager {
         // Start background keepalive when app goes to background (while Live Activity is running).
         NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            self?.startBackgroundKeepalive()
+            Task { @MainActor [weak self] in self?.startBackgroundKeepalive() }
         }
         NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            self?.stopBackgroundKeepalive()
+            Task { @MainActor [weak self] in self?.stopBackgroundKeepalive() }
         }
     }
 

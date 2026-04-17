@@ -278,6 +278,7 @@ struct SpeakerGroupStatus: Identifiable, Sendable {
     var members: [SonosPlayer]
     var trackInfo: TrackInfo?
     var transportState: TransportState
+    var volume: Int = 0
 }
 
 // MARK: - Queue

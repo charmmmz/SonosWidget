@@ -69,6 +69,7 @@ struct SonosLiveActivity: Widget {
                 ArtView(data: context.state.albumArtThumbnail, size: 20)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             } compactTrailing: {
+                // Compact/minimal regions are static-only — no animation supported by Apple.
                 Image(systemName: context.state.isPlaying ? "waveform" : "pause.fill")
                     .font(.system(size: context.state.isPlaying ? 12 : 10, weight: .medium))
                     .foregroundStyle(themeColor(from: context.state.dominantColorHex))
@@ -89,61 +90,84 @@ private struct LockScreenView: View {
     var body: some View {
         let accent = themeColor(from: context.state.dominantColorHex)
 
-        HStack(spacing: 14) {
-            ArtView(data: context.state.albumArtThumbnail, size: 60)
+        ZStack {
+            // ── Blurred album art background ──
+            if let data = context.state.albumArtThumbnail,
+               let img = UIImage(data: data) {
+                Image(uiImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .blur(radius: 40)
+                    .scaleEffect(1.5)
+                    .clipped()
+            }
+            // Dark overlay so text stays readable
+            LinearGradient(
+                colors: [.black.opacity(0.55), .black.opacity(0.75)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(context.state.trackTitle)
-                    .font(.subheadline.bold())
-                    .lineLimit(1)
+            // ── Content ──
+            HStack(spacing: 14) {
+                ArtView(data: context.state.albumArtThumbnail, size: 60)
 
-                Text(context.state.artist)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(context.state.trackTitle)
+                        .font(.subheadline.bold())
+                        .lineLimit(1)
 
-                HStack(spacing: 6) {
-                    Text("ON \(context.attributes.speakerName.uppercased())")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(accent.opacity(0.8))
+                    Text(context.state.artist)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
 
-                    if context.state.isPlaying {
-                        AnimatedWaveform(accent: accent, barCount: 4, height: 8)
+                    HStack(spacing: 6) {
+                        Text("ON \(context.attributes.speakerName.uppercased())")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(accent.opacity(0.8))
+
+                        if context.state.isPlaying {
+                            AnimatedWaveform(accent: accent, barCount: 4, height: 8)
+                        }
                     }
+                    .padding(.top, 1)
+
+                    LiveProgressView(state: context.state)
+                        .padding(.top, 2)
                 }
-                .padding(.top, 1)
 
-                LiveProgressView(state: context.state)
-                    .padding(.top, 2)
+                Spacer(minLength: 0)
+
+                HStack(spacing: 16) {
+                    Button(intent: PreviousTrackIntent()) {
+                        Image(systemName: "backward.fill").font(.callout)
+                    }.buttonStyle(.plain)
+
+                    Button(intent: PlayPauseIntent()) {
+                        Image(systemName: context.state.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.title3)
+                            .foregroundStyle(accent)
+                    }.buttonStyle(.plain)
+
+                    Button(intent: NextTrackIntent()) {
+                        Image(systemName: "forward.fill").font(.callout)
+                    }.buttonStyle(.plain)
+                }
             }
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 16) {
-                Button(intent: PreviousTrackIntent()) {
-                    Image(systemName: "backward.fill").font(.callout)
-                }.buttonStyle(.plain)
-
-                Button(intent: PlayPauseIntent()) {
-                    Image(systemName: context.state.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title3)
-                        .foregroundStyle(accent)
-                }.buttonStyle(.plain)
-
-                Button(intent: NextTrackIntent()) {
-                    Image(systemName: "forward.fill").font(.callout)
-                }.buttonStyle(.plain)
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .activityBackgroundTint(.black.opacity(0.7))
+        .activityBackgroundTint(.clear)
         .activitySystemActionForegroundColor(.white)
     }
 }
 
 // MARK: - Animated Waveform (lock screen + expanded DI only)
-// Compact/minimal Dynamic Island does NOT support TimelineView animation.
+// Compact/minimal Dynamic Island does NOT support animation.
+//
+// SF Symbol system animations are driven by the OS renderer — the only reliable way
+// to get continuous animation in a Live Activity extension process.
 
 private struct AnimatedWaveform: View {
     let accent: Color

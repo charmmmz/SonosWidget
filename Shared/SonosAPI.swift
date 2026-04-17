@@ -5,6 +5,7 @@ enum SonosAPI {
     nonisolated static let port = 1400
     private nonisolated static let avTransport = "/MediaRenderer/AVTransport/Control"
     private nonisolated static let renderingControl = "/MediaRenderer/RenderingControl/Control"
+    private nonisolated static let groupRenderingControl = "/MediaRenderer/GroupRenderingControl/Control"
     private nonisolated static let zoneGroupTopology = "/ZoneGroupTopology/Control"
     private nonisolated static let contentDirectory = "/MediaServer/ContentDirectory/Control"
 
@@ -125,6 +126,23 @@ enum SonosAPI {
         _ = try await soap(ip: ip, endpoint: renderingControl, service: "RenderingControl",
                            action: "SetVolume",
                            body: "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>\(clamped)</DesiredVolume>")
+    }
+
+    /// Gets the group volume for a coordinator (represents all members proportionally).
+    nonisolated static func getGroupVolume(ip: String) async throws -> Int {
+        let xml = try await soap(ip: ip, endpoint: groupRenderingControl, service: "GroupRenderingControl",
+                                 action: "GetGroupVolume",
+                                 body: "<InstanceID>0</InstanceID>")
+        guard let str = extractTag("CurrentVolume", from: xml), let vol = Int(str) else { return 0 }
+        return vol
+    }
+
+    /// Sets volume for an entire group proportionally via GroupRenderingControl on the coordinator.
+    nonisolated static func setGroupVolume(ip: String, volume: Int) async throws {
+        let clamped = max(0, min(100, volume))
+        _ = try await soap(ip: ip, endpoint: groupRenderingControl, service: "GroupRenderingControl",
+                           action: "SetGroupVolume",
+                           body: "<InstanceID>0</InstanceID><DesiredVolume>\(clamped)</DesiredVolume>")
     }
 
     // MARK: - Queue
