@@ -67,6 +67,7 @@ final class SonosManager {
 
     var isPlaying: Bool { transportState == .playing }
     var isConfigured: Bool { selectedSpeaker != nil }
+    var currentCloudGroupId: String? { cloudGroupId }
 
     /// IP to send playback commands (group coordinator)
     private var playbackIP: String? { selectedSpeaker?.playbackIP }
@@ -695,6 +696,18 @@ final class SonosManager {
             SharedStorage.savedSpeakers = fresh
         }
         await refreshAllGroupStatuses()
+    }
+
+    /// Override track metadata (e.g. when Sonos can't resolve it) and reload album art.
+    func patchTrackInfo(title: String, artist: String, album: String, albumArtURL: String?) {
+        trackInfo?.title = title
+        trackInfo?.artist = artist
+        trackInfo?.album = album
+        if let art = albumArtURL {
+            trackInfo?.albumArtURL = art
+        }
+        updateSharedCache()
+        Task { await loadAlbumArt() }
     }
 
     // MARK: - State Refresh

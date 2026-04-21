@@ -1,9 +1,8 @@
 import Foundation
 import SwiftUI
-import AuthenticationServices
 
 @Observable
-final class SearchManager: NSObject {
+final class SearchManager {
     var favorites: [BrowseItem] = []
     var playlists: [BrowseItem] = []
     var radio: [BrowseItem] = []
@@ -15,293 +14,165 @@ final class SearchManager: NSObject {
     var searchQuery = ""
     var errorMessage: String?
 
-    /// Anonymous services that can be searched without credentials.
-    var anonymousServices: [MusicService] = []
-    /// Services that need AppLink/DeviceLink login.
-    var authServices: [MusicService] = []
-    /// Services that the user has successfully linked (credentials stored).
-    var linkedAuthServices: Set<Int> = []
-    /// User's per-service search toggle.
-    var serviceEnabled: [Int: Bool] = [:]
+    // Station picker state
+    struct RadioStationOption: Identifiable {
+        let id: String // objectId e.g. "radio:ra.137938148"
+        let name: String
+        let artURL: String?
+        let cloudServiceId: String?
+        let accountId: String?
+        let resMD: String?
+    }
+    var stationOptions: [RadioStationOption] = []
+    var showStationPicker = false
+    var pendingStationManager: SonosManager?
 
-    /// Currently linking service state.
-    var linkingService: MusicService?
-    var isLinking = false
-    var linkError: String?
+    /// Accounts detected via Sonos Cloud API.
+    var linkedAccounts: [SonosCloudAPI.CloudMusicServiceAccount] = []
+    /// User's per-service search toggle. Key = Cloud serviceId string.
+    var serviceEnabled: [String: Bool] = [:]
 
     struct ServiceSearchResult: Identifiable {
-        var id: Int { service.id }
-        var service: MusicService
+        let id: String
+        let serviceName: String
         var items: [BrowseItem]
     }
 
     private static let enabledKey = "SearchEnabledServices"
-    private static let credentialsPrefix = "com.charm.SonosWidget.smapi."
 
     private var speakerIP: String?
     private var searchTask: Task<Void, Never>?
     private var hasProbed = false
-    private var deviceId: String?
-    private var householdId: String?
-    private var pendingLinkCode: String?
-    private var pendingLinkSmapiURI: String?
-
-    override init() {
-        super.init()
-    }
+    /// Cached Cloud API favorites list for matching UPnP favorites to Cloud IDs.
+    private var cloudFavorites: [SonosCloudAPI.CloudFavorite]?
 
     func configure(speakerIP: String?) {
         self.speakerIP = speakerIP
     }
 
-    // MARK: - Device Identity
-
-    private func ensureDeviceIdentity() async -> Bool {
-        guard let ip = speakerIP else { return false }
-        if deviceId != nil && householdId != nil { return true }
-        do {
-            async let did = SonosAPI.getDeviceId(ip: ip)
-            async let hid = SonosAPI.getHouseholdId(ip: ip)
-            deviceId = try await did
-            householdId = try await hid
-            print("[SMAPI] deviceId=\(deviceId ?? "?"), householdId=\(householdId ?? "?")")
-            return true
-        } catch {
-            print("[SMAPI] Failed to get device identity: \(error)")
-            return false
-        }
-    }
-
-    // MARK: - Credential Storage (Keychain)
-
-    private func saveCredentials(_ creds: SMAPICredentials, serviceId: Int) {
-        guard let data = try? JSONEncoder().encode(creds) else { return }
-        let account = "\(Self.credentialsPrefix)\(serviceId)"
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-        var add = query
-        add[kSecValueData as String] = data
-        SecItemAdd(add as CFDictionary, nil)
-        linkedAuthServices.insert(serviceId)
-    }
-
-    private func loadCredentials(serviceId: Int) -> SMAPICredentials? {
-        let account = "\(Self.credentialsPrefix)\(serviceId)"
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let creds = try? JSONDecoder().decode(SMAPICredentials.self, from: data) else {
-            return nil
-        }
-        return creds
-    }
-
-    func deleteCredentials(serviceId: Int) {
-        let account = "\(Self.credentialsPrefix)\(serviceId)"
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-        linkedAuthServices.remove(serviceId)
-    }
-
-    // MARK: - Service Discovery
+    // MARK: - Service Detection via Cloud API
 
     func probeLinkedServices() async {
-        guard !hasProbed, let ip = speakerIP else { return }
+        guard !hasProbed else { return }
         isProbing = true
 
-        if musicServices.isEmpty {
-            musicServices = (try? await SonosAPI.listMusicServices(ip: ip)) ?? []
+        guard let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else {
+            print("[Search] No Sonos Cloud auth, cannot detect services")
+            isProbing = false
+            hasProbed = true
+            return
         }
 
-        let searchable = musicServices.filter { $0.canSearch }
-
-        var anon: [MusicService] = []
-        var auth: [MusicService] = []
-        var linked = Set<Int>()
-
-        for service in searchable {
-            if service.isAnonymous {
-                anon.append(service)
-            } else if service.needsLogin {
-                auth.append(service)
-                if loadCredentials(serviceId: service.id) != nil {
-                    linked.insert(service.id)
-                }
+        do {
+            let accounts = try await SonosCloudAPI.getMusicServiceAccounts(
+                token: token, householdId: householdId)
+            linkedAccounts = accounts
+            print("[Search] Cloud API detected \(accounts.count) linked services:")
+            for a in accounts {
+                print("[Search]   \(a.nickname ?? a.serviceId ?? "?") (service-id=\(a.serviceId ?? "?"))")
             }
+
+            // Load saved toggle state, default all detected to enabled
+            let saved = UserDefaults.standard.dictionary(forKey: Self.enabledKey) as? [String: Bool] ?? [:]
+            for account in accounts {
+                guard let sid = account.serviceId else { continue }
+                serviceEnabled[sid] = saved[sid] ?? true
+            }
+        } catch {
+            print("[Search] Cloud API detection failed: \(error)")
         }
 
-        anon.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        auth.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-
-        anonymousServices = anon
-        authServices = auth
-        linkedAuthServices = linked
+        buildServiceIdMapping()
         hasProbed = true
         isProbing = false
-
-        // Load saved toggle state
-        let saved = UserDefaults.standard.dictionary(forKey: Self.enabledKey) as? [String: Bool] ?? [:]
-        for service in anon {
-            serviceEnabled[service.id] = saved[String(service.id)] ?? true
-        }
-        for service in auth {
-            let wasLinked = linked.contains(service.id)
-            serviceEnabled[service.id] = saved[String(service.id)] ?? wasLinked
-        }
-
-        // Load device identity in background for later use
-        _ = await ensureDeviceIdentity()
-
-        print("[Search] Anonymous services: \(anon.count), Auth services: \(auth.count), Linked: \(linked.count)")
-        if !linked.isEmpty {
-            let names = auth.filter { linked.contains($0.id) }.map(\.name)
-            print("[Search] Linked auth services: \(names.joined(separator: ", "))")
-        }
     }
 
     private func persistToggles() {
-        let dict = serviceEnabled.reduce(into: [String: Bool]()) { $0[String($1.key)] = $1.value }
-        UserDefaults.standard.set(dict, forKey: Self.enabledKey)
+        UserDefaults.standard.set(serviceEnabled, forKey: Self.enabledKey)
     }
 
-    func setServiceEnabled(_ service: MusicService, enabled: Bool) {
-        serviceEnabled[service.id] = enabled
+    func setServiceEnabled(serviceId: String, enabled: Bool) {
+        serviceEnabled[serviceId] = enabled
         persistToggles()
     }
 
-    /// All services enabled for search: anonymous + linked auth with toggle on.
-    var activeServices: [MusicService] {
-        let enabledAnon = anonymousServices.filter { serviceEnabled[$0.id] ?? true }
-        let enabledAuth = authServices.filter {
-            linkedAuthServices.contains($0.id) && (serviceEnabled[$0.id] ?? true)
+    /// Service IDs enabled for search.
+    var activeServiceIds: [String] {
+        linkedAccounts.compactMap { account in
+            guard let sid = account.serviceId,
+                  serviceEnabled[sid] ?? true else { return nil }
+            return sid
         }
-        return enabledAnon + enabledAuth
     }
 
     var hasFinishedProbing: Bool { hasProbed }
 
     func resetProbe() {
         hasProbed = false
-        anonymousServices = []
-        authServices = []
-        deviceId = nil
-        householdId = nil
+        linkedAccounts = []
     }
 
     func forceReprobe() async {
         hasProbed = false
-        anonymousServices = []
-        authServices = []
+        linkedAccounts = []
         await probeLinkedServices()
     }
 
-    // MARK: - AppLink / DeviceLink Login
+    // MARK: - Grouped Favorites
 
-    @MainActor
-    func startLinking(service: MusicService, from window: UIWindow?) async {
-        guard let did = deviceId, let hid = householdId else {
-            guard await ensureDeviceIdentity(), let did = deviceId, let hid = householdId else {
-                linkError = "无法获取设备信息"
-                return
-            }
-            await performLink(service: service, deviceId: did, householdId: hid, from: window)
-            return
-        }
-        await performLink(service: service, deviceId: did, householdId: hid, from: window)
+    struct FavoriteGroup {
+        let category: BrowseItem.FavoriteCategory
+        let items: [BrowseItem]
     }
 
-    @MainActor
-    private func performLink(service: MusicService, deviceId: String, householdId: String,
-                             from window: UIWindow?) async {
-        isLinking = true
-        linkingService = service
-        linkError = nil
-
-        do {
-            let result: SMAPILinkResult
-            if service.authType == "AppLink" {
-                result = try await SonosAPI.smapiGetAppLink(
-                    smapiURI: service.smapiURI, deviceId: deviceId, householdId: householdId)
-            } else {
-                result = try await SonosAPI.smapiGetDeviceLinkCode(
-                    smapiURI: service.smapiURI, deviceId: deviceId, householdId: householdId)
-            }
-
-            print("[SMAPI] Link \(service.name): regUrl=\(result.regUrl), linkCode=\(result.linkCode.prefix(8))…")
-
-            pendingLinkCode = result.linkCode
-            pendingLinkSmapiURI = service.smapiURI
-
-            guard let url = URL(string: result.regUrl) else {
-                linkError = "无效的登录链接"
-                isLinking = false
-                return
-            }
-
-            let callbackReceived = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                let session = ASWebAuthenticationSession(
-                    url: url,
-                    callbackURLScheme: "sonoswidget"
-                ) { _, error in
-                    continuation.resume(returning: error == nil)
-                }
-                session.presentationContextProvider = self
-                session.prefersEphemeralWebBrowserSession = false
-                session.start()
-            }
-
-            if callbackReceived || true {
-                // For most services, after login in the browser the linkCode becomes valid.
-                // Try to exchange immediately.
-                try await Task.sleep(for: .milliseconds(1500))
-                await finishLinking(service: service)
-            }
-        } catch {
-            print("[SMAPI] Link error: \(error)")
-            linkError = "登录失败: \(error.localizedDescription)"
-            isLinking = false
+    var groupedFavorites: [FavoriteGroup] {
+        let order: [BrowseItem.FavoriteCategory] = [.playlist, .album, .artist, .station, .other]
+        var dict: [BrowseItem.FavoriteCategory: [BrowseItem]] = [:]
+        for item in favorites {
+            let cat = item.favoriteCategory
+            dict[cat, default: []].append(item)
+        }
+        return order.compactMap { cat in
+            guard let items = dict[cat], !items.isEmpty else { return nil }
+            return FavoriteGroup(category: cat, items: items)
         }
     }
 
-    func finishLinking(service: MusicService) async {
-        guard let did = deviceId, let hid = householdId,
-              let linkCode = pendingLinkCode else {
-            linkError = "缺少登录信息"
-            isLinking = false
-            return
+    // MARK: - Cloud → Local Service ID Mapping
+
+    /// Maps Cloud API serviceId (e.g. "52231") to local Sonos sid (e.g. 204).
+    private var cloudToLocalSid: [String: Int] = [:]
+    /// Maps Cloud API serviceId to the account username (e.g. "X_#Svc52231-408f19a7-Token").
+    private var cloudServiceUsername: [String: String] = [:]
+
+    private func buildServiceIdMapping() {
+        guard !linkedAccounts.isEmpty, !musicServices.isEmpty else { return }
+        cloudToLocalSid.removeAll()
+        cloudServiceUsername.removeAll()
+
+        for account in linkedAccounts {
+            guard let cloudId = account.serviceId else { continue }
+            let cloudName = (account.name ?? account.nickname ?? "").lowercased()
+                .trimmingCharacters(in: .whitespaces)
+
+            if let match = musicServices.first(where: {
+                $0.name.lowercased().trimmingCharacters(in: .whitespaces) == cloudName
+            }) {
+                cloudToLocalSid[cloudId] = match.id
+                print("[Search] Mapped Cloud \(cloudId) (\(account.displayName)) → local sid \(match.id)")
+            }
+
+            // Store the account username for DIDL metadata
+            if let username = account.username, !username.isEmpty {
+                cloudServiceUsername[cloudId] = username
+                print("[Search] Username for \(cloudId): \(username)")
+            }
         }
+    }
 
-        let smapiURI = pendingLinkSmapiURI ?? service.smapiURI
-
-        do {
-            let creds = try await SonosAPI.smapiGetDeviceAuthToken(
-                smapiURI: smapiURI, deviceId: did, householdId: hid, linkCode: linkCode)
-            saveCredentials(creds, serviceId: service.id)
-            serviceEnabled[service.id] = true
-            persistToggles()
-            print("[SMAPI] ✓ Linked \(service.name), token=\(creds.token.prefix(12))…")
-            linkError = nil
-        } catch {
-            print("[SMAPI] getDeviceAuthToken failed: \(error)")
-            linkError = "授权未完成，请重试"
-        }
-
-        isLinking = false
-        linkingService = nil
-        pendingLinkCode = nil
-        pendingLinkSmapiURI = nil
+    func localSid(forCloudServiceId cloudId: String) -> Int? {
+        cloudToLocalSid[cloudId]
     }
 
     // MARK: - Browse
@@ -310,6 +181,7 @@ final class SearchManager: NSObject {
         guard let ip = speakerIP else { return }
         isLoadingBrowse = true
         errorMessage = nil
+        cloudFavorites = nil
 
         async let favs = tryBrowse { try await SonosAPI.browseFavorites(ip: ip) }
         async let lists = tryBrowse { try await SonosAPI.browsePlaylists(ip: ip) }
@@ -321,6 +193,7 @@ final class SearchManager: NSObject {
 
         if musicServices.isEmpty {
             musicServices = (try? await SonosAPI.listMusicServices(ip: ip)) ?? []
+            buildServiceIdMapping()
         }
 
         isLoadingBrowse = false
@@ -330,7 +203,7 @@ final class SearchManager: NSObject {
         (try? await block()) ?? []
     }
 
-    // MARK: - Search
+    // MARK: - Search via Cloud API
 
     func search(query: String) {
         searchTask?.cancel()
@@ -345,66 +218,150 @@ final class SearchManager: NSObject {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
 
-            guard let ip = speakerIP else {
-                isSearching = false
-                return
-            }
-
             if !hasProbed { await probeLinkedServices() }
             guard !Task.isCancelled else { return }
 
-            let services = activeServices
-            guard !services.isEmpty else {
+            // Ensure local music services are loaded for sid mapping
+            if musicServices.isEmpty, let ip = speakerIP {
+                musicServices = (try? await SonosAPI.listMusicServices(ip: ip)) ?? []
+                buildServiceIdMapping()
+            }
+
+            let serviceIds = activeServiceIds
+            guard !serviceIds.isEmpty else {
                 print("[Search] No active services to search")
                 searchResults = []
                 isSearching = false
                 return
             }
 
-            print("[Search] Searching \(services.count) services for: \(query)")
+            guard let token = await SonosAuth.shared.validAccessToken(),
+                  let householdId = SonosAuth.shared.householdId else {
+                print("[Search] No Cloud auth for search")
+                searchResults = []
+                isSearching = false
+                return
+            }
 
-            var results: [ServiceSearchResult] = []
-            await withTaskGroup(of: ServiceSearchResult?.self) { group in
-                for service in services {
-                    group.addTask { [weak self] in
-                        guard let self else { return nil }
-                        return await self.searchService(service, query: query, ip: ip)
+            print("[Search] Searching \(serviceIds.count) services for: \(query)")
+
+            do {
+                let response = try await SonosCloudAPI.searchCatalog(
+                    token: token, householdId: householdId,
+                    term: query, serviceIds: serviceIds)
+
+                guard !Task.isCancelled else { return }
+
+                var results: [ServiceSearchResult] = []
+                for serviceResult in response.services ?? [] {
+                    guard let resources = serviceResult.resources, !resources.isEmpty else { continue }
+
+                    // Determine service name from first resource or from account list
+                    let serviceName = resources.first?.id?.serviceName
+                        ?? accountName(for: serviceResult.serviceId)
+                        ?? "Unknown"
+
+                    let items = resources.compactMap { resource -> BrowseItem? in
+                        convertToBrowseItem(resource, serviceId: serviceResult.serviceId,
+                                            accountId: serviceResult.accountId)
+                    }
+
+                    if !items.isEmpty {
+                        let sid = serviceResult.serviceId ?? UUID().uuidString
+                        results.append(ServiceSearchResult(
+                            id: sid, serviceName: serviceName, items: items))
+                        print("[Search] \(serviceName) → \(items.count) results")
+                    }
+
+                    // Log errors
+                    for err in serviceResult.errors ?? [] {
+                        print("[Search] \(serviceName) error: \(err.errorCode ?? "?") - \(err.reason ?? "?")")
                     }
                 }
-                for await result in group {
-                    if let r = result { results.append(r) }
+
+                guard !Task.isCancelled else { return }
+                searchResults = results
+            } catch {
+                if !Task.isCancelled {
+                    print("[Search] Cloud search failed: \(error)")
+                    searchResults = []
                 }
             }
 
-            guard !Task.isCancelled else { return }
-            searchResults = results
             isSearching = false
         }
     }
 
-    private func searchService(_ service: MusicService, query: String, ip: String) async -> ServiceSearchResult? {
-        do {
-            let items: [BrowseItem]
-            if service.needsLogin, let creds = loadCredentials(serviceId: service.id),
-               let did = deviceId, let hid = householdId {
-                items = try await SonosAPI.searchMusicServiceAuthenticated(
-                    smapiURI: service.smapiURI, serviceId: service.id, searchTerm: query,
-                    deviceId: did, householdId: hid, token: creds.token, key: creds.key)
-            } else {
-                let sessionId = (try? await SonosAPI.getSessionId(ip: ip, serviceId: service.id)) ?? ""
-                items = try await SonosAPI.searchMusicService(
-                    smapiURI: service.smapiURI, sessionId: sessionId,
-                    serviceId: service.id, searchTerm: query)
-            }
-            if !items.isEmpty {
-                print("[Search] \(service.name) → \(items.count) results")
-            }
-            return items.isEmpty ? nil : ServiceSearchResult(service: service, items: items)
-        } catch {
-            if !Task.isCancelled {
-                print("[Search] \(service.name) failed: \(error.localizedDescription)")
-            }
+    private func accountName(for serviceId: String?) -> String? {
+        guard let sid = serviceId else { return nil }
+        return linkedAccounts.first { $0.serviceId == sid }?.displayName
+    }
+
+    /// Convert a Cloud API resource into a BrowseItem for playback.
+    private func convertToBrowseItem(_ resource: SonosCloudAPI.CloudResource,
+                                     serviceId: String?,
+                                     accountId: String?) -> BrowseItem? {
+        guard let name = resource.name else { return nil }
+        let type = resource.type ?? ""
+
+        let supportedTypes: Set<String> = ["TRACK", "ARTIST", "ALBUM", "PLAYLIST", "PROGRAM"]
+        guard supportedTypes.contains(type) else { return nil }
+
+        let objectId = resource.id?.objectId ?? UUID().uuidString
+        let artistName = resource.artists?.first?.name ?? resource.summary?.content ?? ""
+        let albumName = resource.container?.name ?? ""
+        let artURL = resource.images?.first?.url ?? resource.container?.images?.first?.url
+        let isContainer = type == "ALBUM" || type == "PLAYLIST"
+
+        let uri = buildPlayableURI(objectId: objectId, serviceId: serviceId, accountId: accountId, type: type)
+        let localSid = serviceId.flatMap { cloudToLocalSid[$0] }
+
+        return BrowseItem(
+            id: objectId, title: name, artist: artistName, album: albumName,
+            albumArtURL: artURL, uri: uri, metaXML: nil,
+            isContainer: isContainer, serviceId: localSid, cloudType: type)
+    }
+
+    /// Build a URI that Sonos can play from the Cloud API objectId.
+    /// Uses the local Sonos sid (mapped from Cloud serviceId) for the `sid=` parameter.
+    /// URI format is service-specific (Apple Music, Spotify, etc. all need different encoding).
+    private func buildPlayableURI(objectId: String, serviceId: String?,
+                                  accountId: String?, type: String) -> String? {
+        guard let cloudSid = serviceId, let aid = accountId else { return nil }
+
+        let localSid = cloudToLocalSid[cloudSid]
+        guard let sid = localSid else {
+            print("[Search] No local sid mapping for Cloud serviceId \(cloudSid)")
             return nil
+        }
+
+        // URL-encode colons in the objectId (song:123 → song%3a123)
+        let encodedId = objectId.replacingOccurrences(of: ":", with: "%3a")
+
+        switch type {
+        case "TRACK":
+            let (scheme, suffix, flags) = trackURIComponents(localSid: sid, objectId: objectId)
+            return "\(scheme):\(encodedId)\(suffix)?sid=\(sid)&flags=\(flags)&sn=\(aid)"
+        case "ALBUM", "PLAYLIST":
+            return "x-rincon-cpcontainer:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
+        case "PROGRAM":
+            return "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
+        default:
+            return nil
+        }
+    }
+
+    /// Returns (uriScheme, fileSuffix, flags) for track URIs based on the local service ID.
+    private func trackURIComponents(localSid: Int, objectId: String) -> (String, String, Int) {
+        switch localSid {
+        case 204:  // Apple Music
+            return ("x-sonos-http", ".unknown", 0)
+        case 12:   // Spotify
+            return ("x-sonos-spotify", "", 8224)
+        case 165:  // 网易云音乐
+            return ("x-sonos-http", ".unknown", 0)
+        default:
+            return ("x-sonos-http", "", 8224)
         }
     }
 
@@ -414,7 +371,60 @@ final class SearchManager: NSObject {
         if let resMD = item.resMD, !resMD.isEmpty {
             return resMD
         }
+
+        // For Cloud search results, build metadata with correct service account
+        if item.cloudType != nil, let sid = item.serviceId {
+            let accountId = accountIdForLocalSid(sid) ?? "0"
+            return buildCloudDIDLMetadata(item: item, localSid: sid, accountId: accountId)
+        }
         return SonosAPI.buildDIDLMetadata(item: item)
+    }
+
+    /// Find the Cloud account-id (sn) for a given local service ID.
+    private func accountIdForLocalSid(_ localSid: Int) -> String? {
+        for (cloudId, sid) in cloudToLocalSid {
+            if sid == localSid {
+                return linkedAccounts.first { $0.serviceId == cloudId }?.accountId
+            }
+        }
+        return nil
+    }
+
+    /// Build DIDL metadata for Cloud search results with the correct service account.
+    /// Matches Sonos's own metadata format: item id="-1", includes <res>, correct desc serial.
+    private func buildCloudDIDLMetadata(item: BrowseItem, localSid: Int, accountId: String) -> String {
+        let title = SonosAPI.escapeXML(item.title)
+        let artist = SonosAPI.escapeXML(item.artist)
+        let album = SonosAPI.escapeXML(item.album)
+        let art = SonosAPI.escapeXML(item.albumArtURL ?? "")
+
+        let encodedObjId = item.id.replacingOccurrences(of: ":", with: "%3a")
+        let (scheme, suffix, flags) = trackURIComponents(localSid: localSid, objectId: item.id)
+        let resURI = SonosAPI.escapeXML(
+            "\(scheme):\(encodedObjId)\(suffix)?sid=\(localSid)&flags=\(flags)&sn=\(accountId)")
+
+        // desc format: SA_RINCON{localSid}_X_#Svc{localSid}-{accountId}-Token
+        let desc = "SA_RINCON\(localSid)_X_#Svc\(localSid)-\(accountId)-Token"
+
+        print("[Playback] desc=\(desc)")
+
+        return """
+        <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" \
+        xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" \
+        xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" \
+        xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">\
+        <item id="-1" parentID="-1" restricted="true">\
+        <res protocolInfo="sonos.com-http:*:application/octet-stream:*">\(resURI)</res>\
+        <r:streamContent></r:streamContent>\
+        <dc:title>\(title)</dc:title>\
+        <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
+        <dc:creator>\(artist)</dc:creator>\
+        <upnp:album>\(album)</upnp:album>\
+        <upnp:albumArtURI>\(art)</upnp:albumArtURI>\
+        <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\
+        \(desc)</desc>\
+        </item></DIDL-Lite>
+        """
     }
 
     private func extractItemId(from resMD: String) -> String? {
@@ -464,6 +474,20 @@ final class SearchManager: NSObject {
     }
 
     func playNow(item: BrowseItem, manager: SonosManager) async {
+        if item.isArtist {
+            await startStation(item: item, manager: manager)
+            return
+        }
+
+        print("[Playback] ====== playNow START ======")
+        print("[Playback] title=\(item.title) isContainer=\(item.isContainer) id=\(item.id)")
+
+        // For Sonos Favorites, try Cloud API first (better metadata/art in recently played)
+        if item.id.hasPrefix("FV:"), await tryCloudFavorite(item: item, manager: manager) {
+            print("[Playback] ====== playNow END (Cloud) ======")
+            return
+        }
+
         guard let ip = manager.selectedSpeaker?.playbackIP else {
             print("[Playback] ABORT: no speaker IP")
             return
@@ -481,38 +505,52 @@ final class SearchManager: NSObject {
             return
         }
 
-        let prevTitle = manager.trackInfo?.title
-
-        print("[Playback] ====== playNow START ======")
-        print("[Playback] title=\(item.title) isContainer=\(item.isContainer) id=\(item.id)")
         print("[Playback] uri=\(uri)")
+        print("[Playback] metadata=\(playMeta.prefix(300))")
+
+        // Diagnostic: capture full metadata of the currently playing track for comparison
+        if let rawXml = try? await SonosAPI.getRawPositionInfo(ip: ip) {
+            if let metaRaw = SonosAPI.extractTag("TrackMetaData", from: rawXml) {
+                let meta = SonosAPI.decodeXMLEntities(metaRaw)
+                print("[Playback] DIAGNOSTIC currentMeta=\(meta.prefix(800))")
+            }
+            if let uri = SonosAPI.extractTag("TrackURI", from: rawXml) {
+                print("[Playback] DIAGNOSTIC currentURI=\(SonosAPI.decodeXMLEntities(uri))")
+            }
+        }
 
         do {
-            print("[Playback] Trying SetAVTransportURI")
-            try await SonosAPI.setAVTransportURI(ip: ip, uri: uri, metadata: playMeta)
-            try await SonosAPI.play(ip: ip)
-            print("[Playback] SetAVTransportURI + Play sent")
-
-            try? await Task.sleep(for: .milliseconds(1000))
-
-            let newInfo = try? await SonosAPI.getPositionInfo(ip: ip)
-            let contentChanged = newInfo?.title != prevTitle || prevTitle == nil
-            let state = try? await SonosAPI.getTransportInfo(ip: ip)
-
-            if contentChanged && (state == .playing || state == .transitioning) {
-                print("[Playback] SUCCESS: content changed, transport=\(state?.rawValue ?? "?")")
-            } else if uri.contains("x-rincon-cpcontainer:") {
-                print("[Playback] Content didn't change, trying queue approach")
-                guard let uuid = manager.selectedSpeaker?.id else { return }
-                try await SonosAPI.removeAllTracksFromQueue(ip: ip)
-                try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
+            if item.isContainer || uri.contains("x-rincon-cpcontainer:") {
+                guard let uuid = manager.selectedSpeaker?.id else {
+                    print("[Playback] ABORT: no speaker UUID")
+                    return
+                }
+                print("[Playback] → Queue approach (container)")
+                try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
+                let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
+                try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
                 try await SonosAPI.play(ip: ip)
-                print("[Playback] Queue fallback sent")
+                print("[Playback] Queue playback started at track \(trackNr)")
+            } else {
+                print("[Playback] → SetAVTransportURI (direct)")
+                try await SonosAPI.setAVTransportURI(ip: ip, uri: uri, metadata: playMeta)
+                try await SonosAPI.play(ip: ip)
             }
 
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(for: .milliseconds(1500))
             await manager.refreshState()
+
+            // If Sonos couldn't resolve metadata (shows "Unknown"), patch from our search data
+            if manager.trackInfo?.title == "Unknown" || manager.trackInfo?.title == nil {
+                print("[Playback] Sonos returned Unknown → patching from search result")
+                manager.patchTrackInfo(
+                    title: item.title,
+                    artist: item.artist,
+                    album: item.album,
+                    albumArtURL: item.albumArtURL
+                )
+            }
         } catch {
             print("[Playback] FAILED: \(error)")
             errorMessage = error.localizedDescription
@@ -520,9 +558,202 @@ final class SearchManager: NSObject {
         print("[Playback] ====== playNow END ======")
     }
 
+    /// Try to play a favorite via the Sonos Cloud API. Returns true if successful.
+    private func tryCloudFavorite(item: BrowseItem, manager: SonosManager) async -> Bool {
+        guard let groupId = manager.currentCloudGroupId,
+              let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else { return false }
+
+        do {
+            // Cache the favorites list to avoid repeated calls
+            if cloudFavorites == nil {
+                cloudFavorites = try await SonosCloudAPI.getFavorites(
+                    token: token, householdId: householdId)
+            }
+
+            guard let match = cloudFavorites?.first(where: {
+                ($0.name ?? "").localizedCaseInsensitiveCompare(item.title) == .orderedSame
+            }) else {
+                print("[Playback] No Cloud favorite match for \"\(item.title)\"")
+                return false
+            }
+
+            print("[Playback] → Cloud loadFavorite (id=\(match.id), name=\"\(match.name ?? "")\")")
+            try await SonosCloudAPI.loadFavorite(
+                token: token, groupId: groupId, favoriteId: match.id)
+
+            try? await Task.sleep(for: .milliseconds(1000))
+            await manager.refreshState()
+            return true
+        } catch {
+            print("[Playback] Cloud favorite failed: \(error)")
+            return false
+        }
+    }
+
     func playNext(item: BrowseItem, manager: SonosManager) async {
         guard let uri = item.uri else { return }
         await manager.playNext(uri: uri, metadata: playbackMetadata(for: item))
+    }
+
+    /// Start a personalized radio station from an artist.
+    /// Searches Cloud API for the artist's Apple Music ID, then constructs radio:ra.{id}
+    /// — the same format the official Sonos app uses for "Start Station".
+    func startStation(item: BrowseItem, manager: SonosManager) async {
+        print("[Station] ====== startStation START ======")
+        print("[Station] title=\"\(item.title)\" id=\(item.id)")
+
+        guard let ip = manager.selectedSpeaker?.playbackIP else {
+            print("[Station] ABORT: no speaker IP")
+            return
+        }
+
+        guard let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else {
+            print("[Station] ABORT: no Cloud auth")
+            errorMessage = "Not logged in to Sonos Cloud"
+            return
+        }
+
+        if !hasProbed { await probeLinkedServices() }
+        let serviceIds = activeServiceIds
+        guard !serviceIds.isEmpty else {
+            print("[Station] ABORT: no active services")
+            errorMessage = "No music services linked"
+            return
+        }
+
+        do {
+            let response = try await SonosCloudAPI.searchCatalog(
+                token: token, householdId: householdId,
+                term: item.title, serviceIds: serviceIds)
+
+            // Find the ARTIST result to get the Apple Music artist ID
+            var artistId: String?
+            var cloudServiceId: String?
+            var cloudAccountId: String?
+            var artistArtURL: String?
+
+            for svc in response.services ?? [] {
+                for resource in svc.resources ?? [] {
+                    let type = resource.type ?? ""
+                    let objId = resource.id?.objectId ?? ""
+                    let name = resource.name ?? ""
+
+                    if type == "ARTIST" && name.localizedCaseInsensitiveCompare(item.title) == .orderedSame {
+                        // Extract the numeric ID: "artist:137938148" → "137938148"
+                        artistId = objId.replacingOccurrences(of: "artist:", with: "")
+                        cloudServiceId = svc.serviceId
+                        cloudAccountId = svc.accountId
+                        artistArtURL = resource.images?.first?.url ?? item.albumArtURL
+                        print("[Station] Matched artist: \(name), id=\(objId)")
+                        break
+                    }
+                }
+                if artistId != nil { break }
+            }
+
+            // Fallback: take any ARTIST result if exact name match failed
+            if artistId == nil {
+                for svc in response.services ?? [] {
+                    for resource in svc.resources ?? [] {
+                        if resource.type == "ARTIST", let objId = resource.id?.objectId,
+                           objId.hasPrefix("artist:") {
+                            artistId = objId.replacingOccurrences(of: "artist:", with: "")
+                            cloudServiceId = svc.serviceId
+                            cloudAccountId = svc.accountId
+                            artistArtURL = resource.images?.first?.url ?? item.albumArtURL
+                            print("[Station] Fallback artist: \(resource.name ?? "?"), id=\(objId)")
+                            break
+                        }
+                    }
+                    if artistId != nil { break }
+                }
+            }
+
+            guard let amArtistId = artistId else {
+                print("[Station] No artist found in search results")
+                errorMessage = "Could not find artist \(item.title)"
+                return
+            }
+
+            // Construct radio:ra.{artist_id} — this is the "Start Station" format
+            let radioId = "radio:ra.\(amArtistId)"
+            let stationName = "\(item.title) Radio"
+            print("[Station] Constructed radioId=\(radioId) name=\"\(stationName)\"")
+
+            await playRadioStation(
+                ip: ip, radioId: radioId, stationName: stationName,
+                cloudServiceId: cloudServiceId, accountId: cloudAccountId,
+                artURL: artistArtURL, resMD: item.resMD, manager: manager)
+
+        } catch {
+            print("[Station] Failed: \(error)")
+            errorMessage = error.localizedDescription
+        }
+        print("[Station] ====== startStation END ======")
+    }
+
+    /// Play a selected radio station option (from station picker).
+    func playStationOption(_ option: RadioStationOption, manager: SonosManager) async {
+        guard let ip = manager.selectedSpeaker?.playbackIP else { return }
+        await playRadioStation(
+            ip: ip, radioId: option.id, stationName: option.name,
+            cloudServiceId: option.cloudServiceId, accountId: option.accountId,
+            artURL: option.artURL, resMD: option.resMD, manager: manager)
+    }
+
+    /// Play a resolved radio station via UPnP.
+    private func playRadioStation(ip: String, radioId: String, stationName: String,
+                                  cloudServiceId: String?, accountId: String?,
+                                  artURL: String?, resMD: String?,
+                                  manager: SonosManager) async {
+        let localSid = cloudServiceId.flatMap { cloudToLocalSid[$0] }
+        let params = extractServiceParams()
+        let sid = localSid.map(String.init) ?? params?.sid ?? "204"
+        let sn = accountId ?? params?.sn ?? "0"
+
+        let encodedId = radioId.replacingOccurrences(of: ":", with: "%3a")
+        let radioURI = "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(sn)"
+        print("[Station] radioURI=\(radioURI)")
+
+        let descTag = extractDescTag(from: resMD ?? "") ?? "SA_RINCON52231_X_#Svc52231-408f19a7-Token"
+        let artTag = artURL.map { "<upnp:albumArtURI>\(SonosAPI.escapeXML($0))</upnp:albumArtURI>" } ?? ""
+        let radioMeta = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
+            "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
+            "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" " +
+            "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">" +
+            "<item id=\"100c206c\(SonosAPI.escapeXML(encodedId))\" " +
+            "parentID=\"00081024\(SonosAPI.escapeXML(encodedId))\" restricted=\"true\">" +
+            "<dc:title>\(SonosAPI.escapeXML(stationName))</dc:title>" +
+            "<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>" +
+            artTag +
+            "<desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">" +
+            "\(descTag)</desc></item></DIDL-Lite>"
+
+        do {
+            print("[Station] → SetAVTransportURI...")
+            try await SonosAPI.setAVTransportURI(ip: ip, uri: radioURI, metadata: radioMeta)
+            print("[Station] → Play...")
+            try await SonosAPI.play(ip: ip)
+
+            try? await Task.sleep(for: .milliseconds(2000))
+            let state = try? await SonosAPI.getTransportInfo(ip: ip)
+            let newInfo = try? await SonosAPI.getPositionInfo(ip: ip)
+            print("[Station] after: transport=\(state?.rawValue ?? "nil") title=\"\(newInfo?.title ?? "nil")\"")
+
+            await manager.refreshState()
+        } catch {
+            print("[Station] UPnP playback FAILED: \(error)")
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func extractDescTag(from xml: String) -> String? {
+        guard let start = xml.range(of: "<desc"),
+              let contentStart = xml.range(of: ">", range: start.upperBound..<xml.endIndex),
+              let end = xml.range(of: "</desc>", range: contentStart.upperBound..<xml.endIndex) else { return nil }
+        return String(xml[contentStart.upperBound..<end.lowerBound])
     }
 
     func addToQueue(item: BrowseItem, manager: SonosManager) async {
@@ -535,17 +766,5 @@ final class SearchManager: NSObject {
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-}
-
-// MARK: - ASWebAuthenticationPresentationContextProviding
-
-extension SearchManager: ASWebAuthenticationPresentationContextProviding {
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = scene.windows.first else {
-            return ASPresentationAnchor()
-        }
-        return window
     }
 }

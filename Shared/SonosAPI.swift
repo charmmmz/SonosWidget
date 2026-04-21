@@ -80,6 +80,12 @@ enum SonosAPI {
         return extractTag("CurrentURI", from: xml) ?? ""
     }
 
+    /// Returns the raw SOAP XML from GetPositionInfo (for diagnostic use).
+    nonisolated static func getRawPositionInfo(ip: String) async throws -> String {
+        try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
+                       action: "GetPositionInfo", body: "<InstanceID>0</InstanceID>")
+    }
+
     nonisolated static func getPositionInfo(ip: String) async throws -> TrackInfo {
         let xml = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
                                  action: "GetPositionInfo", body: "<InstanceID>0</InstanceID>")
@@ -143,7 +149,8 @@ enum SonosAPI {
 
         return TrackInfo(title: title, artist: artist, album: album,
                          albumArtURL: albumArtURL, duration: duration, position: position,
-                         source: source, audioQuality: audioQuality)
+                         source: source, audioQuality: audioQuality,
+                         trackURI: decodeXMLEntities(trackURI))
     }
 
     // MARK: - Volume
@@ -201,17 +208,19 @@ enum SonosAPI {
 
     // MARK: - Queue Management
 
+    @discardableResult
     nonisolated static func addURIToQueue(ip: String, uri: String, metadata: String,
-                                          position: Int = 0, asNext: Bool = false) async throws {
+                                          position: Int = 0, asNext: Bool = false) async throws -> Int {
         let escapedURI = escapeXML(uri)
         let escapedMeta = escapeXML(metadata)
-        _ = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
+        let xml = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
                            action: "AddURIToQueue",
                            body: "<InstanceID>0</InstanceID>" +
                            "<EnqueuedURI>\(escapedURI)</EnqueuedURI>" +
                            "<EnqueuedURIMetaData>\(escapedMeta)</EnqueuedURIMetaData>" +
                            "<DesiredFirstTrackNumberEnqueued>\(position)</DesiredFirstTrackNumberEnqueued>" +
                            "<EnqueueAsNext>\(asNext ? 1 : 0)</EnqueueAsNext>")
+        return Int(extractTag("FirstTrackNumberEnqueued", from: xml) ?? "1") ?? 1
     }
 
     nonisolated static func removeAllTracksFromQueue(ip: String) async throws {
@@ -364,142 +373,6 @@ enum SonosAPI {
         return extractTag("SessionId", from: xml) ?? ""
     }
 
-    // MARK: - Device Identity (for SMAPI authentication)
-
-    nonisolated static func getDeviceId(ip: String) async throws -> String {
-        let xml = try await soap(ip: ip, endpoint: "/SystemProperties/Control",
-                                 service: "SystemProperties", action: "GetString",
-                                 body: "<VariableName>R_TrialZPSerial</VariableName>")
-        guard let value = extractTag("StringValue", from: xml), !value.isEmpty else {
-            throw URLError(.cannotParseResponse)
-        }
-        return value
-    }
-
-    nonisolated static func getHouseholdId(ip: String) async throws -> String {
-        let xml = try await soap(ip: ip, endpoint: "/DeviceProperties/Control",
-                                 service: "DeviceProperties", action: "GetHouseholdID", body: "")
-        guard let value = extractTag("CurrentHouseholdID", from: xml), !value.isEmpty else {
-            throw URLError(.cannotParseResponse)
-        }
-        return value
-    }
-
-    // MARK: - SMAPI Authentication (AppLink / DeviceLink)
-
-    /// Generic SMAPI SOAP call with proper Sonos credentials header.
-    private nonisolated static func smapiSoap(smapiURI: String, action: String, body: String,
-                                               deviceId: String, householdId: String,
-                                               token: String = "", key: String = "") async throws -> String {
-        guard let url = URL(string: smapiURI) else { throw URLError(.badURL) }
-        let envelope = """
-            <?xml version="1.0" encoding="utf-8"?>
-            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" \
-            xmlns:s="http://www.sonos.com/Services/1.1">
-            <soap:Header>
-            <s:context><s:timezone>+00:00</s:timezone></s:context>
-            <s:credentials>
-            <s:deviceId>\(escapeXML(deviceId))</s:deviceId>
-            <s:loginToken>
-            <s:token>\(escapeXML(token))</s:token>
-            <s:key>\(escapeXML(key))</s:key>
-            <s:householdId>\(escapeXML(householdId))</s:householdId>
-            </s:loginToken>
-            </s:credentials>
-            </soap:Header>
-            <soap:Body>\(body)</soap:Body>
-            </soap:Envelope>
-            """
-        var request = URLRequest(url: url, timeoutInterval: 15)
-        request.httpMethod = "POST"
-        request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("\"http://www.sonos.com/Services/1.1#\(action)\"", forHTTPHeaderField: "SOAPACTION")
-        request.setValue("en-US", forHTTPHeaderField: "Accept-Language")
-        request.httpBody = envelope.data(using: .utf8)
-
-        let (data, _) = try await URLSession.shared.data(for: request)
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-
-    /// AppLink Step 1: get the registration URL and link code.
-    nonisolated static func smapiGetAppLink(smapiURI: String, deviceId: String,
-                                             householdId: String) async throws -> SMAPILinkResult {
-        let body = """
-            <s:getAppLink xmlns:s="http://www.sonos.com/Services/1.1">\
-            <s:householdId>\(escapeXML(householdId))</s:householdId>\
-            </s:getAppLink>
-            """
-        let xml = try await smapiSoap(smapiURI: smapiURI, action: "getAppLink", body: body,
-                                       deviceId: deviceId, householdId: householdId)
-        let regUrl = extractTag("regUrl", from: xml) ?? ""
-        let linkCode = extractTag("linkCode", from: xml) ?? ""
-        guard !regUrl.isEmpty else {
-            print("[SMAPI] getAppLink failed, xml: \(xml.prefix(1000))")
-            throw URLError(.cannotParseResponse)
-        }
-        return SMAPILinkResult(regUrl: regUrl, linkCode: linkCode)
-    }
-
-    /// DeviceLink Step 1: get the registration URL and link code.
-    nonisolated static func smapiGetDeviceLinkCode(smapiURI: String, deviceId: String,
-                                                    householdId: String) async throws -> SMAPILinkResult {
-        let body = """
-            <s:getDeviceLinkCode xmlns:s="http://www.sonos.com/Services/1.1">\
-            <s:householdId>\(escapeXML(householdId))</s:householdId>\
-            </s:getDeviceLinkCode>
-            """
-        let xml = try await smapiSoap(smapiURI: smapiURI, action: "getDeviceLinkCode", body: body,
-                                       deviceId: deviceId, householdId: householdId)
-        let regUrl = extractTag("regUrl", from: xml) ?? ""
-        let linkCode = extractTag("linkCode", from: xml) ?? ""
-        guard !regUrl.isEmpty else {
-            print("[SMAPI] getDeviceLinkCode failed, xml: \(xml.prefix(1000))")
-            throw URLError(.cannotParseResponse)
-        }
-        return SMAPILinkResult(regUrl: regUrl, linkCode: linkCode)
-    }
-
-    /// Step 2 (shared by AppLink and DeviceLink): exchange the link code for auth token + key.
-    nonisolated static func smapiGetDeviceAuthToken(smapiURI: String, deviceId: String,
-                                                     householdId: String,
-                                                     linkCode: String) async throws -> SMAPICredentials {
-        let body = """
-            <s:getDeviceAuthToken xmlns:s="http://www.sonos.com/Services/1.1">\
-            <s:householdId>\(escapeXML(householdId))</s:householdId>\
-            <s:linkCode>\(escapeXML(linkCode))</s:linkCode>\
-            <s:linkDeviceId>\(escapeXML(deviceId))</s:linkDeviceId>\
-            </s:getDeviceAuthToken>
-            """
-        let xml = try await smapiSoap(smapiURI: smapiURI, action: "getDeviceAuthToken", body: body,
-                                       deviceId: deviceId, householdId: householdId)
-        let token = extractTag("authToken", from: xml) ?? extractTag("token", from: xml) ?? ""
-        let key = extractTag("privateKey", from: xml) ?? extractTag("key", from: xml) ?? ""
-        guard !token.isEmpty else {
-            print("[SMAPI] getDeviceAuthToken failed, xml: \(xml.prefix(1000))")
-            throw URLError(.cannotParseResponse)
-        }
-        return SMAPICredentials(token: token, key: key)
-    }
-
-    /// Search a music service with full SMAPI credentials.
-    nonisolated static func searchMusicServiceAuthenticated(
-        smapiURI: String, serviceId: Int, searchTerm: String,
-        deviceId: String, householdId: String, token: String, key: String,
-        category: String = "tracks"
-    ) async throws -> [BrowseItem] {
-        let body = """
-            <s:search xmlns:s="http://www.sonos.com/Services/1.1">\
-            <s:id>\(escapeXML(category))</s:id>\
-            <s:term>\(escapeXML(searchTerm))</s:term>\
-            <s:index>0</s:index><s:count>20</s:count>\
-            </s:search>
-            """
-        let xml = try await smapiSoap(smapiURI: smapiURI, action: "search", body: body,
-                                       deviceId: deviceId, householdId: householdId,
-                                       token: token, key: key)
-        return parseSMAPIResults(xml, serviceId: serviceId)
-    }
-
     nonisolated static func searchMusicService(smapiURI: String, sessionId: String, serviceId: Int,
                                                 searchTerm: String, category: String = "tracks") async throws -> [BrowseItem] {
         guard let url = URL(string: smapiURI) else { throw URLError(.badURL) }
@@ -574,7 +447,8 @@ enum SonosAPI {
         guard let url = URL(string: "http://\(cleanIP):\(port)\(endpoint)") else {
             throw URLError(.badURL)
         }
-        let timeout: TimeInterval = (action == "RemoveAllTracksFromQueue" || action == "AddURIToQueue") ? 30 : 10
+        let longActions: Set<String> = ["RemoveAllTracksFromQueue", "AddURIToQueue", "SetAVTransportURI"]
+        let timeout: TimeInterval = longActions.contains(action) ? 30 : 10
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
@@ -607,7 +481,7 @@ enum SonosAPI {
         return String(xml[range])
     }
 
-    private nonisolated static func decodeXMLEntities(_ text: String) -> String {
+    nonisolated static func decodeXMLEntities(_ text: String) -> String {
         text.replacingOccurrences(of: "&lt;", with: "<")
             .replacingOccurrences(of: "&gt;", with: ">")
             .replacingOccurrences(of: "&amp;", with: "&")
@@ -845,7 +719,7 @@ enum SonosAPI {
 
     // MARK: - XML Escape
 
-    private nonisolated static func escapeXML(_ str: String) -> String {
+    nonisolated static func escapeXML(_ str: String) -> String {
         str.replacingOccurrences(of: "&", with: "&amp;")
            .replacingOccurrences(of: "<", with: "&lt;")
            .replacingOccurrences(of: ">", with: "&gt;")

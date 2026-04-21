@@ -130,6 +130,8 @@ struct TrackInfo: Codable, Equatable, Sendable {
     var position: String?
     var source: PlaybackSource = .unknown
     var audioQuality: AudioQuality?
+    /// Raw Sonos transport URI (for debugging/comparison).
+    var trackURI: String?
 
     var durationSeconds: TimeInterval { SonosTime.parse(duration ?? "") }
     var positionSeconds: TimeInterval { SonosTime.parse(position ?? "") }
@@ -314,6 +316,50 @@ struct BrowseItem: Identifiable, Codable, Sendable {
     var resMD: String?
     var isContainer: Bool
     var serviceId: Int?
+    /// Cloud API resource type: "TRACK", "ARTIST", "ALBUM", "PLAYLIST", "PROGRAM"
+    var cloudType: String?
+
+    var isArtist: Bool {
+        if cloudType == "ARTIST" { return true }
+        if let resMD, resMD.contains("musicArtist") { return true }
+        if let metaXML, metaXML.contains("musicArtist") { return true }
+        return false
+    }
+
+    enum FavoriteCategory: String, CaseIterable {
+        case playlist = "Playlists"
+        case album = "Albums"
+        case station = "Stations"
+        case artist = "Artists"
+        case other = "Other"
+    }
+
+    var favoriteCategory: FavoriteCategory {
+        let classStr = upnpClass
+        if classStr.contains("musicArtist") { return .artist }
+        if classStr.contains("audioBroadcast") || classStr.contains("audioItem") && !classStr.contains("musicTrack") { return .station }
+        if classStr.contains("musicAlbum") { return .album }
+        if classStr.contains("playlistContainer") || classStr.contains("sameArtist") { return .playlist }
+        // Fallback heuristics using URI scheme
+        if let uri {
+            if uri.contains("x-sonosapi-radio:") || uri.contains("x-sonosapi-stream:") { return .station }
+            if uri.contains("x-rincon-cpcontainer:") { return .playlist }
+        }
+        if isContainer { return .playlist }
+        return .other
+    }
+
+    private var upnpClass: String {
+        if let resMD, let cls = extractInlineTag("upnp:class", from: resMD) { return cls }
+        if let metaXML, let cls = extractInlineTag("upnp:class", from: metaXML) { return cls }
+        return ""
+    }
+
+    private func extractInlineTag(_ tag: String, from xml: String) -> String? {
+        guard let start = xml.range(of: "<\(tag)>"),
+              let end = xml.range(of: "</\(tag)>", range: start.upperBound..<xml.endIndex) else { return nil }
+        return String(xml[start.upperBound..<end.lowerBound])
+    }
 }
 
 struct MusicService: Identifiable, Sendable {
@@ -327,18 +373,6 @@ struct MusicService: Identifiable, Sendable {
     var canSearch: Bool { capabilitiesMask & 1 != 0 }
     var isAnonymous: Bool { authType == "Anonymous" }
     var needsLogin: Bool { authType == "AppLink" || authType == "DeviceLink" }
-}
-
-// MARK: - SMAPI Credentials
-
-struct SMAPICredentials: Codable, Sendable {
-    var token: String
-    var key: String
-}
-
-struct SMAPILinkResult: Sendable {
-    var regUrl: String
-    var linkCode: String
 }
 
 // MARK: - Live Activity

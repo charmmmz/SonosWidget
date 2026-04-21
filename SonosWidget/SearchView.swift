@@ -5,6 +5,9 @@ struct SearchView: View {
     @State var searchManager = SearchManager()
     @State private var searchText = ""
     @State private var showServiceSettings = false
+    @State private var expandedCategory: BrowseItem.FavoriteCategory?
+    /// nil = "All", otherwise the serviceId string
+    @State private var selectedServiceTab: String?
 
     var body: some View {
         NavigationStack {
@@ -39,9 +42,6 @@ struct SearchView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        if !searchManager.hasFinishedProbing {
-                            Task { await searchManager.probeLinkedServices() }
-                        }
                         showServiceSettings = true
                     } label: {
                         Image(systemName: "slider.horizontal.3")
@@ -53,12 +53,15 @@ struct SearchView: View {
             .preferredColorScheme(.dark)
             .searchable(text: $searchText, prompt: "Songs, artists, albums…")
             .onChange(of: searchText) { _, newValue in
+                selectedServiceTab = nil
                 searchManager.search(query: newValue)
             }
             .onAppear {
                 searchManager.configure(speakerIP: manager.selectedSpeaker?.playbackIP)
-                if searchManager.favorites.isEmpty {
-                    Task { await searchManager.loadBrowseContent() }
+                Task {
+                    async let browse: () = searchManager.loadBrowseContent()
+                    async let probe: () = searchManager.probeLinkedServices()
+                    _ = await (browse, probe)
                 }
             }
             .onChange(of: manager.selectedSpeaker?.ipAddress) { _, newIP in
@@ -68,6 +71,17 @@ struct SearchView: View {
             }
             .sheet(isPresented: $showServiceSettings) {
                 ServiceSettingsSheet(searchManager: searchManager)
+            }
+            .confirmationDialog("Start Station",
+                                isPresented: $searchManager.showStationPicker,
+                                titleVisibility: .visible) {
+                ForEach(searchManager.stationOptions) { option in
+                    Button(option.name) {
+                        guard let mgr = searchManager.pendingStationManager else { return }
+                        Task { await searchManager.playStationOption(option, manager: mgr) }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
             }
         }
     }
@@ -84,13 +98,22 @@ struct SearchView: View {
                         Spacer()
                     }
                     .padding(.top, 40)
+                } else if let expanded = expandedCategory {
+                    expandedSection(category: expanded)
                 } else {
-                    if !searchManager.favorites.isEmpty {
-                        browseSection(title: "Favorites", items: searchManager.favorites, horizontal: true)
+                    let grouped = searchManager.groupedFavorites
+                    if !grouped.isEmpty {
+                        Text("Sonos Favorites")
+                            .font(.title.bold())
+                            .padding(.horizontal)
+
+                        ForEach(grouped, id: \.category) { group in
+                            favoriteSection(category: group.category, items: group.items)
+                        }
                     }
 
                     if !searchManager.playlists.isEmpty {
-                        browseSection(title: "Playlists", items: searchManager.playlists, horizontal: false)
+                        browseSection(title: "Sonos Playlists", items: searchManager.playlists, horizontal: false)
                     }
 
                     if !searchManager.radio.isEmpty {
@@ -109,6 +132,81 @@ struct SearchView: View {
         }
     }
 
+    // MARK: - Favorite Grouped Section
+
+    @ViewBuilder
+    private func favoriteSection(category: BrowseItem.FavoriteCategory, items: [BrowseItem]) -> some View {
+        let previewCount = 5
+        let hasMore = items.count > previewCount
+        let displayItems = hasMore ? Array(items.prefix(previewCount)) : items
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(category.rawValue)
+                    .font(.title3.bold())
+                Spacer()
+                if hasMore {
+                    Button("View All") {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            expandedCategory = category
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 12) {
+                    ForEach(displayItems) { item in
+                        browseCard(item, category: category)
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func expandedSection(category: BrowseItem.FavoriteCategory) -> some View {
+        let items = searchManager.favorites.filter { $0.favoriteCategory == category }
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        expandedCategory = nil
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.subheadline.weight(.semibold))
+                        Text("Back")
+                            .font(.subheadline)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal)
+
+            Text(category.rawValue)
+                .font(.title.bold())
+                .padding(.horizontal)
+
+            let columns = [GridItem(.adaptive(minimum: 140, maximum: 180), spacing: 16)]
+            LazyVGrid(columns: columns, spacing: 20) {
+                ForEach(items) { item in
+                    browseCard(item, category: category)
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+
+    // MARK: - Generic Section (for Sonos Playlists / Radio)
+
     @ViewBuilder
     private func browseSection(title: String, items: [BrowseItem], horizontal: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -120,7 +218,7 @@ struct SearchView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 12) {
                         ForEach(items) { item in
-                            browseCard(item)
+                            browseCard(item, category: nil)
                         }
                     }
                     .padding(.horizontal)
@@ -135,7 +233,9 @@ struct SearchView: View {
         }
     }
 
-    private func browseCard(_ item: BrowseItem) -> some View {
+    // MARK: - Cards
+
+    private func browseCard(_ item: BrowseItem, category: BrowseItem.FavoriteCategory?) -> some View {
         Button {
             Task { await searchManager.playNow(item: item, manager: manager) }
         } label: {
@@ -146,30 +246,64 @@ struct SearchView: View {
                     } else {
                         Rectangle().fill(.quaternary)
                             .overlay {
-                                Image(systemName: item.isContainer ? "music.note.list" : "music.note")
+                                Image(systemName: placeholderIcon(for: item, category: category))
                                     .foregroundStyle(.tertiary)
                             }
                     }
                 }
                 .frame(width: 140, height: 140)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: category == .artist ? 70 : 10))
 
                 Text(item.title)
                     .font(.caption.weight(.medium))
                     .lineLimit(2)
                     .foregroundStyle(.primary)
 
-                if !item.artist.isEmpty {
-                    Text(item.artist)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                categoryLabel(for: item, category: category)
             }
             .frame(width: 140)
         }
         .buttonStyle(.plain)
         .contextMenu { itemContextMenu(item) }
+    }
+
+    @ViewBuilder
+    private func categoryLabel(for item: BrowseItem, category: BrowseItem.FavoriteCategory?) -> some View {
+        let cat = category ?? item.favoriteCategory
+        let subtitle: String = {
+            switch cat {
+            case .playlist: return item.artist.isEmpty ? "Playlist" : item.artist
+            case .album: return item.artist.isEmpty ? "Album" : "\(item.artist) · Album"
+            case .station: return "Station"
+            case .artist: return "Artist"
+            case .other: return item.artist.isEmpty ? "" : item.artist
+            }
+        }()
+
+        if !subtitle.isEmpty {
+            HStack(spacing: 4) {
+                if cat == .station || cat == .playlist || cat == .album {
+                    Image(systemName: "applelogo")
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                }
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private func placeholderIcon(for item: BrowseItem, category: BrowseItem.FavoriteCategory?) -> String {
+        let cat = category ?? item.favoriteCategory
+        switch cat {
+        case .playlist: return "music.note.list"
+        case .album: return "opticaldisc"
+        case .station: return "antenna.radiowaves.left.and.right"
+        case .artist: return "person.fill"
+        case .other: return item.isContainer ? "music.note.list" : "music.note"
+        }
     }
 
     private func browseRow(_ item: BrowseItem) -> some View {
@@ -216,11 +350,11 @@ struct SearchView: View {
         .contextMenu { itemContextMenu(item) }
     }
 
-    // MARK: - Search Results
+    // MARK: - Search Results (Tabbed)
 
     private var searchResultsContent: some View {
         Group {
-            if searchManager.isSearching {
+            if searchManager.isSearching && searchManager.searchResults.isEmpty {
                 VStack {
                     Spacer()
                     ProgressView("Searching…")
@@ -229,79 +363,346 @@ struct SearchView: View {
             } else if searchManager.searchResults.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
-                List {
-                    ForEach(searchManager.searchResults) { group in
-                        Section(group.service.name) {
-                            ForEach(group.items) { item in
-                                searchResultRow(item)
-                                    .contextMenu { itemContextMenu(item) }
-                            }
-                        }
+                VStack(spacing: 0) {
+                    serviceTabBar
+                    Divider().opacity(0.3)
+                    ScrollView {
+                        groupedResultsForSelectedTab
+                            .padding(.vertical, 12)
                     }
                 }
-                .listStyle(.plain)
             }
         }
     }
 
-    private func searchResultRow(_ item: BrowseItem) -> some View {
-        Button {
-            Task { await searchManager.playNow(item: item, manager: manager) }
-        } label: {
-            HStack(spacing: 12) {
-                AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
-                    if let img = phase.image {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        Rectangle().fill(.quaternary)
-                            .overlay { Image(systemName: "music.note").font(.caption2).foregroundStyle(.tertiary) }
-                    }
-                }
-                .frame(width: 48, height: 48)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+    // MARK: Service Tab Bar
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    HStack(spacing: 4) {
-                        if !item.artist.isEmpty {
-                            Text(item.artist)
-                        }
-                        if !item.album.isEmpty {
-                            Text("· \(item.album)")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+    private var serviceTabBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                serviceTabChip(id: nil, label: "All", icon: nil)
+                ForEach(searchManager.searchResults) { group in
+                    serviceTabChip(id: group.id, label: group.serviceName,
+                                   icon: serviceTabIcon(group.id))
                 }
-
-                Spacer()
             }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private func serviceTabChip(id: String?, label: String, icon: String?) -> some View {
+        let isSelected = selectedServiceTab == id
+        return Button {
+            withAnimation(.easeInOut(duration: 0.2)) { selectedServiceTab = id }
+        } label: {
+            HStack(spacing: 6) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.caption)
+                }
+                Text(label)
+                    .font(.subheadline.weight(.medium))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.white : Color.white.opacity(0.1))
+            .foregroundStyle(isSelected ? .black : .white)
+            .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    private func serviceTabIcon(_ serviceId: String) -> String? {
+        switch serviceId {
+        case "52231": return "apple.logo"
+        case "3079": return "bolt.horizontal.circle.fill"
+        case "42247": return "cloud.fill"
+        case "49671": return "waveform.circle.fill"
+        case "77575": return "antenna.radiowaves.left.and.right"
+        default: return "music.note"
+        }
+    }
+
+    // MARK: Grouped Results
+
+    private enum ResultCategory: String, CaseIterable {
+        case artist = "Artists"
+        case track = "Songs"
+        case album = "Albums"
+        case playlist = "Playlists"
+        case program = "Stations"
+    }
+
+    private func categoryFor(_ item: BrowseItem) -> ResultCategory {
+        switch item.cloudType {
+        case "ARTIST": return .artist
+        case "TRACK": return .track
+        case "ALBUM": return .album
+        case "PLAYLIST": return .playlist
+        case "PROGRAM": return .program
+        default: return .track
+        }
+    }
+
+    /// Items for the currently selected tab, grouped by type.
+    private var groupedResultsForSelectedTab: some View {
+        let items: [BrowseItem] = {
+            if let sid = selectedServiceTab {
+                return searchManager.searchResults.first { $0.id == sid }?.items ?? []
+            }
+            // "All" tab: merge all services, keeping service order
+            return searchManager.searchResults.flatMap { $0.items }
+        }()
+
+        let grouped = Dictionary(grouping: items) { categoryFor($0) }
+
+        return VStack(alignment: .leading, spacing: 24) {
+            // When "All" tab and multiple services, show per-service sections
+            if selectedServiceTab == nil && searchManager.searchResults.count > 1 {
+                ForEach(searchManager.searchResults) { group in
+                    allTabServiceSection(group)
+                }
+            } else {
+                // Single service or specific service tab: group by type
+                ForEach(ResultCategory.allCases, id: \.self) { category in
+                    if let categoryItems = grouped[category], !categoryItems.isEmpty {
+                        resultCategorySection(category: category, items: categoryItems)
+                    }
+                }
+            }
+        }
+    }
+
+    /// "All" tab: a section for each service with a header, showing grouped results inside.
+    @ViewBuilder
+    private func allTabServiceSection(_ group: SearchManager.ServiceSearchResult) -> some View {
+        let grouped = Dictionary(grouping: group.items) { categoryFor($0) }
+
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                if let icon = serviceTabIcon(group.id) {
+                    Image(systemName: icon)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+                Text(group.serviceName)
+                    .font(.title2.bold())
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) { selectedServiceTab = group.id }
+            }
+
+            ForEach(ResultCategory.allCases, id: \.self) { category in
+                if let categoryItems = grouped[category], !categoryItems.isEmpty {
+                    resultCategorySection(category: category,
+                                          items: Array(categoryItems.prefix(category == .artist ? 10 : 5)))
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func resultCategorySection(category: ResultCategory, items: [BrowseItem]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(category.rawValue)
+                .font(.title3.bold())
+                .padding(.horizontal)
+
+            switch category {
+            case .artist:
+                artistHorizontalScroll(items: items)
+            case .track, .program:
+                songList(items: items)
+            case .album, .playlist:
+                albumHorizontalScroll(items: items)
+            }
+        }
+    }
+
+    // MARK: Artist Horizontal Scroll (circular images)
+
+    private func artistHorizontalScroll(items: [BrowseItem]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 16) {
+                ForEach(items) { item in
+                    Button {
+                        Task { await searchManager.startStation(item: item, manager: manager) }
+                    } label: {
+                        VStack(spacing: 8) {
+                            AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
+                                if let img = phase.image {
+                                    img.resizable().aspectRatio(contentMode: .fill)
+                                } else {
+                                    Circle().fill(.quaternary)
+                                        .overlay {
+                                            Image(systemName: "person.fill")
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                }
+                            }
+                            .frame(width: 120, height: 120)
+                            .clipShape(Circle())
+
+                            Text(item.title)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+
+                            Text("Artist")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(width: 120)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { itemContextMenu(item) }
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+
+    // MARK: Song List (rows)
+
+    private func songList(items: [BrowseItem]) -> some View {
+        LazyVStack(spacing: 0) {
+            ForEach(items) { item in
+                Button {
+                    Task { await searchManager.playNow(item: item, manager: manager) }
+                } label: {
+                    HStack(spacing: 12) {
+                        AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
+                            if let img = phase.image {
+                                img.resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                Rectangle().fill(.quaternary)
+                                    .overlay {
+                                        Image(systemName: item.cloudType == "PROGRAM"
+                                              ? "antenna.radiowaves.left.and.right"
+                                              : "music.note")
+                                            .font(.caption2).foregroundStyle(.tertiary)
+                                    }
+                            }
+                        }
+                        .frame(width: 48, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.title)
+                                .font(.subheadline)
+                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                if item.cloudType == "PROGRAM" {
+                                    Text("Station")
+                                } else {
+                                    if !item.artist.isEmpty { Text(item.artist) }
+                                    if !item.album.isEmpty { Text("· \(item.album)") }
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        }
+
+                        Spacer()
+
+                        Button {
+                            // Future: show action sheet
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 32, height: 32)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+                .contextMenu { itemContextMenu(item) }
+            }
+        }
+    }
+
+    // MARK: Album / Playlist Horizontal Scroll
+
+    private func albumHorizontalScroll(items: [BrowseItem]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 12) {
+                ForEach(items) { item in
+                    Button {
+                        Task { await searchManager.playNow(item: item, manager: manager) }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
+                                if let img = phase.image {
+                                    img.resizable().aspectRatio(contentMode: .fill)
+                                } else {
+                                    Rectangle().fill(.quaternary)
+                                        .overlay {
+                                            Image(systemName: item.cloudType == "PLAYLIST"
+                                                  ? "music.note.list" : "opticaldisc")
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                }
+                            }
+                            .frame(width: 140, height: 140)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                            Text(item.title)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(2)
+
+                            if !item.artist.isEmpty {
+                                Text(item.artist)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .frame(width: 140)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { itemContextMenu(item) }
+                }
+            }
+            .padding(.horizontal)
+        }
     }
 
     // MARK: - Context Menu
 
     @ViewBuilder
     private func itemContextMenu(_ item: BrowseItem) -> some View {
-        if item.uri != nil {
+        if item.isArtist {
+            Button {
+                Task { await searchManager.startStation(item: item, manager: manager) }
+            } label: {
+                Label("Start Station", systemImage: "antenna.radiowaves.left.and.right")
+            }
+        } else if item.uri != nil || item.resMD != nil {
             Button {
                 Task { await searchManager.playNow(item: item, manager: manager) }
             } label: {
                 Label("Play Now", systemImage: "play.fill")
             }
-            Button {
-                Task { await searchManager.playNext(item: item, manager: manager) }
-            } label: {
-                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-            Button {
-                Task { await searchManager.addToQueue(item: item, manager: manager) }
-            } label: {
-                Label("Add to Queue", systemImage: "text.badge.plus")
+            if item.uri != nil {
+                Button {
+                    Task { await searchManager.playNext(item: item, manager: manager) }
+                } label: {
+                    Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                }
+                Button {
+                    Task { await searchManager.addToQueue(item: item, manager: manager) }
+                } label: {
+                    Label("Add to Queue", systemImage: "text.badge.plus")
+                }
             }
         }
     }
@@ -312,9 +713,6 @@ struct SearchView: View {
 struct ServiceSettingsSheet: View {
     @Bindable var searchManager: SearchManager
     @Environment(\.dismiss) private var dismiss
-
-    /// Well-known services to show at the top of the auth list.
-    private let pinnedServiceIds: Set<Int> = [12, 204, 284, 201, 174, 2, 165, 160, 212]
 
     var body: some View {
         NavigationStack {
@@ -328,40 +726,22 @@ struct ServiceSettingsSheet: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if searchManager.linkedAccounts.isEmpty {
+                    ContentUnavailableView(
+                        "未检测到流媒体",
+                        systemImage: "music.note.list",
+                        description: Text("请先在 Sonos 官方 App 中绑定流媒体服务，然后点击下方刷新。")
+                    )
                 } else {
                     List {
-                        // Authenticated services (Spotify, Apple Music, etc.)
-                        if !searchManager.authServices.isEmpty {
-                            Section {
-                                ForEach(sortedAuthServices) { service in
-                                    authServiceRow(service)
-                                }
-                            } header: {
-                                Text("需要登录的服务")
-                            } footer: {
-                                Text("点击\"登录\"授权后即可搜索该服务的曲库。登录信息保存在本地。")
-                            }
-                        }
-
-                        // Anonymous services (TuneIn, Sonos Radio, etc.)
-                        if !searchManager.anonymousServices.isEmpty {
-                            Section {
-                                ForEach(searchManager.anonymousServices) { service in
-                                    anonymousServiceRow(service)
-                                }
-                            } header: {
-                                Text("免登录服务")
-                            } footer: {
-                                Text("这些服务无需登录即可搜索。")
-                            }
-                        }
-
                         Section {
-                            Button {
-                                Task { await searchManager.forceReprobe() }
-                            } label: {
-                                Label("刷新列表", systemImage: "arrow.clockwise")
+                            ForEach(sortedAccounts, id: \.serviceId) { account in
+                                accountRow(account)
                             }
+                        } header: {
+                            Text("已绑定的流媒体 (\(searchManager.linkedAccounts.count))")
+                        } footer: {
+                            Text("这些流媒体已在你的 Sonos 系统中绑定。搜索功能通过 Sonos Cloud 直接代理，无需额外登录。")
                         }
                     }
                 }
@@ -369,108 +749,70 @@ struct ServiceSettingsSheet: View {
             .navigationTitle("搜索设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        Task { await searchManager.forceReprobe() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                 }
             }
             .preferredColorScheme(.dark)
-            .alert("登录失败", isPresented: .init(
-                get: { searchManager.linkError != nil },
-                set: { if !$0 { searchManager.linkError = nil } }
-            )) {
-                Button("好") { searchManager.linkError = nil }
-            } message: {
-                Text(searchManager.linkError ?? "")
-            }
         }
         .presentationDetents([.medium, .large])
     }
 
-    private var sortedAuthServices: [MusicService] {
-        searchManager.authServices.sorted { a, b in
-            let aPinned = pinnedServiceIds.contains(a.id)
-            let bPinned = pinnedServiceIds.contains(b.id)
+    private var sortedAccounts: [SonosCloudAPI.CloudMusicServiceAccount] {
+        let pinned: Set<String> = ["3079", "52231", "42247", "49671"]
+        return searchManager.linkedAccounts.sorted { a, b in
+            let aPinned = pinned.contains(a.serviceId ?? "")
+            let bPinned = pinned.contains(b.serviceId ?? "")
             if aPinned != bPinned { return aPinned }
-            let aLinked = searchManager.linkedAuthServices.contains(a.id)
-            let bLinked = searchManager.linkedAuthServices.contains(b.id)
-            if aLinked != bLinked { return aLinked }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
         }
     }
 
-    @ViewBuilder
-    private func authServiceRow(_ service: MusicService) -> some View {
-        let isLinked = searchManager.linkedAuthServices.contains(service.id)
-        let enabled = searchManager.serviceEnabled[service.id] ?? false
+    private func accountRow(_ account: SonosCloudAPI.CloudMusicServiceAccount) -> some View {
+        let sid = account.serviceId ?? ""
+        let enabled = searchManager.serviceEnabled[sid] ?? true
 
-        HStack(spacing: 12) {
-            Image(systemName: isLinked ? "checkmark.circle.fill" : "person.crop.circle.badge.questionmark")
+        return HStack(spacing: 12) {
+            Image(systemName: serviceIcon(for: sid))
                 .font(.title3)
-                .foregroundStyle(isLinked ? .green : .secondary)
+                .foregroundStyle(enabled ? .green : .secondary)
                 .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(service.name)
-                    .foregroundStyle(isLinked ? .primary : .secondary)
-                if isLinked {
-                    Text("已登录")
+                Text(account.displayName)
+                    .foregroundStyle(enabled ? .primary : .secondary)
+                if let nick = account.nickname, nick != account.displayName {
+                    Text(nick)
                         .font(.caption2)
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.tertiary)
                 }
             }
-
-            Spacer()
-
-            if isLinked {
-                Toggle("", isOn: Binding(
-                    get: { searchManager.serviceEnabled[service.id] ?? true },
-                    set: { searchManager.setServiceEnabled(service, enabled: $0) }
-                ))
-                .labelsHidden()
-            } else if searchManager.isLinking && searchManager.linkingService?.id == service.id {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Button("登录") {
-                    Task {
-                        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                              let window = scene.windows.first else { return }
-                        await searchManager.startLinking(service: service, from: window)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        }
-        .swipeActions(edge: .trailing) {
-            if isLinked {
-                Button(role: .destructive) {
-                    searchManager.deleteCredentials(serviceId: service.id)
-                } label: {
-                    Label("退出", systemImage: "trash")
-                }
-            }
-        }
-    }
-
-    private func anonymousServiceRow(_ service: MusicService) -> some View {
-        let enabled = searchManager.serviceEnabled[service.id] ?? true
-        HStack(spacing: 12) {
-            Image(systemName: "music.note")
-                .font(.title3)
-                .foregroundStyle(enabled ? .primary : .tertiary)
-                .frame(width: 32)
-
-            Text(service.name)
-                .foregroundStyle(enabled ? .primary : .secondary)
 
             Spacer()
 
             Toggle("", isOn: Binding(
-                get: { searchManager.serviceEnabled[service.id] ?? true },
-                set: { searchManager.setServiceEnabled(service, enabled: $0) }
+                get: { searchManager.serviceEnabled[sid] ?? true },
+                set: { searchManager.setServiceEnabled(serviceId: sid, enabled: $0) }
             ))
             .labelsHidden()
+        }
+    }
+
+    private func serviceIcon(for serviceId: String) -> String {
+        switch serviceId {
+        case "3079": return "bolt.horizontal.circle.fill" // Spotify
+        case "52231": return "apple.logo" // Apple Music
+        case "42247": return "cloud.fill" // NetEase
+        case "49671": return "waveform.circle.fill" // Lizhi
+        case "77575": return "antenna.radiowaves.left.and.right" // Sonos Radio
+        default: return "music.note"
         }
     }
 }
