@@ -270,10 +270,8 @@ struct PlayerView: View {
                 .padding(.bottom, manager.showFullPlayer ? 20 : 76)
         }
         .onAppear {
-            manager.startAutoRefresh()
             Task { await manager.refreshAllGroupStatuses() }
         }
-        .onDisappear { manager.stopAutoRefresh() }
     }
 
     private var ungroupZone: some View {
@@ -483,6 +481,7 @@ private struct SpeakerGroupCardView: View {
     @Bindable var manager: SonosManager
 
     @State private var premuteGroupVolume: Int?
+    @State private var premuteMemberVolumes: [String: Int] = [:]
     @State private var showMemberVolumes = false
 
     private var expandButton: some View {
@@ -562,9 +561,15 @@ private struct SpeakerGroupCardView: View {
 
                     CircularProgressPlayButton(
                         isPlaying: group.transportState == .playing,
-                        progress: isCurrentGroup && manager.durationSeconds > 0
-                            ? manager.positionSeconds / manager.durationSeconds
-                            : 0,
+                        progress: {
+                            if isCurrentGroup, manager.durationSeconds > 0 {
+                                return manager.positionSeconds / manager.durationSeconds
+                            }
+                            if let t = group.trackInfo, t.durationSeconds > 0 {
+                                return t.positionSeconds / t.durationSeconds
+                            }
+                            return 0
+                        }(),
                         accent: isCurrentGroup ? accent : .white.opacity(0.55),
                         size: 32,
                         ringWidth: 2.5
@@ -683,6 +688,17 @@ private struct SpeakerGroupCardView: View {
                                 .font(.system(size: 9))
                                 .foregroundStyle(.white.opacity(0.35))
                                 .frame(width: 14)
+                                .contentShape(Rectangle())
+                                .onLongPressGesture {
+                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                    if vol > 0 {
+                                        premuteMemberVolumes[member.ipAddress] = vol
+                                        Task { await manager.setMemberVolume(ip: member.ipAddress, volume: 0) }
+                                    } else if let saved = premuteMemberVolumes[member.ipAddress] {
+                                        premuteMemberVolumes[member.ipAddress] = nil
+                                        Task { await manager.setMemberVolume(ip: member.ipAddress, volume: saved) }
+                                    }
+                                }
                                 .animation(.easeInOut, value: vol)
 
                             GroupVolumeBar(volume: vol) { step in
@@ -806,7 +822,6 @@ struct NowPlayingOverlay: View {
     @Bindable var manager: SonosManager
     @State private var volumeSliderValue: Double = 0
     @State private var isDraggingVolume = false
-    @State private var showMemberVolumes = false
     @State private var premuteVolume: Int?
     @State private var scrubPosition: TimeInterval = 0
     @State private var isScrubbing = false
@@ -848,8 +863,9 @@ struct NowPlayingOverlay: View {
 
         return VStack(spacing: 0) {
             dragHandle
-                .padding(.top, 8)
-                .padding(.bottom, 10 * s)
+                .padding(.top, 4)
+
+            Spacer(minLength: 0)
 
             albumArtView(size: artSz)
 
@@ -870,7 +886,6 @@ struct NowPlayingOverlay: View {
                 .padding(.top, 16 * s)
 
             Spacer(minLength: 0)
-                .frame(maxHeight: 20 * s)
 
             errorBanner
         }
@@ -941,14 +956,21 @@ struct NowPlayingOverlay: View {
 
             // ── Right panel: queue ──
             VStack(spacing: 0) {
-                Text("QUEUE")
-                    .font(.system(size: 11, weight: .bold))
-                    .tracking(1)
-                    .foregroundStyle(.white.opacity(0.45))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 14)
-                    .padding(.bottom, 4)
+                HStack(spacing: 6) {
+                    Text("QUEUE")
+                        .font(.system(size: 11, weight: .bold))
+                        .tracking(1)
+                    if !manager.isPlayingFromQueue {
+                        Text("· NOT IN USE")
+                            .font(.system(size: 10, weight: .medium))
+                            .tracking(0.5)
+                    }
+                }
+                .foregroundStyle(.white.opacity(0.45))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
 
                 QueueView(manager: manager, showNavigation: false)
             }
@@ -989,7 +1011,7 @@ struct NowPlayingOverlay: View {
 
     private var dragHandle: some View {
         Capsule()
-            .fill(.white.opacity(0.4))
+            .fill(.white.opacity(0.2))
             .frame(width: 36, height: 5)
     }
 
@@ -1129,25 +1151,30 @@ struct NowPlayingOverlay: View {
         let modeFrame: CGFloat  = compact ? 30 : 38
         let playFrame: CGFloat  = compact ? 44 : 60
 
+        let queueActive = manager.isPlayingFromQueue
+
         return HStack(spacing: 0) {
             // Shuffle
             Button { Task { await manager.toggleShuffle() } } label: {
                 let accent = manager.albumArtDominantColor ?? .white
                 Image(systemName: "shuffle")
                     .font(.system(size: modeSize, weight: .semibold))
-                    .foregroundStyle(manager.isShuffling ? .white : .white.opacity(0.45))
+                    .foregroundStyle(manager.isShuffling && queueActive ? .white : .white.opacity(queueActive ? 0.45 : 0.2))
                     .frame(width: modeFrame, height: modeFrame)
-                    .background(manager.isShuffling ? accent.opacity(0.85) : Color.clear,
+                    .background(manager.isShuffling && queueActive ? accent.opacity(0.85) : Color.clear,
                                 in: Circle())
             }
             .buttonStyle(.plain)
+            .disabled(!queueActive)
 
             Spacer()
 
             // Previous
             Button { Task { await manager.previousTrack() } } label: {
                 Image(systemName: "backward.fill").font(.system(size: skipSize))
+                    .foregroundStyle(queueActive ? .white : .white.opacity(0.2))
             }
+            .disabled(!queueActive)
 
             Spacer()
 
@@ -1173,12 +1200,13 @@ struct NowPlayingOverlay: View {
                 let accent = manager.albumArtDominantColor ?? .white
                 Image(systemName: manager.repeatMode == .one ? "repeat.1" : "repeat")
                     .font(.system(size: modeSize, weight: .semibold))
-                    .foregroundStyle(manager.repeatMode != .off ? .white : .white.opacity(0.45))
+                    .foregroundStyle(manager.repeatMode != .off && queueActive ? .white : .white.opacity(queueActive ? 0.45 : 0.2))
                     .frame(width: modeFrame, height: modeFrame)
-                    .background(manager.repeatMode != .off ? accent.opacity(0.85) : Color.clear,
+                    .background(manager.repeatMode != .off && queueActive ? accent.opacity(0.85) : Color.clear,
                                 in: Circle())
             }
             .buttonStyle(.plain)
+            .disabled(!queueActive)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 32)
@@ -1191,137 +1219,60 @@ struct NowPlayingOverlay: View {
     }
 
     private var volumeControl: some View {
-        let members = manager.currentGroupMembers
-        let isGrouped = members.count > 1
+        HStack(spacing: 10) {
+            Image(systemName: currentVolume == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.4))
+                .frame(width: 24, height: 28)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    let newVol = max(0, currentVolume - 2)
+                    Task { await manager.updateVolume(newVol) }
+                }
+                .onLongPressGesture {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    if currentVolume > 0 {
+                        premuteVolume = currentVolume
+                        Task { await manager.updateVolume(0) }
+                    } else if let saved = premuteVolume {
+                        premuteVolume = nil
+                        Task { await manager.updateVolume(saved) }
+                    }
+                }
 
-        return VStack(spacing: 10) {
-            // ── Master / Group volume row ──
-            HStack(spacing: 10) {
-                Image(systemName: currentVolume == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
-                    .font(.caption)
+            ThumblessSlider(
+                value: Binding(
+                    get: { isDraggingVolume ? volumeSliderValue : Double(manager.volume) },
+                    set: { volumeSliderValue = $0; isDraggingVolume = true }
+                ),
+                range: 0...100,
+                tintColor: .white.opacity(0.8),
+                onStepTap: { step in
+                    let newVol = min(100, max(0, currentVolume + step))
+                    Task { await manager.updateVolume(newVol) }
+                }
+            ) { editing in
+                if !editing {
+                    isDraggingVolume = false
+                    Task { await manager.updateVolume(Int(volumeSliderValue)) }
+                }
+            }
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                let newVol = min(100, currentVolume + 2)
+                Task { await manager.updateVolume(newVol) }
+            } label: {
+                Text("\(currentVolume)")
+                    .font(.caption2.monospacedDigit().weight(.medium))
                     .foregroundStyle(.white.opacity(0.4))
-                    .frame(width: 24, height: 28)
+                    .frame(width: 22, height: 28)
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        let newVol = max(0, currentVolume - 2)
-                        Task { await manager.updateVolume(newVol) }
-                    }
-                    .onLongPressGesture {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        if currentVolume > 0 {
-                            premuteVolume = currentVolume
-                            Task { await manager.updateVolume(0) }
-                        } else if let saved = premuteVolume {
-                            premuteVolume = nil
-                            Task { await manager.updateVolume(saved) }
-                        }
-                    }
-
-                ThumblessSlider(
-                    value: Binding(
-                        get: { isDraggingVolume ? volumeSliderValue : Double(manager.volume) },
-                        set: { volumeSliderValue = $0; isDraggingVolume = true }
-                    ),
-                    range: 0...100,
-                    tintColor: .white.opacity(0.8),
-                    onStepTap: { step in
-                        let newVol = min(100, max(0, currentVolume + step))
-                        Task { await manager.updateVolume(newVol) }
-                    }
-                ) { editing in
-                    if !editing {
-                        isDraggingVolume = false
-                        Task { await manager.updateVolume(Int(volumeSliderValue)) }
-                    }
-                }
-
-                // Volume number + expand button (grouped only)
-                HStack(spacing: 4) {
-                    Button {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        let newVol = min(100, currentVolume + 2)
-                        Task { await manager.updateVolume(newVol) }
-                    } label: {
-                        Text("\(currentVolume)")
-                            .font(.caption2.monospacedDigit().weight(.medium))
-                            .foregroundStyle(.white.opacity(0.4))
-                            .frame(width: 22, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    if isGrouped {
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                showMemberVolumes.toggle()
-                            }
-                            if showMemberVolumes {
-                                Task { await manager.fetchMemberVolumes() }
-                            }
-                        } label: {
-                            Image(systemName: showMemberVolumes ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.45))
-                                .frame(width: 18, height: 28)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
             }
-
-            // ── Per-member volume sliders (expanded) ──
-            if showMemberVolumes && isGrouped {
-                VStack(spacing: 8) {
-                    ForEach(members) { member in
-                        let vol = manager.memberVolumes[member.ipAddress] ?? 0
-                        HStack(spacing: 8) {
-                            Text(member.name)
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.55))
-                                .frame(width: 72, alignment: .leading)
-                                .lineLimit(1)
-
-                            Image(systemName: vol == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.white.opacity(0.35))
-                                .frame(width: 16)
-
-                            ThumblessSlider(
-                                value: Binding(
-                                    get: { Double(manager.memberVolumes[member.ipAddress] ?? 0) },
-                                    set: { manager.memberVolumes[member.ipAddress] = Int($0) }
-                                ),
-                                range: 0...100,
-                                tintColor: .white.opacity(0.6),
-                                onStepTap: { step in
-                                    let cur = manager.memberVolumes[member.ipAddress] ?? 0
-                                    let nv = min(100, max(0, cur + step))
-                                    Task { await manager.setMemberVolume(ip: member.ipAddress, volume: nv) }
-                                }
-                            ) { editing in
-                                if !editing {
-                                    let v = manager.memberVolumes[member.ipAddress] ?? 0
-                                    Task { await manager.setMemberVolume(ip: member.ipAddress, volume: v) }
-                                }
-                            }
-
-                            Text("\(vol)")
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.35))
-                                .frame(width: 22, alignment: .trailing)
-                        }
-                    }
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 32)
-        .onChange(of: isGrouped) { _, newVal in
-            if !newVal { showMemberVolumes = false }
-        }
     }
 
     // MARK: - Bottom Actions (Speaker + optional Queue button)
@@ -1334,16 +1285,21 @@ struct NowPlayingOverlay: View {
                 manager.showingSpeakerPicker = true
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "hifispeaker.fill")
+                    Image(systemName: manager.isEverywhereActive ? "house.fill" : "hifispeaker.fill")
                         .font(.subheadline)
-                    Text(manager.selectedSpeaker?.name ?? "Select Speaker")
-                        .font(.subheadline.weight(.medium))
-                    if manager.currentGroupMembers.count > 1 {
-                        Text("+ \(manager.currentGroupMembers.count - 1)")
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.white.opacity(0.2), in: Capsule())
+                    if manager.isEverywhereActive {
+                        Text("Everywhere")
+                            .font(.subheadline.weight(.medium))
+                    } else {
+                        Text(manager.selectedSpeaker?.name ?? "Select Speaker")
+                            .font(.subheadline.weight(.medium))
+                        if manager.currentGroupMembers.count > 1 {
+                            Text("+ \(manager.currentGroupMembers.count - 1)")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.white.opacity(0.2), in: Capsule())
+                        }
                     }
                 }
                 .foregroundStyle(.white.opacity(0.7))

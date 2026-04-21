@@ -310,14 +310,35 @@ struct BrowseItem: Identifiable, Codable, Sendable {
     var albumArtURL: String?
     var uri: String?
     var metaXML: String?
+    /// Resource metadata from Sonos Favorites (`r:resMD`), decoded DIDL-Lite.
+    var resMD: String?
     var isContainer: Bool
+    var serviceId: Int?
 }
 
 struct MusicService: Identifiable, Sendable {
     var id: Int
     var name: String
     var smapiURI: String
-    var capabilities: Set<String>
+    var capabilitiesMask: Int
+    var authType: String
+    var serviceType: String = ""
+
+    var canSearch: Bool { capabilitiesMask & 1 != 0 }
+    var isAnonymous: Bool { authType == "Anonymous" }
+    var needsLogin: Bool { authType == "AppLink" || authType == "DeviceLink" }
+}
+
+// MARK: - SMAPI Credentials
+
+struct SMAPICredentials: Codable, Sendable {
+    var token: String
+    var key: String
+}
+
+struct SMAPILinkResult: Sendable {
+    var regUrl: String
+    var linkCode: String
 }
 
 // MARK: - Live Activity

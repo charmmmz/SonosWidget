@@ -4,6 +4,7 @@ struct SearchView: View {
     @Bindable var manager: SonosManager
     @State var searchManager = SearchManager()
     @State private var searchText = ""
+    @State private var showServiceSettings = false
 
     var body: some View {
         NavigationStack {
@@ -35,6 +36,18 @@ struct SearchView: View {
             }
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        if !searchManager.hasFinishedProbing {
+                            Task { await searchManager.probeLinkedServices() }
+                        }
+                        showServiceSettings = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                    }
+                }
+            }
             .toolbarBackground(.hidden, for: .navigationBar)
             .scrollContentBackground(.hidden)
             .preferredColorScheme(.dark)
@@ -50,7 +63,11 @@ struct SearchView: View {
             }
             .onChange(of: manager.selectedSpeaker?.ipAddress) { _, newIP in
                 searchManager.configure(speakerIP: manager.selectedSpeaker?.playbackIP)
+                searchManager.resetProbe()
                 Task { await searchManager.loadBrowseContent() }
+            }
+            .sheet(isPresented: $showServiceSettings) {
+                ServiceSettingsSheet(searchManager: searchManager)
             }
         }
     }
@@ -78,10 +95,6 @@ struct SearchView: View {
 
                     if !searchManager.radio.isEmpty {
                         browseSection(title: "Radio Stations", items: searchManager.radio, horizontal: true)
-                    }
-
-                    if !searchManager.musicServices.isEmpty {
-                        servicesSection
                     }
 
                     if searchManager.favorites.isEmpty && searchManager.playlists.isEmpty && searchManager.radio.isEmpty {
@@ -270,43 +283,6 @@ struct SearchView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Services Section
-
-    private var servicesSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Music Services")
-                .font(.title3.bold())
-                .padding(.horizontal)
-
-            LazyVStack(spacing: 0) {
-                ForEach(searchManager.musicServices) { service in
-                    HStack(spacing: 12) {
-                        Image(systemName: "music.note")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 36)
-
-                        Text(service.name)
-                            .font(.subheadline)
-
-                        Spacer()
-
-                        if service.capabilities.contains("search") {
-                            Text("Searchable")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(.ultraThinMaterial, in: Capsule())
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.vertical, 10)
-                }
-            }
-        }
-    }
-
     // MARK: - Context Menu
 
     @ViewBuilder
@@ -327,6 +303,174 @@ struct SearchView: View {
             } label: {
                 Label("Add to Queue", systemImage: "text.badge.plus")
             }
+        }
+    }
+}
+
+// MARK: - Service Settings Sheet
+
+struct ServiceSettingsSheet: View {
+    @Bindable var searchManager: SearchManager
+    @Environment(\.dismiss) private var dismiss
+
+    /// Well-known services to show at the top of the auth list.
+    private let pinnedServiceIds: Set<Int> = [12, 204, 284, 201, 174, 2, 165, 160, 212]
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if searchManager.isProbing {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text("正在检测可用服务…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        // Authenticated services (Spotify, Apple Music, etc.)
+                        if !searchManager.authServices.isEmpty {
+                            Section {
+                                ForEach(sortedAuthServices) { service in
+                                    authServiceRow(service)
+                                }
+                            } header: {
+                                Text("需要登录的服务")
+                            } footer: {
+                                Text("点击\"登录\"授权后即可搜索该服务的曲库。登录信息保存在本地。")
+                            }
+                        }
+
+                        // Anonymous services (TuneIn, Sonos Radio, etc.)
+                        if !searchManager.anonymousServices.isEmpty {
+                            Section {
+                                ForEach(searchManager.anonymousServices) { service in
+                                    anonymousServiceRow(service)
+                                }
+                            } header: {
+                                Text("免登录服务")
+                            } footer: {
+                                Text("这些服务无需登录即可搜索。")
+                            }
+                        }
+
+                        Section {
+                            Button {
+                                Task { await searchManager.forceReprobe() }
+                            } label: {
+                                Label("刷新列表", systemImage: "arrow.clockwise")
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("搜索设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+            .preferredColorScheme(.dark)
+            .alert("登录失败", isPresented: .init(
+                get: { searchManager.linkError != nil },
+                set: { if !$0 { searchManager.linkError = nil } }
+            )) {
+                Button("好") { searchManager.linkError = nil }
+            } message: {
+                Text(searchManager.linkError ?? "")
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var sortedAuthServices: [MusicService] {
+        searchManager.authServices.sorted { a, b in
+            let aPinned = pinnedServiceIds.contains(a.id)
+            let bPinned = pinnedServiceIds.contains(b.id)
+            if aPinned != bPinned { return aPinned }
+            let aLinked = searchManager.linkedAuthServices.contains(a.id)
+            let bLinked = searchManager.linkedAuthServices.contains(b.id)
+            if aLinked != bLinked { return aLinked }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+    }
+
+    @ViewBuilder
+    private func authServiceRow(_ service: MusicService) -> some View {
+        let isLinked = searchManager.linkedAuthServices.contains(service.id)
+        let enabled = searchManager.serviceEnabled[service.id] ?? false
+
+        HStack(spacing: 12) {
+            Image(systemName: isLinked ? "checkmark.circle.fill" : "person.crop.circle.badge.questionmark")
+                .font(.title3)
+                .foregroundStyle(isLinked ? .green : .secondary)
+                .frame(width: 32)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(service.name)
+                    .foregroundStyle(isLinked ? .primary : .secondary)
+                if isLinked {
+                    Text("已登录")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+            }
+
+            Spacer()
+
+            if isLinked {
+                Toggle("", isOn: Binding(
+                    get: { searchManager.serviceEnabled[service.id] ?? true },
+                    set: { searchManager.setServiceEnabled(service, enabled: $0) }
+                ))
+                .labelsHidden()
+            } else if searchManager.isLinking && searchManager.linkingService?.id == service.id {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button("登录") {
+                    Task {
+                        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                              let window = scene.windows.first else { return }
+                        await searchManager.startLinking(service: service, from: window)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            if isLinked {
+                Button(role: .destructive) {
+                    searchManager.deleteCredentials(serviceId: service.id)
+                } label: {
+                    Label("退出", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    private func anonymousServiceRow(_ service: MusicService) -> some View {
+        let enabled = searchManager.serviceEnabled[service.id] ?? true
+        HStack(spacing: 12) {
+            Image(systemName: "music.note")
+                .font(.title3)
+                .foregroundStyle(enabled ? .primary : .tertiary)
+                .frame(width: 32)
+
+            Text(service.name)
+                .foregroundStyle(enabled ? .primary : .secondary)
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { searchManager.serviceEnabled[service.id] ?? true },
+                set: { searchManager.setServiceEnabled(service, enabled: $0) }
+            ))
+            .labelsHidden()
         }
     }
 }

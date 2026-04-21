@@ -18,12 +18,14 @@ final class SonosManager {
     var albumArtDominantColor: Color?
     var showingAddSpeaker = false
     var showingQueue = false
+    var isPlayingFromQueue = true
     var showingSpeakerPicker = false
     var showFullPlayer = true
     var miniPlayerDragOffset: CGFloat = 0
     var memberVolumes: [String: Int] = [:]
     var groupAlbumColors: [String: Color] = [:]
     var groupAlbumImages: [String: UIImage] = [:]
+    private var groupLastArtURL: [String: String] = [:]
 
     var positionSeconds: TimeInterval = 0
     var durationSeconds: TimeInterval = 0
@@ -145,7 +147,6 @@ final class SonosManager {
         albumArtTask?.cancel()
         lastAlbumArtURL = nil
         albumArtImage = nil
-        trackInfo = nil
         consecutiveFailures = 0
         cloudGroupId = nil
         cachedCloudQuality = nil
@@ -154,6 +155,19 @@ final class SonosManager {
         queueArtCache.removeAllObjects()
         cachedArtURLs = []
         dominantColorCache = [:]
+
+        // Pre-populate from the group's cached trackInfo to avoid progress bar flash
+        if let group = groupStatuses.first(where: {
+            $0.coordinator.id == speaker.id || $0.coordinator.groupId == speaker.groupId
+        }) {
+            trackInfo = group.trackInfo
+            positionSeconds = group.trackInfo?.positionSeconds ?? 0
+            durationSeconds = group.trackInfo?.durationSeconds ?? 0
+        } else {
+            trackInfo = nil
+            positionSeconds = 0
+            durationSeconds = 0
+        }
 
         await refreshState()
         await resolveCloudGroupId()
@@ -487,6 +501,9 @@ final class SonosManager {
     func playTrackInQueue(_ item: QueueItem) async {
         guard let ip = playbackIP else { return }
         do {
+            if !isPlayingFromQueue, let speaker = selectedSpeaker {
+                try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: speaker.id)
+            }
             try await SonosAPI.seekToTrack(ip: ip, trackNumber: item.trackNumber)
             try await SonosAPI.play(ip: ip)
             try? await Task.sleep(for: .milliseconds(300))
@@ -500,6 +517,12 @@ final class SonosManager {
         guard let selected = selectedSpeaker else { return [] }
         let groupId = selected.groupId ?? selected.id
         return allSpeakers.filter { $0.groupId == groupId && !$0.isInvisible }
+    }
+
+    var isEverywhereActive: Bool {
+        let visible = allSpeakers.filter { !$0.isInvisible }
+        guard visible.count > 1, let gid = selectedSpeaker.map({ $0.groupId ?? $0.id }) else { return false }
+        return visible.allSatisfy { $0.groupId == gid }
     }
 
     func addSpeakerToGroup(_ speaker: SonosPlayer) async {
@@ -644,14 +667,14 @@ final class SonosManager {
                 groupAlbumImages[key] = nil
                 continue
             }
-            if groupAlbumImages[key] != nil,
-               status.trackInfo?.title == groupStatuses.first(where: { $0.id == key })?.trackInfo?.title {
+            if groupAlbumImages[key] != nil, groupLastArtURL[key] == urlStr {
                 continue
             }
             do {
                 let (data, _) = try await Self.albumArtSession.data(from: url)
                 if let image = UIImage(data: data) {
                     groupAlbumImages[key] = image
+                    groupLastArtURL[key] = urlStr
                     let color = dominantColorCache[urlStr] ?? image.dominantColor()
                     dominantColorCache[urlStr] = color
                     groupAlbumColors[key] = color
@@ -659,6 +682,7 @@ final class SonosManager {
             } catch {
                 groupAlbumColors[key] = nil
                 groupAlbumImages[key] = nil
+                groupLastArtURL[key] = nil
             }
         }
     }
@@ -682,10 +706,12 @@ final class SonosManager {
             async let p = SonosAPI.getPositionInfo(ip: pIP)
             async let v = SonosAPI.getVolume(ip: vIP)
             async let m = SonosAPI.getPlayMode(ip: pIP)
+            async let mediaURI = SonosAPI.getMediaInfo(ip: pIP)
             transportState = try await t
             trackInfo = try await p
             volume = try await v
             let mode = try await m
+            isPlayingFromQueue = (try? await mediaURI)?.hasPrefix("x-rincon-queue:") ?? true
             if Date() > playModeLockUntil {
                 isShuffling = mode.shuffle
                 repeatMode = mode.repeat
@@ -831,6 +857,11 @@ final class SonosManager {
                                                object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in self?.stopBackgroundKeepalive() }
         }
+        // End Live Activity when the app is killed so it doesn't linger on Lock Screen.
+        NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.stopLiveActivity()
+        }
     }
 
     func stopAutoRefresh() {
@@ -841,6 +872,8 @@ final class SonosManager {
             name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.removeObserver(self,
             name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.removeObserver(self,
+            name: UIApplication.willTerminateNotification, object: nil)
     }
 
     // MARK: - Background Keepalive for Live Activity

@@ -33,6 +33,8 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear { manager.startAutoRefresh() }
+        .onDisappear { manager.stopAutoRefresh() }
     }
 }
 

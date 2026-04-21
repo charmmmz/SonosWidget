@@ -28,6 +28,22 @@ struct QueueView: View {
             } else {
                 ScrollViewReader { proxy in
                     List {
+                        if !manager.isPlayingFromQueue {
+                            HStack(spacing: 6) {
+                                Image(systemName: "info.circle")
+                                    .font(.caption2)
+                                Text("QUEUE NOT IN USE")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .tracking(0.5)
+                                Text("— Tap a track to switch")
+                                    .font(.system(size: 10))
+                            }
+                            .foregroundStyle(.white.opacity(0.45))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                        }
+
                         ForEach(manager.queue) { item in
                             let isNowPlaying = item.id == nowPlayingID
 
@@ -88,7 +104,8 @@ struct QueueView: View {
     // MARK: - Helpers
 
     private var nowPlayingID: String? {
-        manager.queue.first(where: {
+        guard manager.isPlayingFromQueue else { return nil }
+        return manager.queue.first(where: {
             $0.title == manager.trackInfo?.title && $0.artist == manager.trackInfo?.artist
         })?.id
     }

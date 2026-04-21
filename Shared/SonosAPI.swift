@@ -74,6 +74,12 @@ enum SonosAPI {
         return TransportState(rawValue: raw) ?? .unknown
     }
 
+    nonisolated static func getMediaInfo(ip: String) async throws -> String {
+        let xml = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
+                                 action: "GetMediaInfo", body: "<InstanceID>0</InstanceID>")
+        return extractTag("CurrentURI", from: xml) ?? ""
+    }
+
     nonisolated static func getPositionInfo(ip: String) async throws -> TrackInfo {
         let xml = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
                                  action: "GetPositionInfo", body: "<InstanceID>0</InstanceID>")
@@ -96,6 +102,35 @@ enum SonosAPI {
             title = decodeXMLEntities(extractTag("dc:title", from: meta) ?? "Unknown")
             artist = decodeXMLEntities(extractTag("dc:creator", from: meta) ?? "Unknown")
             album = decodeXMLEntities(extractTag("upnp:album", from: meta) ?? "")
+
+            // Radio streams put current track info in r:streamContent
+            if let stream = extractTag("r:streamContent", from: meta), !stream.isEmpty {
+                let decoded = decodeXMLEntities(stream)
+                if decoded.contains("TITLE ") || decoded.contains("ARTIST ") {
+                    // Pipe-delimited format: TYPE=SNG|TITLE ...|ARTIST ...|ALBUM ...
+                    var fields: [String: String] = [:]
+                    for segment in decoded.split(separator: "|") {
+                        let s = String(segment)
+                        for key in ["TITLE ", "ARTIST ", "ALBUM "] {
+                            if s.hasPrefix(key) {
+                                fields[key.trimmingCharacters(in: .whitespaces)] = String(s.dropFirst(key.count))
+                            }
+                        }
+                    }
+                    if let t = fields["TITLE"], !t.isEmpty { title = t }
+                    if let a = fields["ARTIST"], !a.isEmpty { artist = a }
+                    if let al = fields["ALBUM"], !al.isEmpty { album = al }
+                } else if decoded.contains(" - ") {
+                    let parts = decoded.split(separator: " - ", maxSplits: 1)
+                    if parts.count == 2 {
+                        artist = String(parts[0]).trimmingCharacters(in: .whitespaces)
+                        title = String(parts[1]).trimmingCharacters(in: .whitespaces)
+                    }
+                } else if artist == "Unknown" || artist.isEmpty {
+                    title = decoded
+                }
+            }
+
             if let artPath = extractTag("upnp:albumArtURI", from: meta) {
                 var decoded = decodeXMLEntities(artPath)
                 if decoded.contains("%25") {
@@ -179,6 +214,12 @@ enum SonosAPI {
                            "<EnqueueAsNext>\(asNext ? 1 : 0)</EnqueueAsNext>")
     }
 
+    nonisolated static func removeAllTracksFromQueue(ip: String) async throws {
+        _ = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
+                           action: "RemoveAllTracksFromQueue",
+                           body: "<InstanceID>0</InstanceID>")
+    }
+
     nonisolated static func removeTrackFromQueue(ip: String, objectID: String, updateID: String) async throws {
         _ = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
                            action: "RemoveTrackFromQueue",
@@ -201,6 +242,22 @@ enum SonosAPI {
     nonisolated static func seekToTrack(ip: String, trackNumber: Int) async throws {
         _ = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport", action: "Seek",
                            body: "<InstanceID>0</InstanceID><Unit>TRACK_NR</Unit><Target>\(trackNumber)</Target>")
+    }
+
+    nonisolated static func setAVTransportToQueue(ip: String, speakerUUID: String) async throws {
+        _ = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
+                           action: "SetAVTransportURI",
+                           body: "<InstanceID>0</InstanceID>" +
+                           "<CurrentURI>x-rincon-queue:\(speakerUUID)#0</CurrentURI>" +
+                           "<CurrentURIMetaData></CurrentURIMetaData>")
+    }
+
+    nonisolated static func setAVTransportURI(ip: String, uri: String, metadata: String = "") async throws {
+        _ = try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
+                           action: "SetAVTransportURI",
+                           body: "<InstanceID>0</InstanceID>" +
+                           "<CurrentURI>\(escapeXML(uri))</CurrentURI>" +
+                           "<CurrentURIMetaData>\(escapeXML(metadata))</CurrentURIMetaData>")
     }
 
     // MARK: - Discovery
@@ -278,7 +335,25 @@ enum SonosAPI {
                                  action: "ListAvailableServices", body: "")
         guard let raw = extractTag("AvailableServiceDescriptorList", from: xml) else { return [] }
         let decoded = decodeXMLEntities(raw)
-        return parseMusicServices(decoded)
+
+        // Parse the ServiceType mapping: "ServiceID:ServiceType,..."
+        var typeToId: [String: Int] = [:]
+        if let typeList = extractTag("AvailableServiceTypeList", from: xml) {
+            for pair in typeList.split(separator: ",") {
+                let parts = pair.split(separator: ":")
+                if parts.count == 2, let sid = Int(parts[0]) {
+                    typeToId[String(parts[1])] = sid
+                }
+            }
+        }
+
+        var services = parseMusicServices(decoded)
+        // Store the reverse mapping (serviceId → serviceType) on each service
+        let idToType = Dictionary(typeToId.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a })
+        for i in services.indices {
+            services[i].serviceType = idToType[services[i].id] ?? ""
+        }
+        return services
     }
 
     nonisolated static func getSessionId(ip: String, serviceId: Int) async throws -> String {
@@ -289,7 +364,143 @@ enum SonosAPI {
         return extractTag("SessionId", from: xml) ?? ""
     }
 
-    nonisolated static func searchMusicService(smapiURI: String, sessionId: String,
+    // MARK: - Device Identity (for SMAPI authentication)
+
+    nonisolated static func getDeviceId(ip: String) async throws -> String {
+        let xml = try await soap(ip: ip, endpoint: "/SystemProperties/Control",
+                                 service: "SystemProperties", action: "GetString",
+                                 body: "<VariableName>R_TrialZPSerial</VariableName>")
+        guard let value = extractTag("StringValue", from: xml), !value.isEmpty else {
+            throw URLError(.cannotParseResponse)
+        }
+        return value
+    }
+
+    nonisolated static func getHouseholdId(ip: String) async throws -> String {
+        let xml = try await soap(ip: ip, endpoint: "/DeviceProperties/Control",
+                                 service: "DeviceProperties", action: "GetHouseholdID", body: "")
+        guard let value = extractTag("CurrentHouseholdID", from: xml), !value.isEmpty else {
+            throw URLError(.cannotParseResponse)
+        }
+        return value
+    }
+
+    // MARK: - SMAPI Authentication (AppLink / DeviceLink)
+
+    /// Generic SMAPI SOAP call with proper Sonos credentials header.
+    private nonisolated static func smapiSoap(smapiURI: String, action: String, body: String,
+                                               deviceId: String, householdId: String,
+                                               token: String = "", key: String = "") async throws -> String {
+        guard let url = URL(string: smapiURI) else { throw URLError(.badURL) }
+        let envelope = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" \
+            xmlns:s="http://www.sonos.com/Services/1.1">
+            <soap:Header>
+            <s:context><s:timezone>+00:00</s:timezone></s:context>
+            <s:credentials>
+            <s:deviceId>\(escapeXML(deviceId))</s:deviceId>
+            <s:loginToken>
+            <s:token>\(escapeXML(token))</s:token>
+            <s:key>\(escapeXML(key))</s:key>
+            <s:householdId>\(escapeXML(householdId))</s:householdId>
+            </s:loginToken>
+            </s:credentials>
+            </soap:Header>
+            <soap:Body>\(body)</soap:Body>
+            </soap:Envelope>
+            """
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("\"http://www.sonos.com/Services/1.1#\(action)\"", forHTTPHeaderField: "SOAPACTION")
+        request.setValue("en-US", forHTTPHeaderField: "Accept-Language")
+        request.httpBody = envelope.data(using: .utf8)
+
+        let (data, _) = try await URLSession.shared.data(for: request)
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    /// AppLink Step 1: get the registration URL and link code.
+    nonisolated static func smapiGetAppLink(smapiURI: String, deviceId: String,
+                                             householdId: String) async throws -> SMAPILinkResult {
+        let body = """
+            <s:getAppLink xmlns:s="http://www.sonos.com/Services/1.1">\
+            <s:householdId>\(escapeXML(householdId))</s:householdId>\
+            </s:getAppLink>
+            """
+        let xml = try await smapiSoap(smapiURI: smapiURI, action: "getAppLink", body: body,
+                                       deviceId: deviceId, householdId: householdId)
+        let regUrl = extractTag("regUrl", from: xml) ?? ""
+        let linkCode = extractTag("linkCode", from: xml) ?? ""
+        guard !regUrl.isEmpty else {
+            print("[SMAPI] getAppLink failed, xml: \(xml.prefix(1000))")
+            throw URLError(.cannotParseResponse)
+        }
+        return SMAPILinkResult(regUrl: regUrl, linkCode: linkCode)
+    }
+
+    /// DeviceLink Step 1: get the registration URL and link code.
+    nonisolated static func smapiGetDeviceLinkCode(smapiURI: String, deviceId: String,
+                                                    householdId: String) async throws -> SMAPILinkResult {
+        let body = """
+            <s:getDeviceLinkCode xmlns:s="http://www.sonos.com/Services/1.1">\
+            <s:householdId>\(escapeXML(householdId))</s:householdId>\
+            </s:getDeviceLinkCode>
+            """
+        let xml = try await smapiSoap(smapiURI: smapiURI, action: "getDeviceLinkCode", body: body,
+                                       deviceId: deviceId, householdId: householdId)
+        let regUrl = extractTag("regUrl", from: xml) ?? ""
+        let linkCode = extractTag("linkCode", from: xml) ?? ""
+        guard !regUrl.isEmpty else {
+            print("[SMAPI] getDeviceLinkCode failed, xml: \(xml.prefix(1000))")
+            throw URLError(.cannotParseResponse)
+        }
+        return SMAPILinkResult(regUrl: regUrl, linkCode: linkCode)
+    }
+
+    /// Step 2 (shared by AppLink and DeviceLink): exchange the link code for auth token + key.
+    nonisolated static func smapiGetDeviceAuthToken(smapiURI: String, deviceId: String,
+                                                     householdId: String,
+                                                     linkCode: String) async throws -> SMAPICredentials {
+        let body = """
+            <s:getDeviceAuthToken xmlns:s="http://www.sonos.com/Services/1.1">\
+            <s:householdId>\(escapeXML(householdId))</s:householdId>\
+            <s:linkCode>\(escapeXML(linkCode))</s:linkCode>\
+            <s:linkDeviceId>\(escapeXML(deviceId))</s:linkDeviceId>\
+            </s:getDeviceAuthToken>
+            """
+        let xml = try await smapiSoap(smapiURI: smapiURI, action: "getDeviceAuthToken", body: body,
+                                       deviceId: deviceId, householdId: householdId)
+        let token = extractTag("authToken", from: xml) ?? extractTag("token", from: xml) ?? ""
+        let key = extractTag("privateKey", from: xml) ?? extractTag("key", from: xml) ?? ""
+        guard !token.isEmpty else {
+            print("[SMAPI] getDeviceAuthToken failed, xml: \(xml.prefix(1000))")
+            throw URLError(.cannotParseResponse)
+        }
+        return SMAPICredentials(token: token, key: key)
+    }
+
+    /// Search a music service with full SMAPI credentials.
+    nonisolated static func searchMusicServiceAuthenticated(
+        smapiURI: String, serviceId: Int, searchTerm: String,
+        deviceId: String, householdId: String, token: String, key: String,
+        category: String = "tracks"
+    ) async throws -> [BrowseItem] {
+        let body = """
+            <s:search xmlns:s="http://www.sonos.com/Services/1.1">\
+            <s:id>\(escapeXML(category))</s:id>\
+            <s:term>\(escapeXML(searchTerm))</s:term>\
+            <s:index>0</s:index><s:count>20</s:count>\
+            </s:search>
+            """
+        let xml = try await smapiSoap(smapiURI: smapiURI, action: "search", body: body,
+                                       deviceId: deviceId, householdId: householdId,
+                                       token: token, key: key)
+        return parseSMAPIResults(xml, serviceId: serviceId)
+    }
+
+    nonisolated static func searchMusicService(smapiURI: String, sessionId: String, serviceId: Int,
                                                 searchTerm: String, category: String = "tracks") async throws -> [BrowseItem] {
         guard let url = URL(string: smapiURI) else { throw URLError(.badURL) }
         let escapedTerm = escapeXML(searchTerm)
@@ -301,7 +512,7 @@ enum SonosAPI {
             <id>\(category)</id><term>\(escapedTerm)</term><index>0</index><count>20</count>\
             </search></s:Body></s:Envelope>
             """
-        var request = URLRequest(url: url, timeoutInterval: 10)
+        var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "POST"
         request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.setValue("\"http://www.sonos.com/Services/1.1#search\"", forHTTPHeaderField: "SOAPACTION")
@@ -312,7 +523,33 @@ enum SonosAPI {
 
         let (data, _) = try await URLSession.shared.data(for: request)
         let xml = String(data: data, encoding: .utf8) ?? ""
-        return parseSMAPIResults(xml)
+        return parseSMAPIResults(xml, serviceId: serviceId)
+    }
+
+    /// Build DIDL-Lite metadata for a streaming service track so Sonos knows
+    /// which service to use when resolving the URI.
+    nonisolated static func buildDIDLMetadata(item: BrowseItem) -> String {
+        guard let sid = item.serviceId else { return "" }
+        let title = escapeXML(item.title)
+        let artist = escapeXML(item.artist)
+        let album = escapeXML(item.album)
+        let art = escapeXML(item.albumArtURL ?? "")
+        let itemId = escapeXML(item.id)
+        return """
+        <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" \
+        xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" \
+        xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" \
+        xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">\
+        <item id="\(itemId)" parentID="" restricted="true">\
+        <dc:title>\(title)</dc:title>\
+        <dc:creator>\(artist)</dc:creator>\
+        <upnp:album>\(album)</upnp:album>\
+        <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
+        <upnp:albumArtURI>\(art)</upnp:albumArtURI>\
+        <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\
+        SA_RINCON\(sid)_X_#Svc\(sid)-0-Token</desc>\
+        </item></DIDL-Lite>
+        """
     }
 
     // MARK: - Retry Helper
@@ -337,7 +574,8 @@ enum SonosAPI {
         guard let url = URL(string: "http://\(cleanIP):\(port)\(endpoint)") else {
             throw URLError(.badURL)
         }
-        var request = URLRequest(url: url, timeoutInterval: 5)
+        let timeout: TimeInterval = (action == "RemoveAllTracksFromQueue" || action == "AddURIToQueue") ? 30 : 10
+        var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.setValue("\"urn:schemas-upnp-org:service:\(service):1#\(action)\"",
@@ -472,7 +710,7 @@ enum SonosAPI {
             let title = decodeXMLEntities(extractTag("dc:title", from: item) ?? "Unknown")
             let artist = decodeXMLEntities(extractTag("dc:creator", from: item) ?? extractTag("upnp:artist", from: item) ?? "Unknown")
             let album = decodeXMLEntities(extractTag("upnp:album", from: item) ?? "")
-            let uri = extractTag("res", from: item)
+            let uri = extractTag("res", from: item).map { decodeXMLEntities($0) }
             var art: String?
             if let p = extractTag("upnp:albumArtURI", from: item) {
                 var decoded = decodeXMLEntities(p)
@@ -510,7 +748,7 @@ enum SonosAPI {
                 let title = decodeXMLEntities(extractTag("dc:title", from: body) ?? "Unknown")
                 let artist = decodeXMLEntities(extractTag("dc:creator", from: body) ?? extractTag("upnp:artist", from: body) ?? "")
                 let album = decodeXMLEntities(extractTag("upnp:album", from: body) ?? "")
-                let uri = extractTag("res", from: body)
+                let uri = extractTag("res", from: body).map { decodeXMLEntities($0) }
                 var art: String?
                 if let p = extractTag("upnp:albumArtURI", from: body) {
                     var decoded = decodeXMLEntities(p)
@@ -518,9 +756,26 @@ enum SonosAPI {
                     art = decoded.hasPrefix("http") ? decoded : "http://\(speakerIP):\(port)\(decoded)"
                 }
 
+                // Extract r:resMD (resource metadata for Favorites)
+                var resMD: String?
+                if let rawMD = extractTag("r:resMD", from: body) {
+                    resMD = decodeXMLEntities(rawMD)
+                }
+
+                // If main <res> is missing, try to extract URI from resMD
+                var finalURI = uri
+                if (finalURI == nil || finalURI?.isEmpty == true), let md = resMD {
+                    finalURI = extractTag("res", from: md).map { decodeXMLEntities($0) }
+                }
+
+                // Detect container-like URIs even when stored as <item> in Favorites
+                let effectiveContainer = isContainer ||
+                    (finalURI?.contains("x-rincon-cpcontainer:") == true)
+
                 let fullTag = Range(match.range, in: xml).map { String(xml[$0]) }
                 results.append(BrowseItem(id: itemID, title: title, artist: artist, album: album,
-                                          albumArtURL: art, uri: uri, metaXML: fullTag, isContainer: isContainer))
+                                          albumArtURL: art, uri: finalURI, metaXML: fullTag,
+                                          resMD: resMD, isContainer: effectiveContainer))
             }
         }
         return results
@@ -528,7 +783,7 @@ enum SonosAPI {
 
     // MARK: - SMAPI Parsing
 
-    private nonisolated static func parseSMAPIResults(_ xml: String) -> [BrowseItem] {
+    private nonisolated static func parseSMAPIResults(_ xml: String, serviceId: Int) -> [BrowseItem] {
         let itemPat = "<mediaMetadata[^>]*>(.*?)</mediaMetadata>"
         guard let regex = try? NSRegularExpression(pattern: itemPat, options: .dotMatchesLineSeparators) else { return [] }
         let matches = regex.matches(in: xml, range: NSRange(xml.startIndex..., in: xml))
@@ -544,7 +799,8 @@ enum SonosAPI {
             let uri = extractTag("trackUri", from: body) ?? extractTag("uri", from: body)
 
             return BrowseItem(id: id, title: title, artist: artist, album: album,
-                              albumArtURL: art, uri: uri, metaXML: nil, isContainer: false)
+                              albumArtURL: art, uri: uri, metaXML: nil, isContainer: false,
+                              serviceId: serviceId)
         }
     }
 
@@ -561,10 +817,10 @@ enum SonosAPI {
             guard let idStr = attr("Id", in: tag), let id = Int(idStr) else { return nil }
             let name = attr("Name", in: tag) ?? "Unknown"
             let smapiURI = attr("SecureUri", in: tag) ?? attr("Uri", in: tag) ?? ""
-            let caps = attr("Capabilities", in: tag) ?? ""
-            let capSet = Set(caps.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) })
+            let caps = Int(attr("Capabilities", in: tag) ?? "0") ?? 0
+            let auth = attr("Auth", in: tag) ?? "Anonymous"
             guard !smapiURI.isEmpty else { return nil }
-            return MusicService(id: id, name: name, smapiURI: smapiURI, capabilities: capSet)
+            return MusicService(id: id, name: name, smapiURI: smapiURI, capabilitiesMask: caps, authType: auth)
         }
     }
 
