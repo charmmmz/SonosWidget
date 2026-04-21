@@ -143,12 +143,15 @@ final class SearchManager {
 
     /// Maps Cloud API serviceId (e.g. "52231") to local Sonos sid (e.g. 204).
     private var cloudToLocalSid: [String: Int] = [:]
+    /// Reverse: local Sonos sid → Cloud API serviceId.
+    private var localToCloudSid: [Int: String] = [:]
     /// Maps Cloud API serviceId to the account username (e.g. "X_#Svc52231-408f19a7-Token").
     private var cloudServiceUsername: [String: String] = [:]
 
     private func buildServiceIdMapping() {
         guard !linkedAccounts.isEmpty, !musicServices.isEmpty else { return }
         cloudToLocalSid.removeAll()
+        localToCloudSid.removeAll()
         cloudServiceUsername.removeAll()
 
         for account in linkedAccounts {
@@ -160,10 +163,10 @@ final class SearchManager {
                 $0.name.lowercased().trimmingCharacters(in: .whitespaces) == cloudName
             }) {
                 cloudToLocalSid[cloudId] = match.id
+                localToCloudSid[match.id] = cloudId
                 print("[Search] Mapped Cloud \(cloudId) (\(account.displayName)) → local sid \(match.id)")
             }
 
-            // Store the account username for DIDL metadata
             if let username = account.username, !username.isEmpty {
                 cloudServiceUsername[cloudId] = username
                 print("[Search] Username for \(cloudId): \(username)")
@@ -221,7 +224,6 @@ final class SearchManager {
             if !hasProbed { await probeLinkedServices() }
             guard !Task.isCancelled else { return }
 
-            // Ensure local music services are loaded for sid mapping
             if musicServices.isEmpty, let ip = speakerIP {
                 musicServices = (try? await SonosAPI.listMusicServices(ip: ip)) ?? []
                 buildServiceIdMapping()
@@ -256,7 +258,6 @@ final class SearchManager {
                 for serviceResult in response.services ?? [] {
                     guard let resources = serviceResult.resources, !resources.isEmpty else { continue }
 
-                    // Determine service name from first resource or from account list
                     let serviceName = resources.first?.id?.serviceName
                         ?? accountName(for: serviceResult.serviceId)
                         ?? "Unknown"
@@ -273,7 +274,6 @@ final class SearchManager {
                         print("[Search] \(serviceName) → \(items.count) results")
                     }
 
-                    // Log errors
                     for err in serviceResult.errors ?? [] {
                         print("[Search] \(serviceName) error: \(err.errorCode ?? "?") - \(err.reason ?? "?")")
                     }
@@ -351,15 +351,11 @@ final class SearchManager {
         }
     }
 
-    /// Returns (uriScheme, fileSuffix, flags) for track URIs based on the local service ID.
+    /// Returns (uriScheme, fileSuffix, flags, mimeType) for track URIs based on the local service ID.
     private func trackURIComponents(localSid: Int, objectId: String) -> (String, String, Int) {
         switch localSid {
-        case 204:  // Apple Music
-            return ("x-sonos-http", ".unknown", 0)
         case 12:   // Spotify
             return ("x-sonos-spotify", "", 8224)
-        case 165:  // 网易云音乐
-            return ("x-sonos-http", ".unknown", 0)
         default:
             return ("x-sonos-http", "", 8224)
         }
@@ -390,41 +386,30 @@ final class SearchManager {
         return nil
     }
 
-    /// Build DIDL metadata for Cloud search results with the correct service account.
-    /// Matches Sonos's own metadata format: item id="-1", includes <res>, correct desc serial.
+    /// Build DIDL metadata for Cloud search results.
+    /// Uses the standard SMAPI desc tag so Sonos resolves metadata from the music service.
     private func buildCloudDIDLMetadata(item: BrowseItem, localSid: Int, accountId: String) -> String {
-        let title = SonosAPI.escapeXML(item.title)
-        let artist = SonosAPI.escapeXML(item.artist)
-        let album = SonosAPI.escapeXML(item.album)
-        let art = SonosAPI.escapeXML(item.albumArtURL ?? "")
-
-        let encodedObjId = item.id.replacingOccurrences(of: ":", with: "%3a")
-        let (scheme, suffix, flags) = trackURIComponents(localSid: localSid, objectId: item.id)
-        let resURI = SonosAPI.escapeXML(
-            "\(scheme):\(encodedObjId)\(suffix)?sid=\(localSid)&flags=\(flags)&sn=\(accountId)")
-
-        // desc format: SA_RINCON{localSid}_X_#Svc{localSid}-{accountId}-Token
-        let desc = "SA_RINCON\(localSid)_X_#Svc\(localSid)-\(accountId)-Token"
-
+        let desc = "SA_RINCON\(localSid)_X_#Svc\(localSid)-0-Token"
         print("[Playback] desc=\(desc)")
+        return SonosAPI.buildDIDLMetadata(
+            itemId: item.id, title: item.title, artist: item.artist,
+            album: item.album, albumArtURL: item.albumArtURL, serviceId: localSid, desc: desc)
+    }
 
-        return """
-        <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" \
-        xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" \
-        xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" \
-        xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">\
-        <item id="-1" parentID="-1" restricted="true">\
-        <res protocolInfo="sonos.com-http:*:application/octet-stream:*">\(resURI)</res>\
-        <r:streamContent></r:streamContent>\
-        <dc:title>\(title)</dc:title>\
-        <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
-        <dc:creator>\(artist)</dc:creator>\
-        <upnp:album>\(album)</upnp:album>\
-        <upnp:albumArtURI>\(art)</upnp:albumArtURI>\
-        <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\
-        \(desc)</desc>\
-        </item></DIDL-Lite>
-        """
+    /// Inject `upnp:albumArtURI` into DIDL metadata when not already present.
+    /// Sonos Favorites store the art URL in the outer browse item, but the inner
+    /// `r:resMD` DIDL often omits it — which leaves "recently played" without cover art.
+    private func enrichMetadataWithArt(_ metadata: String, artURL: String?) -> String {
+        guard let artURL = artURL, !artURL.isEmpty else { return metadata }
+        if metadata.contains("albumArtURI") { return metadata }
+        let artTag = "<upnp:albumArtURI>\(SonosAPI.escapeXML(artURL))</upnp:albumArtURI>"
+        if metadata.contains("</item>") {
+            return metadata.replacingOccurrences(of: "</item>", with: "\(artTag)</item>")
+        }
+        if metadata.contains("</container>") {
+            return metadata.replacingOccurrences(of: "</container>", with: "\(artTag)</container>")
+        }
+        return metadata
     }
 
     private func extractItemId(from resMD: String) -> String? {
@@ -494,7 +479,13 @@ final class SearchManager {
         }
 
         var playURI = item.uri
-        let playMeta = playbackMetadata(for: item)
+        var playMeta = playbackMetadata(for: item)
+
+        // For favorites, the resMD DIDL often lacks albumArtURI — inject it from
+        // the browse item so Sonos records proper cover art in "recently played".
+        if item.id.hasPrefix("FV:") {
+            playMeta = enrichMetadataWithArt(playMeta, artURL: item.albumArtURL)
+        }
 
         if (playURI == nil || playURI?.isEmpty == true), let resMD = item.resMD {
             playURI = constructFavoriteURI(resMD: resMD)
@@ -508,49 +499,42 @@ final class SearchManager {
         print("[Playback] uri=\(uri)")
         print("[Playback] metadata=\(playMeta.prefix(300))")
 
-        // Diagnostic: capture full metadata of the currently playing track for comparison
-        if let rawXml = try? await SonosAPI.getRawPositionInfo(ip: ip) {
-            if let metaRaw = SonosAPI.extractTag("TrackMetaData", from: rawXml) {
-                let meta = SonosAPI.decodeXMLEntities(metaRaw)
-                print("[Playback] DIAGNOSTIC currentMeta=\(meta.prefix(800))")
-            }
-            if let uri = SonosAPI.extractTag("TrackURI", from: rawXml) {
-                print("[Playback] DIAGNOSTIC currentURI=\(SonosAPI.decodeXMLEntities(uri))")
-            }
-        }
-
         do {
+            guard let uuid = manager.selectedSpeaker?.id else {
+                print("[Playback] ABORT: no speaker UUID")
+                return
+            }
+
             if item.isContainer || uri.contains("x-rincon-cpcontainer:") {
-                guard let uuid = manager.selectedSpeaker?.id else {
-                    print("[Playback] ABORT: no speaker UUID")
-                    return
+                if item.id.hasPrefix("FV:") {
+                    // Favorites containers: use direct SetAVTransportURI so Sonos
+                    // records the container metadata (including cover art) in
+                    // "recently played", matching official Sonos app behavior.
+                    print("[Playback] → Direct transport (favorite container)")
+                    try await SonosAPI.setAVTransportURI(ip: ip, uri: uri, metadata: playMeta)
+                    try await SonosAPI.play(ip: ip)
+                    print("[Playback] Direct transport playback started")
+                } else {
+                    print("[Playback] → Queue approach (container)")
+                    try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
+                    let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
+                    try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
+                    try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
+                    try await SonosAPI.play(ip: ip)
+                    print("[Playback] Queue playback started at track \(trackNr)")
                 }
-                print("[Playback] → Queue approach (container)")
+            } else {
+                print("[Playback] → Queue approach (single track)")
                 try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
                 let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
                 try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
                 try await SonosAPI.play(ip: ip)
                 print("[Playback] Queue playback started at track \(trackNr)")
-            } else {
-                print("[Playback] → SetAVTransportURI (direct)")
-                try await SonosAPI.setAVTransportURI(ip: ip, uri: uri, metadata: playMeta)
-                try await SonosAPI.play(ip: ip)
             }
 
             try? await Task.sleep(for: .milliseconds(1500))
             await manager.refreshState()
-
-            // If Sonos couldn't resolve metadata (shows "Unknown"), patch from our search data
-            if manager.trackInfo?.title == "Unknown" || manager.trackInfo?.title == nil {
-                print("[Playback] Sonos returned Unknown → patching from search result")
-                manager.patchTrackInfo(
-                    title: item.title,
-                    artist: item.artist,
-                    album: item.album,
-                    albumArtURL: item.albumArtURL
-                )
-            }
         } catch {
             print("[Playback] FAILED: \(error)")
             errorMessage = error.localizedDescription
@@ -717,7 +701,15 @@ final class SearchManager {
         let radioURI = "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(sn)"
         print("[Station] radioURI=\(radioURI)")
 
-        let descTag = extractDescTag(from: resMD ?? "") ?? "SA_RINCON52231_X_#Svc52231-408f19a7-Token"
+        let descTag: String
+        if let fromMD = extractDescTag(from: resMD ?? "") {
+            descTag = fromMD
+        } else if let sidInt = localSid {
+            descTag = "SA_RINCON\(sidInt)_\(cloudServiceUsername[cloudServiceId ?? ""] ?? "X_#Svc\(sidInt)-\(sn)-Token")"
+        } else {
+            descTag = "SA_RINCON\(sid)_X_#Svc\(sid)-\(sn)-Token"
+        }
+        print("[Station] descTag=\(descTag)")
         let artTag = artURL.map { "<upnp:albumArtURI>\(SonosAPI.escapeXML($0))</upnp:albumArtURI>" } ?? ""
         let radioMeta = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
             "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
@@ -734,13 +726,24 @@ final class SearchManager {
         do {
             print("[Station] → SetAVTransportURI...")
             try await SonosAPI.setAVTransportURI(ip: ip, uri: radioURI, metadata: radioMeta)
+            try? await Task.sleep(for: .milliseconds(800))
             print("[Station] → Play...")
             try await SonosAPI.play(ip: ip)
 
-            try? await Task.sleep(for: .milliseconds(2000))
+            try? await Task.sleep(for: .milliseconds(2500))
             let state = try? await SonosAPI.getTransportInfo(ip: ip)
             let newInfo = try? await SonosAPI.getPositionInfo(ip: ip)
             print("[Station] after: transport=\(state?.rawValue ?? "nil") title=\"\(newInfo?.title ?? "nil")\"")
+
+            if state == .stopped {
+                print("[Station] Still STOPPED — retrying Play after extra delay...")
+                try? await Task.sleep(for: .milliseconds(2000))
+                try await SonosAPI.play(ip: ip)
+                try? await Task.sleep(for: .milliseconds(2000))
+                let retryState = try? await SonosAPI.getTransportInfo(ip: ip)
+                let retryInfo = try? await SonosAPI.getPositionInfo(ip: ip)
+                print("[Station] retry: transport=\(retryState?.rawValue ?? "nil") title=\"\(retryInfo?.title ?? "nil")\"")
+            }
 
             await manager.refreshState()
         } catch {

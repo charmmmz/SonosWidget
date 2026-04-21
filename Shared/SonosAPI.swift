@@ -385,7 +385,7 @@ enum SonosAPI {
             <id>\(category)</id><term>\(escapedTerm)</term><index>0</index><count>20</count>\
             </search></s:Body></s:Envelope>
             """
-        var request = URLRequest(url: url, timeoutInterval: 5)
+        var request = URLRequest(url: url, timeoutInterval: 15)
         request.httpMethod = "POST"
         request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.setValue("\"http://www.sonos.com/Services/1.1#search\"", forHTTPHeaderField: "SOAPACTION")
@@ -403,24 +403,33 @@ enum SonosAPI {
     /// which service to use when resolving the URI.
     nonisolated static func buildDIDLMetadata(item: BrowseItem) -> String {
         guard let sid = item.serviceId else { return "" }
-        let title = escapeXML(item.title)
-        let artist = escapeXML(item.artist)
-        let album = escapeXML(item.album)
-        let art = escapeXML(item.albumArtURL ?? "")
-        let itemId = escapeXML(item.id)
+        return buildDIDLMetadata(
+            itemId: item.id, title: item.title, artist: item.artist,
+            album: item.album, albumArtURL: item.albumArtURL, serviceId: sid,
+            desc: "SA_RINCON\(sid)_X_#Svc\(sid)-0-Token")
+    }
+
+    nonisolated static func buildDIDLMetadata(itemId: String, title: String, artist: String,
+                                              album: String, albumArtURL: String?,
+                                              serviceId: Int, desc: String) -> String {
+        let t = escapeXML(title)
+        let a = escapeXML(artist)
+        let al = escapeXML(album)
+        let art = escapeXML(albumArtURL ?? "")
+        let id = escapeXML(itemId)
         return """
         <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" \
         xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" \
         xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" \
         xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/">\
-        <item id="\(itemId)" parentID="" restricted="true">\
-        <dc:title>\(title)</dc:title>\
-        <dc:creator>\(artist)</dc:creator>\
-        <upnp:album>\(album)</upnp:album>\
+        <item id="\(id)" parentID="" restricted="true">\
+        <dc:title>\(t)</dc:title>\
+        <dc:creator>\(a)</dc:creator>\
+        <upnp:album>\(al)</upnp:album>\
         <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
         <upnp:albumArtURI>\(art)</upnp:albumArtURI>\
         <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\
-        SA_RINCON\(sid)_X_#Svc\(sid)-0-Token</desc>\
+        \(desc)</desc>\
         </item></DIDL-Lite>
         """
     }
@@ -447,7 +456,7 @@ enum SonosAPI {
         guard let url = URL(string: "http://\(cleanIP):\(port)\(endpoint)") else {
             throw URLError(.badURL)
         }
-        let longActions: Set<String> = ["RemoveAllTracksFromQueue", "AddURIToQueue", "SetAVTransportURI"]
+        let longActions: Set<String> = ["RemoveAllTracksFromQueue", "AddURIToQueue", "SetAVTransportURI", "Play"]
         let timeout: TimeInterval = longActions.contains(action) ? 30 : 10
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"

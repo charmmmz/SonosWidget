@@ -51,10 +51,10 @@ struct SearchView: View {
             .toolbarBackground(.hidden, for: .navigationBar)
             .scrollContentBackground(.hidden)
             .preferredColorScheme(.dark)
-            .searchable(text: $searchText, prompt: "Songs, artists, albums…")
-            .onChange(of: searchText) { _, newValue in
+            .searchable(text: $searchText, prompt: "Search songs, artists, albums…")
+            .onSubmit(of: .search) {
                 selectedServiceTab = nil
-                searchManager.search(query: newValue)
+                searchManager.search(query: searchText)
             }
             .onAppear {
                 searchManager.configure(speakerIP: manager.selectedSpeaker?.playbackIP)
@@ -721,16 +721,16 @@ struct ServiceSettingsSheet: View {
                     VStack(spacing: 16) {
                         ProgressView()
                             .controlSize(.large)
-                        Text("正在检测可用服务…")
+                        Text("Detecting available services…")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if searchManager.linkedAccounts.isEmpty {
                     ContentUnavailableView(
-                        "未检测到流媒体",
+                        "No Music Services Found",
                         systemImage: "music.note.list",
-                        description: Text("请先在 Sonos 官方 App 中绑定流媒体服务，然后点击下方刷新。")
+                        description: Text("Link a music service in the official Sonos app first, then tap refresh below.")
                     )
                 } else {
                     List {
@@ -739,14 +739,14 @@ struct ServiceSettingsSheet: View {
                                 accountRow(account)
                             }
                         } header: {
-                            Text("已绑定的流媒体 (\(searchManager.linkedAccounts.count))")
+                            Text("Linked Services (\(searchManager.linkedAccounts.count))")
                         } footer: {
-                            Text("这些流媒体已在你的 Sonos 系统中绑定。搜索功能通过 Sonos Cloud 直接代理，无需额外登录。")
+                            Text("These services are linked to your Sonos system. Search is proxied through the Sonos Cloud API — no extra login needed.")
                         }
                     }
                 }
             }
-            .navigationTitle("搜索设置")
+            .navigationTitle("Search Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -757,7 +757,7 @@ struct ServiceSettingsSheet: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
             .preferredColorScheme(.dark)

@@ -40,6 +40,8 @@ final class SonosManager {
     private var positionTimer: Timer?
     private var lastAlbumArtURL: String?
     private var lastWidgetTrackTitle: String?
+    private var lastEnrichedTrackKey: String?
+    private var lastCloudQualityAttempt: Date = .distantPast
     private var consecutiveFailures = 0
     private var currentActivity: Activity<SonosActivityAttributes>?
     private var albumArtTask: Task<Void, Never>?
@@ -151,6 +153,8 @@ final class SonosManager {
         consecutiveFailures = 0
         cloudGroupId = nil
         cachedCloudQuality = nil
+        lastEnrichedTrackKey = nil
+        lastCloudQualityAttempt = .distantPast
         prefetchTask?.cancel()
         prefetchTask = nil
         queueArtCache.removeAllObjects()
@@ -816,12 +820,21 @@ final class SonosManager {
 
     /// If UPnP didn't provide audio quality, fetch it from the Sonos Cloud API.
     private func enrichAudioQualityFromCloud() async {
+        let trackKey = trackInfo.map { "\($0.title ?? "")|\($0.artist ?? "")|\($0.albumArtURL ?? "")" }
+
         guard trackInfo?.audioQuality == nil,
               !isEnrichingQuality,
+              transportState == .playing,
               SonosAuth.shared.isLoggedIn else { return }
+
+        // New track → fetch immediately; same track → respect cooldown
+        if trackKey == lastEnrichedTrackKey {
+            guard Date().timeIntervalSince(lastCloudQualityAttempt) > 15 else { return }
+        }
 
         isEnrichingQuality = true
         defer { isEnrichingQuality = false }
+        lastCloudQualityAttempt = Date()
 
         if cloudGroupId == nil {
             await resolveCloudGroupId()
@@ -830,7 +843,7 @@ final class SonosManager {
               let token = await SonosAuth.shared.validAccessToken() else { return }
 
         do {
-            let metadata = try await SonosCloudAPI.getPlaybackMetadata(token: token, groupId: groupId)
+            let metadata = try await fetchPlaybackMetadata(token: token, groupId: groupId)
             if let quality = metadata.currentItem?.track?.quality,
                let mapped = AudioQuality.from(cloudQuality: quality) {
                 trackInfo?.audioQuality = mapped
@@ -838,10 +851,24 @@ final class SonosManager {
                     cachedCloudQuality = (track: title, quality: mapped)
                 }
             }
+            lastEnrichedTrackKey = trackKey
         } catch SonosCloudError.unauthorized {
             _ = await SonosAuth.shared.refreshAccessToken()
         } catch {
+            lastEnrichedTrackKey = trackKey
             print("[SonosCloud] playbackMetadata error: \(error)")
+        }
+    }
+
+    private func fetchPlaybackMetadata(token: String, groupId: String) async throws -> SonosCloudAPI.CloudPlaybackMetadata {
+        do {
+            return try await SonosCloudAPI.getPlaybackMetadata(token: token, groupId: groupId)
+        } catch SonosCloudError.httpError(410) {
+            print("[SonosCloud] playbackMetadata 410 — re-resolving cloudGroupId…")
+            cloudGroupId = nil
+            await resolveCloudGroupId()
+            guard let newGroupId = cloudGroupId else { throw SonosCloudError.groupNotFound }
+            return try await SonosCloudAPI.getPlaybackMetadata(token: token, groupId: newGroupId)
         }
     }
 
