@@ -1,7 +1,7 @@
 import SwiftUI
 
-struct AlbumDetailView: View {
-    let albumItem: BrowseItem
+struct PlaylistDetailView: View {
+    let playlistItem: BrowseItem
     let searchManager: SearchManager
     let manager: SonosManager
 
@@ -11,13 +11,11 @@ struct AlbumDetailView: View {
     @State private var playingItemId: String?
     @State private var toastMessage: String?
     @State private var isFavorited = false
-    @State private var coverImage: UIImage?
-    @State private var themeColor: Color = .pink
 
-    private var albumTitle: String { response?.title ?? albumItem.title }
-    private var artistName: String { response?.subtitle ?? albumItem.artist }
+    private var playlistTitle: String { response?.title ?? playlistItem.title }
+    private var subtitleText: String { response?.subtitle ?? playlistItem.artist }
     private var coverURL: String? {
-        response?.images?.tile1x1 ?? albumItem.albumArtURL
+        response?.images?.tile1x1 ?? playlistItem.albumArtURL
     }
     private var tracks: [SonosCloudAPI.AlbumTrackItem] {
         response?.tracks?.items ?? []
@@ -33,93 +31,15 @@ struct AlbumDetailView: View {
                 trackList
             }
         }
-        .background {
-            albumBackground
-        }
-        .navigationTitle(albumTitle)
+        .background(Color(.systemBackground))
+        .navigationTitle(playlistTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                albumMenu
-            }
-        }
-        .task { await loadAlbum() }
-        .task(id: coverURL) { await loadCoverImage() }
-        .onAppear { isFavorited = searchManager.isFavorited(albumItem) }
+        .task { await loadPlaylist() }
+        .onAppear { isFavorited = searchManager.isFavorited(playlistItem) }
         .overlay(alignment: .bottom) {
             if let msg = toastMessage {
                 toast(msg)
             }
-        }
-    }
-
-    // MARK: - Blurred Background
-
-    @ViewBuilder
-    private var albumBackground: some View {
-        if let img = coverImage {
-            ZStack {
-                Image(uiImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .blur(radius: 80)
-                    .scaleEffect(1.5)
-                Color.black.opacity(0.5)
-            }
-            .ignoresSafeArea()
-        } else {
-            Color(.systemBackground).ignoresSafeArea()
-        }
-    }
-
-    private func loadCoverImage() async {
-        guard let urlStr = coverURL, let url = URL(string: urlStr) else { return }
-        do {
-            let (data, _) = try await URLSession.shared.data(from: url)
-            let img = UIImage(data: data)
-            coverImage = img
-            if let color = img?.dominantColor() {
-                withAnimation(.easeInOut(duration: 0.4)) { themeColor = color }
-            }
-        } catch {
-            print("[AlbumDetail] Cover image load failed: \(error)")
-        }
-    }
-
-    // MARK: - Three-Dot Menu
-
-    private var albumMenu: some View {
-        Menu {
-            Button {
-                toggleFavorite()
-            } label: {
-                Label(isFavorited ? "Remove from Sonos Favorites" : "Add to Sonos Favorites",
-                      systemImage: isFavorited ? "heart.fill" : "heart")
-            }
-
-            Divider()
-
-            Button {
-                Task {
-                    await searchManager.playNext(item: albumItem, manager: manager)
-                    showToast("Playing next")
-                }
-            } label: {
-                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-
-            Button {
-                Task {
-                    await searchManager.addToQueue(item: albumItem, manager: manager)
-                    showToast("Added to queue")
-                }
-            } label: {
-                Label("Add to Queue", systemImage: "text.badge.plus")
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.body)
-                .symbolRenderingMode(.hierarchical)
         }
     }
 
@@ -134,7 +54,7 @@ struct AlbumDetailView: View {
                     RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground))
                         .aspectRatio(1, contentMode: .fit)
                         .overlay {
-                            Image(systemName: "opticaldisc")
+                            Image(systemName: "music.note.list")
                                 .font(.system(size: 48))
                                 .foregroundStyle(.tertiary)
                         }
@@ -142,20 +62,22 @@ struct AlbumDetailView: View {
             }
             .frame(maxWidth: 280)
             .clipShape(RoundedRectangle(cornerRadius: 10))
-            .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
+            .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
 
             VStack(spacing: 4) {
-                Text(albumTitle)
+                Text(playlistTitle)
                     .font(.title3.bold())
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
 
-                Text(artistName)
-                    .font(.subheadline)
-                    .foregroundStyle(themeColor)
+                if !subtitleText.isEmpty {
+                    Text(subtitleText)
+                        .font(.subheadline)
+                        .foregroundStyle(.pink)
+                }
 
                 if let total = response?.tracks?.total {
-                    Text(albumSubtitle(trackCount: total))
+                    Text(playlistSubtitle(trackCount: total))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.top, 2)
@@ -166,7 +88,7 @@ struct AlbumDetailView: View {
         .padding(.top, 20)
     }
 
-    private func albumSubtitle(trackCount: Int) -> String {
+    private func playlistSubtitle(trackCount: Int) -> String {
         var parts: [String] = []
         if let provider = response?.providerInfo?.name {
             parts.append(provider)
@@ -185,17 +107,26 @@ struct AlbumDetailView: View {
         return "\(mins) min"
     }
 
-    // MARK: - Action Bar (Play / Shuffle)
+    // MARK: - Action Bar
 
     private var actionBar: some View {
         HStack(spacing: 12) {
             actionButton(icon: "play.fill", label: "Play", id: "play-all") {
-                playAlbum()
+                playPlaylist()
             }
 
             actionButton(icon: "shuffle", label: "Shuffle", id: "shuffle") {
-                playAlbumShuffled()
+                playPlaylistShuffled()
             }
+
+            Button {
+                toggleFavorite()
+            } label: {
+                Image(systemName: isFavorited ? "heart.circle.fill" : "heart.circle")
+                    .font(.title2)
+                    .foregroundStyle(.pink)
+            }
+            .disabled(playingItemId != nil)
         }
         .padding(.horizontal)
     }
@@ -220,7 +151,7 @@ struct AlbumDetailView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
-            .background(themeColor, in: RoundedRectangle(cornerRadius: 10))
+            .background(.pink, in: RoundedRectangle(cornerRadius: 10))
             .foregroundStyle(.white)
         }
         .disabled(isDisabled)
@@ -241,7 +172,7 @@ struct AlbumDetailView: View {
         } else {
             LazyVStack(spacing: 0) {
                 ForEach(Array(tracks.enumerated()), id: \.offset) { idx, track in
-                    trackRow(track, isLast: idx == tracks.count - 1)
+                    trackRow(track, index: idx + 1, isLast: idx == tracks.count - 1)
                 }
             }
             .padding(.horizontal)
@@ -249,7 +180,7 @@ struct AlbumDetailView: View {
         }
     }
 
-    private func trackRow(_ track: SonosCloudAPI.AlbumTrackItem, isLast: Bool) -> some View {
+    private func trackRow(_ track: SonosCloudAPI.AlbumTrackItem, index: Int, isLast: Bool) -> some View {
         let isPlaying = playingItemId == track.id
         let isDisabled = playingItemId != nil && !isPlaying
 
@@ -257,10 +188,20 @@ struct AlbumDetailView: View {
             playTrack(track)
         } label: {
             HStack(spacing: 12) {
-                Text("\(track.ordinal ?? 0)")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, alignment: .trailing)
+                AsyncImage(url: URL(string: track.images?.tile1x1 ?? "")) { phase in
+                    if let img = phase.image {
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Color(.tertiarySystemFill)
+                            .overlay {
+                                Image(systemName: "music.note")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
@@ -274,12 +215,10 @@ struct AlbumDetailView: View {
                         }
                     }
 
-                    if let artist = track.artists?.first?.name, artist != artistName {
-                        Text(artist)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                    Text(track.subtitle ?? track.artists?.first?.name ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 Spacer()
@@ -291,7 +230,7 @@ struct AlbumDetailView: View {
                     trackActions(track)
                 }
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
             .opacity(isDisabled ? 0.4 : 1)
         }
@@ -300,7 +239,7 @@ struct AlbumDetailView: View {
         .contextMenu { trackContextMenu(track) }
         .overlay(alignment: .bottom) {
             if !isLast {
-                Divider().padding(.leading, 40)
+                Divider().padding(.leading, 60)
             }
         }
     }
@@ -328,7 +267,6 @@ struct AlbumDetailView: View {
     @ViewBuilder
     private func trackContextMenu(_ track: SonosCloudAPI.AlbumTrackItem) -> some View {
         let item = browseItemFromTrack(track)
-        let trackFavorited = searchManager.isFavorited(item)
 
         Button { playTrack(track) } label: {
             Label("Play Now", systemImage: "play.fill")
@@ -350,6 +288,7 @@ struct AlbumDetailView: View {
 
         Divider()
 
+        let trackFavorited = searchManager.isFavorited(item)
         Button {
             Task {
                 if trackFavorited {
@@ -409,9 +348,9 @@ struct AlbumDetailView: View {
         return BrowseItem(
             id: objectId,
             title: track.title ?? "",
-            artist: track.artists?.first?.name ?? artistName,
-            album: albumTitle,
-            albumArtURL: coverURL,
+            artist: track.artists?.first?.name ?? "",
+            album: track.subtitle ?? "",
+            albumArtURL: track.images?.tile1x1,
             uri: (serviceId != nil && accountId != nil)
                 ? searchManager.buildPlayableURIPublic(
                     objectId: objectId, serviceId: serviceId!,
@@ -425,7 +364,7 @@ struct AlbumDetailView: View {
 
     // MARK: - Data Loading
 
-    private func loadAlbum() async {
+    private func loadPlaylist() async {
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
             errorText = "Not logged in to Sonos Cloud"
@@ -434,7 +373,7 @@ struct AlbumDetailView: View {
         }
 
         let serviceIdStr: String? = {
-            if let sid = albumItem.serviceId {
+            if let sid = playlistItem.serviceId {
                 return searchManager.cloudServiceId(forLocalSid: sid)
             }
             return searchManager.activeServiceIds.first
@@ -450,13 +389,13 @@ struct AlbumDetailView: View {
             .first { $0.serviceId == serviceId }?.accountId ?? "2"
 
         do {
-            response = try await SonosCloudAPI.browseAlbum(
+            response = try await SonosCloudAPI.browsePlaylist(
                 token: token, householdId: householdId,
                 serviceId: serviceId, accountId: accountId,
-                albumId: albumItem.id)
+                playlistId: playlistItem.id)
             isLoading = false
         } catch {
-            print("[AlbumDetail] Load failed: \(error)")
+            print("[PlaylistDetail] Load failed: \(error)")
             errorText = error.localizedDescription
             isLoading = false
         }
@@ -464,17 +403,17 @@ struct AlbumDetailView: View {
 
     // MARK: - Playback
 
-    private func playAlbum() {
+    private func playPlaylist() {
         guard playingItemId == nil else { return }
         playingItemId = "play-all"
 
         Task {
-            await searchManager.playNow(item: albumItem, manager: manager)
+            await searchManager.playNow(item: playlistItem, manager: manager)
             withAnimation(.easeOut(duration: 0.2)) { playingItemId = nil }
         }
     }
 
-    private func playAlbumShuffled() {
+    private func playPlaylistShuffled() {
         guard playingItemId == nil else { return }
         playingItemId = "shuffle"
 
@@ -484,7 +423,7 @@ struct AlbumDetailView: View {
                 try? await SonosAPI.setPlayMode(ip: ip, shuffle: true,
                                                 repeat: current?.repeat ?? .off)
             }
-            await searchManager.playNow(item: albumItem, manager: manager)
+            await searchManager.playNow(item: playlistItem, manager: manager)
             withAnimation(.easeOut(duration: 0.2)) { playingItemId = nil }
         }
     }
@@ -503,11 +442,11 @@ struct AlbumDetailView: View {
     private func toggleFavorite() {
         Task {
             if isFavorited {
-                let ok = await searchManager.removeFromFavorites(item: albumItem, manager: manager)
+                let ok = await searchManager.removeFromFavorites(item: playlistItem, manager: manager)
                 if ok { isFavorited = false }
                 showToast(ok ? "Removed from Favorites" : "Failed to remove")
             } else {
-                let ok = await searchManager.addToFavorites(item: albumItem, manager: manager)
+                let ok = await searchManager.addToFavorites(item: playlistItem, manager: manager)
                 if ok { isFavorited = true }
                 showToast(ok ? "Added to Favorites" : "Failed to add")
             }

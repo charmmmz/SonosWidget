@@ -10,6 +10,7 @@ final class SearchManager {
     var musicServices: [MusicService] = []
     var isLoadingBrowse = false
     var isSearching = false
+    var hasSearched = false
     var isProbing = false
     var searchQuery = ""
     var errorMessage: String?
@@ -233,6 +234,139 @@ final class SearchManager {
                          accountId: accountId, type: type, mimeType: mimeType)
     }
 
+    struct FavoriteCloudIds {
+        let objectId: String
+        let cloudServiceId: String
+        let accountId: String
+    }
+
+    /// Parse Cloud API identifiers from a Sonos Favorite item's URI or resMD.
+    /// URI format: `x-rincon-cpcontainer:1004206c album%3A123?sid=204&flags=8300&sn=2`
+    /// or resMD `<item id="1004206c album%3A123" ...>`
+    func parseCloudIds(from item: BrowseItem) -> FavoriteCloudIds? {
+        let uriSource = item.uri
+            ?? item.resMD.flatMap { SonosAPI.extractTag("res", from: $0) }
+
+        if let uri = uriSource {
+            if let result = parseCloudIdsFromURI(uri) { return result }
+        }
+
+        // Fallback: extract from desc tag and item/container id attribute in resMD/metaXML
+        return parseCloudIdsFromDIDLMetadata(item)
+    }
+
+    /// Primary extraction: parse sid, sn, and objectId from a URI with query params.
+    private func parseCloudIdsFromURI(_ uri: String) -> FavoriteCloudIds? {
+        var localSid: String?
+        var sn: String?
+        if let queryPart = uri.split(separator: "?").last {
+            for param in queryPart.split(separator: "&") {
+                let kv = param.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                if kv[0] == "sid" { localSid = String(kv[1]) }
+                if kv[0] == "sn" { sn = String(kv[1]) }
+            }
+        }
+
+        guard let sid = localSid, let accountId = sn else { return nil }
+        guard let cloudSid = localToCloudSid[Int(sid) ?? 0] else { return nil }
+
+        let objectId = extractObjectIdFromURI(uri)
+        guard !objectId.isEmpty else { return nil }
+
+        return FavoriteCloudIds(objectId: objectId,
+                                cloudServiceId: cloudSid,
+                                accountId: accountId)
+    }
+
+    /// Extract objectId from a Sonos URI by stripping the scheme and hex prefix.
+    private func extractObjectIdFromURI(_ uri: String) -> String {
+        let pathPart = uri.split(separator: "?").first.map(String.init) ?? uri
+        var objectId: String
+        if let colonRange = pathPart.range(of: ":", options: .backwards) {
+            let afterScheme = String(pathPart[colonRange.upperBound...])
+            if afterScheme.count > 8,
+               afterScheme.prefix(8).allSatisfy({ $0.isHexDigit }) {
+                objectId = String(afterScheme.dropFirst(8))
+                    .trimmingCharacters(in: .whitespaces)
+            } else {
+                objectId = afterScheme
+            }
+        } else {
+            objectId = pathPart
+        }
+
+        if objectId.contains("%25") {
+            objectId = objectId.removingPercentEncoding ?? objectId
+        }
+        return objectId
+    }
+
+    /// Fallback: extract Cloud IDs from DIDL desc tag (SA_RINCON{sid}_{user})
+    /// and item/container id attribute (prefix + objectId) when <res> is missing.
+    private func parseCloudIdsFromDIDLMetadata(_ item: BrowseItem) -> FavoriteCloudIds? {
+        let xmlSources = [item.resMD, item.metaXML].compactMap { $0 }
+        guard !xmlSources.isEmpty else { return nil }
+
+        // Extract local service ID from SA_RINCON{sid}_ pattern in <desc> tag
+        var localSid: Int?
+        var extractedSn: String?
+        for xml in xmlSources {
+            if let desc = SonosAPI.extractTag("desc", from: xml) {
+                // Pattern: SA_RINCON{sid}_X_#Svc{sid}-{sn}-Token or SA_RINCON{sid}_...
+                if let match = desc.range(of: "SA_RINCON(\\d+)_", options: .regularExpression) {
+                    let numStr = desc[match].dropFirst("SA_RINCON".count).dropLast(1)
+                    localSid = Int(numStr)
+                }
+                // Try to extract account (sn) from X_#Svc{sid}-{sn}-Token
+                if let svcRange = desc.range(of: "#Svc\\d+-([^-]+)-", options: .regularExpression) {
+                    let segment = desc[svcRange]
+                    if let dashIdx = segment.firstIndex(of: "-"),
+                       let lastDash = segment[segment.index(after: dashIdx)...].firstIndex(of: "-") {
+                        extractedSn = String(segment[segment.index(after: dashIdx)..<lastDash])
+                    }
+                }
+                if localSid != nil { break }
+            }
+        }
+
+        guard let sid = localSid, let cloudSid = localToCloudSid[sid] else {
+            print("[parseCloudIds] Fallback: no localSid from desc tag")
+            return nil
+        }
+
+        // Extract objectId from item/container id attribute in resMD
+        // Format: <item id="{8-hex-prefix}{objectId}" ...>
+        var objectId: String?
+        for xml in xmlSources {
+            if let idVal = extractDIDLItemId(from: xml) {
+                if idVal.count > 8, idVal.prefix(8).allSatisfy({ $0.isHexDigit }) {
+                    var oid = String(idVal.dropFirst(8))
+                    if oid.contains("%25") { oid = oid.removingPercentEncoding ?? oid }
+                    if !oid.isEmpty { objectId = oid; break }
+                }
+            }
+        }
+
+        guard let oid = objectId else {
+            print("[parseCloudIds] Fallback: no objectId from item id attribute")
+            return nil
+        }
+
+        let accountId = extractedSn ?? "2"
+        print("[parseCloudIds] Fallback success: objectId=\(oid), cloudSid=\(cloudSid), sn=\(accountId)")
+        return FavoriteCloudIds(objectId: oid, cloudServiceId: cloudSid, accountId: accountId)
+    }
+
+    /// Extract the `id` attribute value from the first <item> or <container> in DIDL XML.
+    private func extractDIDLItemId(from xml: String) -> String? {
+        let pattern = "<(?:item|container)\\s+id=\"([^\"]+)\""
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: xml, range: NSRange(xml.startIndex..., in: xml)),
+              let range = Range(match.range(at: 1), in: xml) else { return nil }
+        return String(xml[range])
+    }
+
     // MARK: - Browse
 
     func loadBrowseContent() async {
@@ -267,9 +401,11 @@ final class SearchManager {
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
             searchResults = []
             isSearching = false
+            hasSearched = false
             return
         }
 
+        hasSearched = true
         isSearching = true
         searchTask = Task {
             try? await Task.sleep(for: .milliseconds(400))
@@ -924,13 +1060,58 @@ final class SearchManager {
               let uri = item.uri else { return false }
         let meta = playbackMetadata(for: item)
         do {
-            try await SonosAPI.addToFavorites(ip: ip, title: item.title, uri: uri, metadata: meta)
+            try await SonosAPI.addToFavorites(ip: ip, title: item.title, uri: uri,
+                                              metadata: meta, albumArtURI: item.albumArtURL)
             print("[Favorites] Added '\(item.title)' to Sonos Favorites")
+            await refreshFavorites(ip: ip)
             return true
         } catch {
             print("[Favorites] Failed to add: \(error)")
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    func removeFromFavorites(item: BrowseItem, manager: SonosManager) async -> Bool {
+        guard let ip = manager.selectedSpeaker?.playbackIP else { return false }
+        guard let favItem = findFavorite(matching: item) else {
+            print("[Favorites] Item '\(item.title)' not found in favorites")
+            return false
+        }
+        do {
+            try await SonosAPI.removeFromFavorites(ip: ip, objectId: favItem.id)
+            print("[Favorites] Removed '\(item.title)' from Sonos Favorites")
+            await refreshFavorites(ip: ip)
+            return true
+        } catch {
+            print("[Favorites] Failed to remove: \(error)")
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Check if an item is already in Sonos Favorites by matching URI or title.
+    func isFavorited(_ item: BrowseItem) -> Bool {
+        findFavorite(matching: item) != nil
+    }
+
+    private func findFavorite(matching item: BrowseItem) -> BrowseItem? {
+        if let uri = item.uri {
+            let normalizedURI = uri.split(separator: "?").first.map(String.init) ?? uri
+            if let match = favorites.first(where: { fav in
+                guard let favURI = fav.uri else { return false }
+                let normalizedFav = favURI.split(separator: "?").first.map(String.init) ?? favURI
+                return normalizedFav == normalizedURI
+            }) { return match }
+        }
+        return favorites.first { $0.title == item.title && $0.artist == item.artist }
+    }
+
+    private func refreshFavorites(ip: String) async {
+        do {
+            favorites = try await SonosAPI.browseFavorites(ip: ip)
+        } catch {
+            print("[Favorites] Refresh failed: \(error)")
         }
     }
 }

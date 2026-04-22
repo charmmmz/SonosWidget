@@ -255,55 +255,130 @@ struct SearchView: View {
 
     // MARK: - Cards
 
+    @ViewBuilder
     private func browseCard(_ item: BrowseItem, category: BrowseItem.FavoriteCategory?) -> some View {
-        let isLoading = playingItemId == item.id
-        let isDisabled = playingItemId != nil && !isLoading
-        let cornerRadius: CGFloat = category == .artist ? 70 : 10
+        let cat = category ?? item.favoriteCategory
 
-        return Button {
-            playItem(item)
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
-                    if let img = phase.image {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        Rectangle().fill(.quaternary)
-                            .overlay {
-                                Image(systemName: placeholderIcon(for: item, category: category))
-                                    .foregroundStyle(.tertiary)
-                            }
-                    }
-                }
-                .frame(width: 140, height: 140)
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-                .overlay {
-                    if isLoading {
-                        RoundedRectangle(cornerRadius: cornerRadius)
-                            .fill(.ultraThinMaterial.opacity(0.85))
-                            .overlay {
-                                ProgressView()
-                                    .tint(.white)
-                                    .controlSize(.regular)
-                            }
-                            .transition(.opacity)
-                    }
-                }
-
-                Text(item.title)
-                    .font(.caption.weight(.medium))
-                    .lineLimit(2)
-                    .foregroundStyle(.primary)
-
-                categoryLabel(for: item, category: category)
+        if cat == .album, let nav = albumNavItem(for: item) {
+            NavigationLink {
+                AlbumDetailView(albumItem: nav, searchManager: searchManager, manager: manager)
+            } label: {
+                browseCardContent(item, category: category)
             }
-            .frame(width: 140)
-            .opacity(isDisabled ? 0.4 : 1)
+            .buttonStyle(.plain)
+            .contextMenu { itemContextMenu(item) }
+        } else if cat == .artist {
+            let nav = artistNavItem(for: item) ?? item
+            NavigationLink {
+                ArtistDetailView(artistItem: nav, searchManager: searchManager, manager: manager)
+            } label: {
+                browseCardContent(item, category: category)
+            }
+            .buttonStyle(.plain)
+            .contextMenu { itemContextMenu(item) }
+        } else if cat == .playlist, let nav = playlistNavItem(for: item) {
+            NavigationLink {
+                PlaylistDetailView(playlistItem: nav, searchManager: searchManager, manager: manager)
+            } label: {
+                browseCardContent(item, category: category)
+            }
+            .buttonStyle(.plain)
+            .contextMenu { itemContextMenu(item) }
+        } else {
+            let isLoading = playingItemId == item.id
+            let isDisabled = playingItemId != nil && !isLoading
+
+            Button { playItem(item) } label: {
+                browseCardContent(item, category: category)
+                    .opacity(isDisabled ? 0.4 : 1)
+                    .overlay {
+                        let cr: CGFloat = cat == .artist ? 70 : 10
+                        if isLoading {
+                            RoundedRectangle(cornerRadius: cr)
+                                .fill(.ultraThinMaterial.opacity(0.85))
+                                .frame(width: 140, height: 140)
+                                .overlay {
+                                    ProgressView()
+                                        .tint(.white)
+                                        .controlSize(.regular)
+                                }
+                                .transition(.opacity)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+            .animation(.easeInOut(duration: 0.2), value: playingItemId)
+            .contextMenu { itemContextMenu(item) }
         }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .animation(.easeInOut(duration: 0.2), value: playingItemId)
-        .contextMenu { itemContextMenu(item) }
+    }
+
+    private func browseCardContent(_ item: BrowseItem, category: BrowseItem.FavoriteCategory?) -> some View {
+        let cat = category ?? item.favoriteCategory
+        let cornerRadius: CGFloat = cat == .artist ? 70 : 10
+
+        return VStack(alignment: .leading, spacing: 6) {
+            AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
+                if let img = phase.image {
+                    img.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Rectangle().fill(.quaternary)
+                        .overlay {
+                            Image(systemName: placeholderIcon(for: item, category: category))
+                                .foregroundStyle(.tertiary)
+                        }
+                }
+            }
+            .frame(width: 140, height: 140)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+
+            Text(item.title)
+                .font(.caption.weight(.medium))
+                .lineLimit(2)
+                .foregroundStyle(.primary)
+
+            categoryLabel(for: item, category: category)
+        }
+        .frame(width: 140)
+    }
+
+    /// Build a BrowseItem suitable for AlbumDetailView from a Favorite.
+    private func albumNavItem(for item: BrowseItem) -> BrowseItem? {
+        if item.cloudType == "ALBUM" { return item }
+        guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
+        return BrowseItem(
+            id: ids.objectId, title: item.title, artist: item.artist,
+            album: item.title, albumArtURL: item.albumArtURL,
+            uri: item.uri, isContainer: true,
+            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
+            cloudType: "ALBUM")
+    }
+
+    /// Build a BrowseItem suitable for ArtistDetailView from a Favorite.
+    private func artistNavItem(for item: BrowseItem) -> BrowseItem? {
+        if item.cloudType == "ARTIST" { return item }
+        guard let ids = searchManager.parseCloudIds(from: item) else {
+            print("[artistNavItem] parseCloudIds failed for '\(item.title)' uri=\(item.uri ?? "nil") resMD=\(item.resMD?.prefix(200) ?? "nil")")
+            return nil
+        }
+        print("[artistNavItem] OK for '\(item.title)' objectId=\(ids.objectId) cloudSid=\(ids.cloudServiceId)")
+        return BrowseItem(
+            id: ids.objectId, title: item.title, artist: "",
+            album: "", albumArtURL: item.albumArtURL,
+            uri: nil, isContainer: false,
+            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
+            cloudType: "ARTIST")
+    }
+
+    private func playlistNavItem(for item: BrowseItem) -> BrowseItem? {
+        if item.cloudType == "PLAYLIST" { return item }
+        guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
+        return BrowseItem(
+            id: ids.objectId, title: item.title, artist: item.artist,
+            album: "", albumArtURL: item.albumArtURL,
+            uri: item.uri, isContainer: true,
+            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
+            cloudType: "PLAYLIST")
     }
 
     @ViewBuilder
@@ -425,8 +500,10 @@ struct SearchView: View {
                     ProgressView("Searching…")
                     Spacer()
                 }
-            } else if searchManager.searchResults.isEmpty {
+            } else if searchManager.hasSearched && searchManager.searchResults.isEmpty {
                 ContentUnavailableView.search(text: searchText)
+            } else if searchManager.searchResults.isEmpty {
+                Color.clear
             } else {
                 VStack(spacing: 0) {
                     serviceTabBar
@@ -749,6 +826,16 @@ struct SearchView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu { itemContextMenu(item) }
+                    } else if item.cloudType == "PLAYLIST" {
+                        NavigationLink {
+                            PlaylistDetailView(playlistItem: item,
+                                               searchManager: searchManager,
+                                               manager: manager)
+                        } label: {
+                            albumScrollCard(item)
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu { itemContextMenu(item) }
                     } else {
                         let isLoading = playingItemId == item.id
                         let isDisabled = playingItemId != nil && !isLoading
@@ -816,6 +903,8 @@ struct SearchView: View {
 
     @ViewBuilder
     private func itemContextMenu(_ item: BrowseItem) -> some View {
+        let favorited = searchManager.isFavorited(item)
+
         if item.isArtist {
             Button {
                 startStationForItem(item)
@@ -838,6 +927,21 @@ struct SearchView: View {
                     Task { await searchManager.addToQueue(item: item, manager: manager) }
                 } label: {
                     Label("Add to Queue", systemImage: "text.badge.plus")
+                }
+
+                Divider()
+
+                Button {
+                    Task {
+                        if favorited {
+                            _ = await searchManager.removeFromFavorites(item: item, manager: manager)
+                        } else {
+                            _ = await searchManager.addToFavorites(item: item, manager: manager)
+                        }
+                    }
+                } label: {
+                    Label(favorited ? "Remove from Sonos Favorites" : "Add to Sonos Favorites",
+                          systemImage: favorited ? "heart.slash" : "heart")
                 }
             }
         }

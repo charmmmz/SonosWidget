@@ -310,22 +310,34 @@ enum SonosAPI {
 
     // MARK: - Sonos Favorites
 
-    nonisolated static func addToFavorites(ip: String, title: String, uri: String, metadata: String) async throws {
+    nonisolated static func addToFavorites(ip: String, title: String, uri: String,
+                                            metadata: String, albumArtURI: String? = nil) async throws {
+        var innerElements = "<dc:title>\(escapeXML(title))</dc:title>" +
+            "<res>\(escapeXML(uri))</res>" +
+            "<r:resMD>\(escapeXML(metadata))</r:resMD>"
+        if let art = albumArtURI, !art.isEmpty {
+            innerElements += "<upnp:albumArtURI>\(escapeXML(art))</upnp:albumArtURI>"
+        }
+        innerElements += "<upnp:class>object.item.sonos-favorite</upnp:class>"
+
         let didl = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
             "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
             "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" " +
             "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">" +
             "<item id=\"\" parentID=\"FV:2\" restricted=\"false\">" +
-            "<dc:title>\(escapeXML(title))</dc:title>" +
-            "<res>\(escapeXML(uri))</res>" +
-            "<r:resMD>\(escapeXML(metadata))</r:resMD>" +
-            "<upnp:class>object.itemobject.item.sonos-favorite</upnp:class>" +
+            innerElements +
             "</item></DIDL-Lite>"
 
         _ = try await soap(ip: ip, endpoint: contentDirectory, service: "ContentDirectory",
                            action: "CreateObject",
                            body: "<ContainerID>FV:2</ContainerID>" +
                            "<Elements>\(escapeXML(didl))</Elements>")
+    }
+
+    nonisolated static func removeFromFavorites(ip: String, objectId: String) async throws {
+        _ = try await soap(ip: ip, endpoint: contentDirectory, service: "ContentDirectory",
+                           action: "DestroyObject",
+                           body: "<ObjectID>\(escapeXML(objectId))</ObjectID>")
     }
 
     // MARK: - Browse (Content Directory)

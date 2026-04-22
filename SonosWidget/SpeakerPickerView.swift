@@ -24,84 +24,115 @@ struct SpeakerPickerView: View {
     }
 
     private var accent: Color { manager.albumArtDominantColor ?? .accentColor }
-
     private var isEverywhere: Bool { manager.isEverywhereActive }
 
     var body: some View {
         NavigationStack {
-            List {
+            ScrollView {
                 if visibleSpeakers.isEmpty {
                     ContentUnavailableView("No Speakers Found",
                                            systemImage: "hifispeaker.slash",
                                            description: Text("Make sure your Sonos speakers are on the same network."))
+                    .padding(.top, 60)
                 } else {
-                    if visibleSpeakers.count > 1 {
-                        everywhereRow
-                    }
+                    VStack(spacing: 0) {
+                        if visibleSpeakers.count > 1 {
+                            everywhereRow
+                        }
 
-                    ForEach(visibleSpeakers) { speaker in
-                        let inGroup = isInCurrentGroup(speaker)
-                        speakerRow(speaker, inGroup: inGroup)
+                        ForEach(visibleSpeakers) { speaker in
+                            let inGroup = isInCurrentGroup(speaker)
+                            speakerRow(speaker, inGroup: inGroup)
+                        }
                     }
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Color(.systemBackground))
             .navigationTitle("Speakers")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear {
-                if manager.currentGroupMembers.count > 1 {
-                    Task { await manager.fetchMemberVolumes() }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
+            .onAppear { loadVolumes() }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .presentationCornerRadius(24)
         .tint(accent)
+    }
+
+    // MARK: - Load Volumes
+
+    private func loadVolumes() {
+        Task {
+            let members = manager.currentGroupMembers
+            if members.count > 1 {
+                await manager.fetchMemberVolumes()
+            } else if let solo = members.first {
+                if manager.memberVolumes[solo.ipAddress] == nil {
+                    manager.memberVolumes[solo.ipAddress] = manager.volume
+                }
+            }
+        }
     }
 
     // MARK: - Everywhere Row
 
     private var everywhereRow: some View {
-        Button {
-            guard !isProcessing else { return }
-            Task { await toggleEverywhere() }
-        } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    if isProcessing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: isEverywhere ? "checkmark.circle.fill" : "circle")
-                            .font(.title3)
-                            .foregroundStyle(isEverywhere ? accent : .secondary)
+        VStack(spacing: 0) {
+            Button {
+                guard !isProcessing else { return }
+                Task { await toggleEverywhere() }
+            } label: {
+                HStack(spacing: 12) {
+                    checkCircle(isActive: isEverywhere)
+
+                    Image(systemName: "house.fill")
+                        .font(.body)
+                        .foregroundStyle(isEverywhere ? accent : .white.opacity(0.5))
+                        .frame(width: 28)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Everywhere")
+                            .font(.subheadline.weight(isEverywhere ? .semibold : .regular))
+                            .foregroundStyle(.white)
+                        Text(isEverywhere ? "All speakers grouped" : "Play on all speakers")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.4))
                     }
+
+                    Spacer()
                 }
-                .frame(width: 28)
-
-                Image(systemName: "house.fill")
-                    .font(.title3)
-                    .foregroundStyle(isEverywhere ? accent : .primary)
-                    .frame(width: 28)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Everywhere")
-                        .font(.body.weight(isEverywhere ? .semibold : .regular))
-                    Text(isEverywhere ? "All speakers grouped" : "Play on all speakers")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            Divider().opacity(0.3).padding(.leading, 56)
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Speaker Row
 
     private func speakerRow(_ speaker: SonosPlayer, inGroup: Bool) -> some View {
         let isCoord = speaker.id == manager.selectedSpeaker?.id
-        let vol = manager.memberVolumes[speaker.ipAddress] ?? 0
+        let vol = manager.memberVolumes[speaker.ipAddress] ?? manager.volume
 
         return VStack(spacing: 0) {
             Button {
@@ -109,79 +140,107 @@ struct SpeakerPickerView: View {
                 Task { await handleTap(speaker, inGroup: inGroup, isCoord: isCoord) }
             } label: {
                 HStack(spacing: 12) {
-                    ZStack {
-                        if isProcessing {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: inGroup ? "checkmark.circle.fill" : "circle")
-                                .font(.title3)
-                                .foregroundStyle(inGroup ? accent : .secondary)
-                        }
-                    }
-                    .frame(width: 28)
+                    checkCircle(isActive: inGroup)
 
                     Image(systemName: "hifispeaker.fill")
-                        .font(.title3)
-                        .foregroundStyle(inGroup ? accent : .primary)
+                        .font(.body)
+                        .foregroundStyle(inGroup ? accent : .white.opacity(0.5))
                         .frame(width: 28)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text(speaker.name)
-                            .font(.body.weight(inGroup ? .semibold : .regular))
+                            .font(.subheadline.weight(inGroup ? .semibold : .regular))
+                            .foregroundStyle(.white)
                         if isCoord {
                             Text("Currently Playing")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(accent)
                         }
                     }
 
                     Spacer()
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
             if inGroup {
-                HStack(spacing: 10) {
-                    Image(systemName: vol == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20)
-                        .contentShape(Rectangle())
-                        .onLongPressGesture {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            if vol > 0 {
-                                premuteMemberVolumes[speaker.ipAddress] = vol
-                                Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: 0) }
-                            } else if let saved = premuteMemberVolumes[speaker.ipAddress] {
-                                premuteMemberVolumes[speaker.ipAddress] = nil
-                                Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: saved) }
-                            }
-                        }
+                volumeRow(speaker: speaker, vol: vol)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
-                    Slider(value: Binding(
-                        get: { Double(manager.memberVolumes[speaker.ipAddress] ?? 0) },
-                        set: { manager.memberVolumes[speaker.ipAddress] = Int($0) }
-                    ), in: 0...100) { editing in
-                        if !editing {
-                            let v = manager.memberVolumes[speaker.ipAddress] ?? 0
-                            Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: v) }
-                        }
-                    }
-                    .tint(accent)
-
-                    Text("\(vol)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 26, alignment: .trailing)
-                }
-                .padding(.leading, 68)
-                .padding(.trailing, 4)
-                .padding(.top, 6)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            if speaker.id != visibleSpeakers.last?.id {
+                Divider().opacity(0.3).padding(.leading, 56)
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: inGroup)
+    }
+
+    // MARK: - Volume Row (matches Home page GroupVolumeBar pattern)
+
+    private func volumeRow(speaker: SonosPlayer, vol: Int) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: vol == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.4))
+                .frame(width: 24, height: 28)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    let newVol = max(0, vol - 2)
+                    Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: newVol) }
+                }
+                .onLongPressGesture {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    if vol > 0 {
+                        premuteMemberVolumes[speaker.ipAddress] = vol
+                        Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: 0) }
+                    } else if let saved = premuteMemberVolumes[speaker.ipAddress] {
+                        premuteMemberVolumes[speaker.ipAddress] = nil
+                        Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: saved) }
+                    }
+                }
+
+            PickerVolumeBar(volume: vol) { step in
+                let newVol = min(100, max(0, vol + step))
+                Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: newVol) }
+            }
+
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                let newVol = min(100, vol + 2)
+                Task { await manager.setMemberVolume(ip: speaker.ipAddress, volume: newVol) }
+            } label: {
+                Text("\(vol)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.4))
+                    .frame(width: 22, height: 28, alignment: .center)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 2)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: - Check Circle
+
+    private func checkCircle(isActive: Bool) -> some View {
+        ZStack {
+            if isProcessing {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white.opacity(0.5))
+            } else {
+                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22))
+                    .foregroundStyle(isActive ? accent : .white.opacity(0.2))
+            }
+        }
+        .frame(width: 24, height: 24)
     }
 
     // MARK: - Actions
@@ -203,9 +262,7 @@ struct SpeakerPickerView: View {
             await manager.addSpeakerToGroup(speaker)
         }
 
-        if manager.currentGroupMembers.count > 1 {
-            await manager.fetchMemberVolumes()
-        }
+        await manager.fetchMemberVolumes()
     }
 
     // MARK: - Everywhere
@@ -226,8 +283,39 @@ struct SpeakerPickerView: View {
             }
         }
 
-        if manager.currentGroupMembers.count > 1 {
-            await manager.fetchMemberVolumes()
+        await manager.fetchMemberVolumes()
+    }
+}
+
+// MARK: - Volume Bar (tap left = −2, tap right = +2, matches Home page GroupVolumeBar)
+
+private struct PickerVolumeBar: View {
+    var volume: Int
+    var onStep: (Int) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let progress = min(max(Double(volume) / 100.0, 0), 1)
+            let thumbX = geo.size.width * progress
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.12))
+                    .frame(height: 4)
+                Capsule()
+                    .fill(.white.opacity(0.55))
+                    .frame(width: max(0, thumbX), height: 4)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onEnded { gesture in
+                        guard abs(gesture.translation.width) < 6 else { return }
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        onStep(gesture.startLocation.x < thumbX ? -2 : 2)
+                    }
+            )
         }
+        .frame(height: 28)
     }
 }
