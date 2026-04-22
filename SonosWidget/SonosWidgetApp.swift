@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import BackgroundTasks
 import WidgetKit
+import ActivityKit
 
 @main
 struct SonosWidgetApp: App {
@@ -21,6 +22,12 @@ struct SonosWidgetApp: App {
 
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.bgRefreshID, using: nil) { task in
             Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+        }
+
+        // iOS does NOT reliably fire willTerminateNotification on force-quit,
+        // so clean up any orphaned Live Activities from a previous session here.
+        for activity in Activity<SonosActivityAttributes>.activities {
+            Task { await activity.end(nil, dismissalPolicy: .immediate) }
         }
     }
 

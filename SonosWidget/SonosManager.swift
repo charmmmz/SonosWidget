@@ -885,6 +885,11 @@ final class SonosManager {
 
     func startAutoRefresh() {
         stopAutoRefresh()
+
+        // Clean up any Live Activities that survived a force-quit.
+        // manageLiveActivity() will recreate one if music is still playing.
+        endAllActivities()
+
         groupRefreshCounter = 0
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -907,9 +912,11 @@ final class SonosManager {
             Task { @MainActor [weak self] in self?.stopBackgroundKeepalive() }
         }
         // End Live Activity when the app is killed so it doesn't linger on Lock Screen.
+        // Note: willTerminate is NOT guaranteed on force-quit; endAllActivities() on
+        // next launch (above) is the reliable fallback.
         NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            self?.stopLiveActivity()
+            self?.endAllActivities()
         }
     }
 
@@ -1020,6 +1027,16 @@ final class SonosManager {
         guard let activity = currentActivity else { return }
         currentActivity = nil
         Task { await activity.end(nil, dismissalPolicy: .immediate) }
+    }
+
+    /// End ALL Live Activities regardless of in-memory reference.
+    /// Used on app launch and willTerminate to clean up orphaned activities
+    /// that survived a force-quit (where willTerminate is not guaranteed).
+    func endAllActivities() {
+        currentActivity = nil
+        for activity in Activity<SonosActivityAttributes>.activities {
+            Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        }
     }
 
     private func makeActivityState() -> SonosActivityAttributes.ContentState {

@@ -214,8 +214,8 @@ enum SonosCloudAPI {
         let playable: Bool?
     }
 
-    /// Search across all linked music services via the Sonos Cloud (play.sonos.com).
-    /// `serviceAccounts` should be the array from `getMusicServiceAccounts`.
+    /// Generic search across all linked services in one request.
+    /// Fast but some services (e.g. Apple Music) only return TRACK + ARTIST.
     static func searchCatalog(token: String, householdId: String, term: String,
                               serviceIds: [String]) async throws -> CloudSearchResponse {
         let idsParam = serviceIds.joined(separator: ",")
@@ -244,6 +244,171 @@ enum SonosCloudAPI {
         }
 
         return try JSONDecoder().decode(CloudSearchResponse.self, from: data)
+    }
+
+    /// Per-service search (same endpoint as Sonos web player).
+    /// Returns all resource types: TRACK, ARTIST, ALBUM, PLAYLIST, PROGRAM.
+    static func searchService(token: String, householdId: String,
+                              serviceId: String, accountId: String,
+                              term: String, count: Int = 50) async throws -> ServiceSearchResponse {
+        let encodedTerm = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? term
+        let urlStr = "\(playBaseURL)/households/\(householdId)" +
+            "/services/\(serviceId)/accounts/\(accountId)" +
+            "/search?query=\(encodedTerm)&count=\(count)"
+
+        guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
+        print("[CloudSearch] GET \(urlStr.prefix(200))")
+
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let http = response as? HTTPURLResponse
+        let statusCode = http?.statusCode ?? -1
+        print("[CloudSearch] HTTP \(statusCode), \(data.count) bytes")
+
+        if statusCode == 401 { throw SonosCloudError.unauthorized }
+        if !(200...299).contains(statusCode) {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            print("[CloudSearch] Error body: \(body.prefix(500))")
+            throw SonosCloudError.httpError(statusCode)
+        }
+
+        return try JSONDecoder().decode(ServiceSearchResponse.self, from: data)
+    }
+
+    struct ServiceSearchResponse: Decodable {
+        let resourceOrder: [String]?
+        var sections: [String: ResourceSection] = [:]
+
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init(_ string: String) { self.stringValue = string }
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { nil }
+            init?(intValue: Int) { return nil }
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            resourceOrder = try container.decodeIfPresent([String].self, forKey: DynamicKey("resourceOrder"))
+            let skip: Set<String> = ["info", "errors", "externalLinks", "resourceOrder"]
+            for key in container.allKeys where !skip.contains(key.stringValue) {
+                if let section = try? container.decode(ResourceSection.self, forKey: key) {
+                    sections[key.stringValue] = section
+                }
+            }
+        }
+
+        var allResources: [CloudResource] {
+            let order = resourceOrder ?? Array(sections.keys)
+            return order.flatMap { sections[$0]?.resources ?? [] }
+        }
+    }
+
+    struct ResourceSection: Decodable {
+        let info: SectionInfo?
+        let resources: [CloudResource]?
+
+        struct SectionInfo: Decodable {
+            let count: Int?
+            let offset: Int?
+            let pageSize: Int?
+        }
+    }
+
+    // MARK: - Artist Browse (v2)
+
+    struct ArtistBrowseResponse: Decodable {
+        let type: String?
+        let title: String?
+        let images: ContentImages?
+        let resource: ArtistResource?
+        let customActions: [CustomAction]?
+        let sections: ArtistSections?
+        let providerInfo: ProviderInfo?
+    }
+
+    struct ContentImages: Decodable {
+        let tile1x1: String?
+    }
+
+    struct ArtistResource: Decodable {
+        let type: String?
+        let id: CloudResourceId?
+    }
+
+    struct CustomAction: Decodable {
+        let action: String?
+        let label: String?
+        let resource: CustomActionResource?
+    }
+
+    struct CustomActionResource: Decodable {
+        let id: CloudResourceId?
+        let type: String?
+    }
+
+    struct ArtistSections: Decodable {
+        let items: [ArtistSection]?
+    }
+
+    struct ArtistSection: Decodable {
+        let items: [ArtistSectionItem]?
+        let total: Int?
+    }
+
+    struct ArtistSectionItem: Decodable {
+        let id: String?
+        let title: String?
+        let subtitle: String?
+        let images: ContentImages?
+        let type: String?
+        let resource: ArtistItemResource?
+        let isExplicit: Bool?
+        let actions: [String]?
+        let href: String?
+    }
+
+    struct ArtistItemResource: Decodable {
+        let id: CloudResourceId?
+        let type: String?
+        let defaults: String?
+    }
+
+    struct ProviderInfo: Decodable {
+        let id: String?
+        let slug: String?
+        let name: String?
+    }
+
+    static func browseArtist(token: String, householdId: String,
+                             serviceId: String, accountId: String,
+                             artistId: String) async throws -> ArtistBrowseResponse {
+        let encodedArtist = artistId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? artistId
+        let urlStr = "\(playBaseURL.replacingOccurrences(of: "/v1", with: "/v2"))" +
+            "/households/\(householdId)/services/\(serviceId)" +
+            "/accounts/\(accountId)/artists/\(encodedArtist)/browse?muse2=true"
+
+        guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
+        print("[CloudAPI] browseArtist GET \(urlStr.prefix(200))")
+
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let http = response as? HTTPURLResponse
+        let statusCode = http?.statusCode ?? -1
+        print("[CloudAPI] browseArtist HTTP \(statusCode), \(data.count) bytes")
+
+        if statusCode == 401 { throw SonosCloudError.unauthorized }
+        if !(200...299).contains(statusCode) {
+            throw SonosCloudError.httpError(statusCode)
+        }
+
+        return try JSONDecoder().decode(ArtistBrowseResponse.self, from: data)
     }
 
     // MARK: - Networking

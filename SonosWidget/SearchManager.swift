@@ -38,10 +38,15 @@ final class SearchManager {
         var items: [BrowseItem]
     }
 
+    /// Per-service detailed results (loaded on demand when a service tab is selected).
+    var serviceDetailResults: [String: ServiceSearchResult] = [:]
+    var isLoadingServiceDetail = false
+
     private static let enabledKey = "SearchEnabledServices"
 
     private var speakerIP: String?
     private var searchTask: Task<Void, Never>?
+    private var lastSearchQuery = ""
     private var hasProbed = false
 
     func configure(speakerIP: String?) {
@@ -176,6 +181,17 @@ final class SearchManager {
         cloudToLocalSid[cloudId]
     }
 
+    func cloudServiceId(forLocalSid sid: Int) -> String? {
+        localToCloudSid[sid]
+    }
+
+    func buildPlayableURIPublic(objectId: String, serviceId: String,
+                                accountId: String, type: String,
+                                mimeType: String? = nil) -> String? {
+        buildPlayableURI(objectId: objectId, serviceId: serviceId,
+                         accountId: accountId, type: type, mimeType: mimeType)
+    }
+
     // MARK: - Browse
 
     func loadBrowseContent() async {
@@ -243,6 +259,8 @@ final class SearchManager {
             }
 
             print("[Search] Searching \(serviceIds.count) services for: \(query)")
+            lastSearchQuery = query
+            serviceDetailResults = [:]
 
             do {
                 let response = try await SonosCloudAPI.searchCatalog(
@@ -270,10 +288,6 @@ final class SearchManager {
                             id: sid, serviceName: serviceName, items: items))
                         print("[Search] \(serviceName) → \(items.count) results")
                     }
-
-                    for err in serviceResult.errors ?? [] {
-                        print("[Search] \(serviceName) error: \(err.errorCode ?? "?") - \(err.reason ?? "?")")
-                    }
                 }
 
                 guard !Task.isCancelled else { return }
@@ -286,6 +300,44 @@ final class SearchManager {
             }
 
             isSearching = false
+        }
+    }
+
+    /// Load full results for a specific service (albums, playlists, etc.).
+    /// Called when user taps a service tab for the first time.
+    func loadServiceDetail(serviceId: String) async {
+        guard serviceDetailResults[serviceId] == nil,
+              !isLoadingServiceDetail,
+              !lastSearchQuery.isEmpty else { return }
+
+        guard let account = linkedAccounts.first(where: { $0.serviceId == serviceId }),
+              let aid = account.accountId,
+              let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else { return }
+
+        isLoadingServiceDetail = true
+        defer { isLoadingServiceDetail = false }
+
+        do {
+            let response = try await SonosCloudAPI.searchService(
+                token: token, householdId: householdId,
+                serviceId: serviceId, accountId: aid, term: lastSearchQuery)
+
+            let allResources = response.allResources
+            let typeCounts = Dictionary(grouping: allResources, by: { $0.type ?? "nil" })
+                .mapValues { $0.count }
+            print("[Search] Detail \(serviceId) types: \(typeCounts)")
+
+            let serviceName = allResources.first?.id?.serviceName ?? account.displayName
+            let items = allResources.compactMap { resource -> BrowseItem? in
+                convertToBrowseItem(resource, serviceId: serviceId, accountId: aid)
+            }
+            print("[Search] Detail \(serviceName) → \(items.count) results")
+
+            serviceDetailResults[serviceId] = ServiceSearchResult(
+                id: serviceId, serviceName: serviceName, items: items)
+        } catch {
+            print("[Search] Detail search failed for \(serviceId): \(error)")
         }
     }
 
@@ -347,8 +399,10 @@ final class SearchManager {
         case "TRACK":
             let (scheme, ext, flags) = trackURIComponents(localSid: sid, mimeType: mimeType)
             return "\(scheme):\(encodedId)\(ext)?sid=\(sid)&flags=\(flags)&sn=\(aid)"
-        case "ALBUM", "PLAYLIST":
-            return "x-rincon-cpcontainer:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
+        case "ALBUM":
+            return "x-rincon-cpcontainer:1004206c\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
+        case "PLAYLIST":
+            return "x-rincon-cpcontainer:1006206c\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
         case "PROGRAM":
             return "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
         default:
@@ -404,18 +458,17 @@ final class SearchManager {
     }
 
     /// Build DIDL metadata for Cloud search results matching the official Sonos app format.
-    /// Key elements: desc tag uses Cloud service ID + account hash, item id has
-    /// `1003{flagsHex}` prefix, and upnp:class has `.#SongTitleWithArtistAndAlbum`.
     private func buildCloudDIDLMetadata(item: BrowseItem, localSid: Int, accountId: String) -> String {
         let cloudSid = localToCloudSid[localSid] ?? String(localSid)
         let username = cloudServiceUsername[cloudSid] ?? "X_#Svc\(cloudSid)-0-Token"
         let desc = "SA_RINCON\(cloudSid)_\(username)"
-        print("[Playback] desc=\(desc)")
+        print("[Playback] desc=\(desc) cloudType=\(item.cloudType ?? "nil")")
 
-        let flags = extractFlagsFromURI(item.uri)
-        let flagsHex = String(format: "%04x", flags)
         let encodedObjId = item.id.replacingOccurrences(of: ":", with: "%3a")
-        let itemId = "1003\(flagsHex)\(encodedObjId)"
+        let cloudType = item.cloudType ?? "TRACK"
+
+        let (itemId, upnpClass, xmlTag) = metadataComponents(
+            cloudType: cloudType, objectId: encodedObjId, uri: item.uri)
 
         let t = SonosAPI.escapeXML(item.title)
         let a = SonosAPI.escapeXML(item.artist)
@@ -427,17 +480,45 @@ final class SearchManager {
         xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" \
         xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" \
         xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">\
-        <item id="\(itemId)" parentID="" restricted="true">\
+        <\(xmlTag) id="\(itemId)" parentID="" restricted="true">\
         <dc:title>\(t)</dc:title>\
-        <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
-        <upnp:album>\(al)</upnp:album>\
-        <dc:creator>\(a)</dc:creator>\
+        <upnp:class>\(upnpClass)</upnp:class>\
         <upnp:albumArtURI>\(art)</upnp:albumArtURI>\
+        <dc:creator>\(a)</dc:creator>\
+        <upnp:album>\(al)</upnp:album>\
         <r:albumArtist>\(a)</r:albumArtist>\
         <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\
         \(desc)</desc>\
-        </item></DIDL-Lite>
+        </\(xmlTag)></DIDL-Lite>
         """
+    }
+
+    /// Returns (itemId, upnpClass, xmlTag) based on cloudType.
+    /// Format derived from Wireshark capture of official Sonos app.
+    private func metadataComponents(cloudType: String, objectId: String,
+                                    uri: String?) -> (String, String, String) {
+        switch cloudType {
+        case "TRACK":
+            let flags = extractFlagsFromURI(uri)
+            let flagsHex = String(format: "%04x", flags)
+            return ("1003\(flagsHex)\(objectId)",
+                    "object.item.audioItem.musicTrack",
+                    "item")
+        case "ALBUM":
+            return ("1004206c\(objectId)",
+                    "object.container.album.musicAlbum.#AlbumView",
+                    "item")
+        case "PLAYLIST":
+            return ("1006206c\(objectId)",
+                    "object.container.playlistContainer",
+                    "item")
+        case "PROGRAM":
+            return ("000c206c\(objectId)",
+                    "object.item.audioItem.audioBroadcast.#programRadio",
+                    "item")
+        default:
+            return (objectId, "object.item.audioItem.musicTrack", "item")
+        }
     }
 
     private func extractFlagsFromURI(_ uri: String?) -> Int {

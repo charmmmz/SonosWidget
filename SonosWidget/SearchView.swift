@@ -460,6 +460,7 @@ struct SearchView: View {
         let isSelected = selectedServiceTab == id
         return Button {
             withAnimation(.easeInOut(duration: 0.2)) { selectedServiceTab = id }
+            if let id { Task { await searchManager.loadServiceDetail(serviceId: id) } }
         } label: {
             HStack(spacing: 6) {
                 if let icon {
@@ -514,22 +515,30 @@ struct SearchView: View {
     private var groupedResultsForSelectedTab: some View {
         let items: [BrowseItem] = {
             if let sid = selectedServiceTab {
+                if let detail = searchManager.serviceDetailResults[sid] {
+                    return detail.items
+                }
                 return searchManager.searchResults.first { $0.id == sid }?.items ?? []
             }
-            // "All" tab: merge all services, keeping service order
             return searchManager.searchResults.flatMap { $0.items }
         }()
 
         let grouped = Dictionary(grouping: items) { categoryFor($0) }
 
         return VStack(alignment: .leading, spacing: 24) {
-            // When "All" tab and multiple services, show per-service sections
             if selectedServiceTab == nil && searchManager.searchResults.count > 1 {
                 ForEach(searchManager.searchResults) { group in
                     allTabServiceSection(group)
                 }
+            } else if let sid = selectedServiceTab, searchManager.isLoadingServiceDetail,
+                      searchManager.serviceDetailResults[sid] == nil {
+                HStack {
+                    Spacer()
+                    ProgressView("Loading full results…")
+                    Spacer()
+                }
+                .padding(.top, 40)
             } else {
-                // Single service or specific service tab: group by type
                 ForEach(ResultCategory.allCases, id: \.self) { category in
                     if let categoryItems = grouped[category], !categoryItems.isEmpty {
                         resultCategorySection(category: category, items: categoryItems)
@@ -561,6 +570,7 @@ struct SearchView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 withAnimation(.easeInOut(duration: 0.2)) { selectedServiceTab = group.id }
+                Task { await searchManager.loadServiceDetail(serviceId: group.id) }
             }
 
             ForEach(ResultCategory.allCases, id: \.self) { category in
@@ -596,11 +606,10 @@ struct SearchView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 16) {
                 ForEach(items) { item in
-                    let isLoading = playingItemId == item.id
-                    let isDisabled = playingItemId != nil && !isLoading
-
-                    Button {
-                        startStationForItem(item)
+                    NavigationLink {
+                        ArtistDetailView(artistItem: item,
+                                         searchManager: searchManager,
+                                         manager: manager)
                     } label: {
                         VStack(spacing: 8) {
                             AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
@@ -616,18 +625,6 @@ struct SearchView: View {
                             }
                             .frame(width: 120, height: 120)
                             .clipShape(Circle())
-                            .overlay {
-                                if isLoading {
-                                    Circle()
-                                        .fill(.ultraThinMaterial.opacity(0.85))
-                                        .overlay {
-                                            ProgressView()
-                                                .tint(.white)
-                                                .controlSize(.regular)
-                                        }
-                                        .transition(.opacity)
-                                }
-                            }
 
                             Text(item.title)
                                 .font(.caption.weight(.medium))
@@ -639,11 +636,8 @@ struct SearchView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .frame(width: 120)
-                        .opacity(isDisabled ? 0.4 : 1)
                     }
                     .buttonStyle(.plain)
-                    .disabled(isDisabled)
-                    .animation(.easeInOut(duration: 0.2), value: playingItemId)
                     .contextMenu { itemContextMenu(item) }
                 }
             }
