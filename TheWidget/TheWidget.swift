@@ -118,7 +118,7 @@ struct SonosProvider: TimelineProvider {
             if let urlStr = info.albumArtURL, let url = URL(string: urlStr) {
                 var req = URLRequest(url: url, timeoutInterval: 5)
                 req.httpMethod = "GET"
-                if let (data, _) = try? await URLSession.shared.data(for: req) {
+                if let (data, _) = try? await noProxySession.data(for: req) {
                     artData = data
                     SharedStorage.albumArtData = data
                     if let uiImage = UIImage(data: data) {

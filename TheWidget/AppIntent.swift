@@ -105,7 +105,7 @@ enum IntentHelper {
             SharedStorage.cachedPlaybackSource = info.source.rawValue
 
             if let urlStr = info.albumArtURL, let url = URL(string: urlStr),
-               let (data, _) = try? await URLSession.shared.data(from: url) {
+               let (data, _) = try? await noProxySession.data(from: url) {
                 SharedStorage.albumArtData = data
             }
         }

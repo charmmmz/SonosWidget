@@ -1,5 +1,12 @@
 import Foundation
 
+/// URLSession that bypasses any local HTTP proxy (e.g. Clash/Surge on the same network).
+let noProxySession: URLSession = {
+    let config = URLSessionConfiguration.ephemeral
+    config.connectionProxyDictionary = [:]
+    return URLSession(configuration: config)
+}()
+
 enum SharedStorage {
 
     nonisolated static let appGroupID = "group.com.charm.SonosWidget"

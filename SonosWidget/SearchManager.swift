@@ -310,7 +310,9 @@ final class SearchManager {
         let artURL = resource.images?.first?.url ?? resource.container?.images?.first?.url
         let isContainer = type == "ALBUM" || type == "PLAYLIST"
 
-        let uri = buildPlayableURI(objectId: objectId, serviceId: serviceId, accountId: accountId, type: type)
+        let mimeType = resource.defaults.flatMap { decodeMimeType(from: $0) }
+        let uri = buildPlayableURI(objectId: objectId, serviceId: serviceId,
+                                   accountId: accountId, type: type, mimeType: mimeType)
         let localSid = serviceId.flatMap { cloudToLocalSid[$0] }
 
         return BrowseItem(
@@ -319,11 +321,18 @@ final class SearchManager {
             isContainer: isContainer, serviceId: localSid, cloudType: type)
     }
 
+    private func decodeMimeType(from defaults: String) -> String? {
+        guard let data = Data(base64Encoded: defaults),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json["mimeType"] as? String
+    }
+
     /// Build a URI that Sonos can play from the Cloud API objectId.
     /// Uses the local Sonos sid (mapped from Cloud serviceId) for the `sid=` parameter.
     /// URI format is service-specific (Apple Music, Spotify, etc. all need different encoding).
     private func buildPlayableURI(objectId: String, serviceId: String?,
-                                  accountId: String?, type: String) -> String? {
+                                  accountId: String?, type: String,
+                                  mimeType: String? = nil) -> String? {
         guard let cloudSid = serviceId, let aid = accountId else { return nil }
 
         let localSid = cloudToLocalSid[cloudSid]
@@ -332,13 +341,12 @@ final class SearchManager {
             return nil
         }
 
-        // URL-encode colons in the objectId (song:123 → song%3a123)
         let encodedId = objectId.replacingOccurrences(of: ":", with: "%3a")
 
         switch type {
         case "TRACK":
-            let (scheme, suffix, flags) = trackURIComponents(localSid: sid, objectId: objectId)
-            return "\(scheme):\(encodedId)\(suffix)?sid=\(sid)&flags=\(flags)&sn=\(aid)"
+            let (scheme, ext, flags) = trackURIComponents(localSid: sid, mimeType: mimeType)
+            return "\(scheme):\(encodedId)\(ext)?sid=\(sid)&flags=\(flags)&sn=\(aid)"
         case "ALBUM", "PLAYLIST":
             return "x-rincon-cpcontainer:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
         case "PROGRAM":
@@ -348,13 +356,26 @@ final class SearchManager {
         }
     }
 
-    /// Returns (uriScheme, fileSuffix, flags, mimeType) for track URIs based on the local service ID.
-    private func trackURIComponents(localSid: Int, objectId: String) -> (String, String, Int) {
+    /// Returns (scheme, fileExtension, flags) for track URIs.
+    /// Apple Music AAC → .mp4 + flags 8232 (matching official Sonos app behavior).
+    private func trackURIComponents(localSid: Int, mimeType: String?) -> (String, String, Int) {
         switch localSid {
-        case 12:   // Spotify
+        case 12: // Spotify
             return ("x-sonos-spotify", "", 8224)
         default:
-            return ("x-sonos-http", "", 8224)
+            let ext = extensionForMime(mimeType)
+            let flags = ext.isEmpty ? 8224 : 8232
+            return ("x-sonos-http", ext, flags)
+        }
+    }
+
+    private func extensionForMime(_ mimeType: String?) -> String {
+        switch mimeType {
+        case "audio/aac", "audio/mp4", "audio/x-m4a": return ".mp4"
+        case "audio/mpeg", "audio/mp3": return ".mp3"
+        case "audio/ogg": return ".ogg"
+        case "audio/flac": return ".flac"
+        default: return ""
         }
     }
 
@@ -384,9 +405,10 @@ final class SearchManager {
     }
 
     /// Build DIDL metadata for Cloud search results.
-    /// Uses the standard SMAPI desc tag so Sonos resolves metadata from the music service.
+    /// Uses the SMAPI desc tag with the correct account serial number (sn) so Sonos
+    /// can authenticate with the music service when resolving the track.
     private func buildCloudDIDLMetadata(item: BrowseItem, localSid: Int, accountId: String) -> String {
-        let desc = "SA_RINCON\(localSid)_X_#Svc\(localSid)-0-Token"
+        let desc = "SA_RINCON\(localSid)_X_#Svc\(localSid)-\(accountId)-Token"
         print("[Playback] desc=\(desc)")
         return SonosAPI.buildDIDLMetadata(
             itemId: item.id, title: item.title, artist: item.artist,
@@ -524,6 +546,14 @@ final class SearchManager {
             }
 
             try? await Task.sleep(for: .milliseconds(1500))
+
+            if let rawXML = try? await SonosAPI.getRawPositionInfo(ip: ip) {
+                let curURI = SonosAPI.extractTag("TrackURI", from: rawXML) ?? "nil"
+                let curMeta = SonosAPI.extractTag("TrackMetaData", from: rawXML) ?? "nil"
+                print("[Playback] DIAGNOSTIC currentURI=\(SonosAPI.decodeXMLEntities(curURI))")
+                print("[Playback] DIAGNOSTIC currentMeta=\(SonosAPI.decodeXMLEntities(curMeta))")
+            }
+
             await manager.refreshState()
         } catch {
             print("[Playback] FAILED: \(error)")

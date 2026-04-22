@@ -187,6 +187,7 @@ enum SonosCloudAPI {
         let summary: CloudSummary?
         let container: CloudResourceContainer?
         let durationMs: Int?
+        let defaults: String?
     }
 
     struct CloudResourceId: Decodable {
