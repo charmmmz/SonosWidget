@@ -825,10 +825,8 @@ final class SonosManager {
         let needsEnrich: Bool = {
             guard let quality = trackInfo?.audioQuality else { return true }
             let codec = quality.codec.lowercased()
-            let isGeneric = codec == "mp3" || codec == "mpeg" || codec == "aac"
+            return codec == "mp3" || codec == "mpeg" || codec == "aac"
                 || codec.contains("octet-stream")
-            let isStreamingSource = trackInfo?.source.isStreamingService == true
-            return isGeneric && isStreamingSource
         }()
 
         guard needsEnrich,

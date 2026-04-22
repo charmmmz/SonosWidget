@@ -11,6 +11,8 @@ struct PlaylistDetailView: View {
     @State private var playingItemId: String?
     @State private var toastMessage: String?
     @State private var isFavorited = false
+    @State private var coverImage: UIImage?
+    @State private var themeColor: Color?
 
     private var playlistTitle: String { response?.title ?? playlistItem.title }
     private var subtitleText: String { response?.subtitle ?? playlistItem.artist }
@@ -18,7 +20,7 @@ struct PlaylistDetailView: View {
         response?.images?.tile1x1 ?? playlistItem.albumArtURL
     }
     private var tracks: [SonosCloudAPI.AlbumTrackItem] {
-        response?.tracks?.items ?? []
+        response?.tracks?.items ?? response?.section?.items ?? []
     }
 
     var body: some View {
@@ -31,15 +33,90 @@ struct PlaylistDetailView: View {
                 trackList
             }
         }
-        .background(Color(.systemBackground))
-        .navigationTitle(playlistTitle)
+        .background { playlistBackground }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                playlistMenu
+            }
+        }
         .task { await loadPlaylist() }
+        .task(id: coverURL) { await loadCoverImage() }
         .onAppear { isFavorited = searchManager.isFavorited(playlistItem) }
         .overlay(alignment: .bottom) {
             if let msg = toastMessage {
                 toast(msg)
             }
+        }
+    }
+
+    // MARK: - Blurred Background
+
+    @ViewBuilder
+    private var playlistBackground: some View {
+        if let img = coverImage {
+            ZStack {
+                Image(uiImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .blur(radius: 80)
+                    .scaleEffect(1.5)
+                Color.black.opacity(0.5)
+            }
+            .ignoresSafeArea()
+        } else {
+            Color(.systemBackground).ignoresSafeArea()
+        }
+    }
+
+    private func loadCoverImage() async {
+        guard let urlStr = coverURL, let url = URL(string: urlStr) else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let img = UIImage(data: data)
+            coverImage = img
+            if let color = img?.dominantColor() {
+                themeColor = color
+            }
+        } catch {
+            print("[PlaylistDetail] Cover image load failed: \(error)")
+        }
+    }
+
+    // MARK: - Three-Dot Menu
+
+    private var playlistMenu: some View {
+        Menu {
+            Button {
+                toggleFavorite()
+            } label: {
+                Label(isFavorited ? "Remove from Sonos Favorites" : "Add to Sonos Favorites",
+                      systemImage: isFavorited ? "heart.fill" : "heart")
+            }
+
+            Divider()
+
+            Button {
+                Task {
+                    await searchManager.playNext(item: playlistItem, manager: manager)
+                    showToast("Playing next")
+                }
+            } label: {
+                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+            }
+
+            Button {
+                Task {
+                    await searchManager.addToQueue(item: playlistItem, manager: manager)
+                    showToast("Added to queue")
+                }
+            } label: {
+                Label("Add to Queue", systemImage: "text.badge.plus")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.body)
+                .symbolRenderingMode(.hierarchical)
         }
     }
 
@@ -54,7 +131,7 @@ struct PlaylistDetailView: View {
                     RoundedRectangle(cornerRadius: 10).fill(Color(.secondarySystemBackground))
                         .aspectRatio(1, contentMode: .fit)
                         .overlay {
-                            Image(systemName: "music.note.list")
+                            Image(systemName: playlistItem.cloudType == "COLLECTION" ? "folder.fill" : "music.note.list")
                                 .font(.system(size: 48))
                                 .foregroundStyle(.tertiary)
                         }
@@ -62,7 +139,7 @@ struct PlaylistDetailView: View {
             }
             .frame(maxWidth: 280)
             .clipShape(RoundedRectangle(cornerRadius: 10))
-            .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
+            .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
 
             VStack(spacing: 4) {
                 Text(playlistTitle)
@@ -73,10 +150,10 @@ struct PlaylistDetailView: View {
                 if !subtitleText.isEmpty {
                     Text(subtitleText)
                         .font(.subheadline)
-                        .foregroundStyle(.pink)
+                        .foregroundStyle(themeColor ?? .secondary)
                 }
 
-                if let total = response?.tracks?.total {
+                if let total = response?.tracks?.total ?? response?.section?.total {
                     Text(playlistSubtitle(trackCount: total))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -93,8 +170,16 @@ struct PlaylistDetailView: View {
         if let provider = response?.providerInfo?.name {
             parts.append(provider)
         }
-        parts.append("\(trackCount) tracks")
-        parts.append(totalDuration)
+        let containerCount = tracks.filter(\.isBrowsable).count
+        let pureTrackCount = trackCount - containerCount
+        if containerCount > 0 && pureTrackCount > 0 {
+            parts.append("\(pureTrackCount) tracks · \(containerCount) folders")
+        } else if containerCount > 0 {
+            parts.append("\(containerCount) items")
+        } else {
+            parts.append("\(trackCount) tracks")
+            parts.append(totalDuration)
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -107,7 +192,7 @@ struct PlaylistDetailView: View {
         return "\(mins) min"
     }
 
-    // MARK: - Action Bar
+    // MARK: - Action Bar (Play / Shuffle)
 
     private var actionBar: some View {
         HStack(spacing: 12) {
@@ -118,15 +203,6 @@ struct PlaylistDetailView: View {
             actionButton(icon: "shuffle", label: "Shuffle", id: "shuffle") {
                 playPlaylistShuffled()
             }
-
-            Button {
-                toggleFavorite()
-            } label: {
-                Image(systemName: isFavorited ? "heart.circle.fill" : "heart.circle")
-                    .font(.title2)
-                    .foregroundStyle(.pink)
-            }
-            .disabled(playingItemId != nil)
         }
         .padding(.horizontal)
     }
@@ -151,7 +227,7 @@ struct PlaylistDetailView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
-            .background(.pink, in: RoundedRectangle(cornerRadius: 10))
+            .background(themeColor ?? .white.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
             .foregroundStyle(.white)
         }
         .disabled(isDisabled)
@@ -172,7 +248,11 @@ struct PlaylistDetailView: View {
         } else {
             LazyVStack(spacing: 0) {
                 ForEach(Array(tracks.enumerated()), id: \.offset) { idx, track in
-                    trackRow(track, index: idx + 1, isLast: idx == tracks.count - 1)
+                    if track.isBrowsable {
+                        containerRow(track, isLast: idx == tracks.count - 1)
+                    } else {
+                        trackRow(track, index: idx + 1, isLast: idx == tracks.count - 1)
+                    }
                 }
             }
             .padding(.horizontal)
@@ -244,6 +324,82 @@ struct PlaylistDetailView: View {
         }
     }
 
+    private func containerRow(_ item: SonosCloudAPI.AlbumTrackItem, isLast: Bool) -> some View {
+        let navItem = browseItemFromContainer(item)
+        return NavigationLink {
+            PlaylistDetailView(playlistItem: navItem, searchManager: searchManager, manager: manager)
+        } label: {
+            HStack(spacing: 12) {
+                AsyncImage(url: URL(string: item.images?.tile1x1 ?? "")) { phase in
+                    if let img = phase.image {
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Color(.tertiarySystemFill)
+                            .overlay {
+                                Image(systemName: "folder.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title ?? "")
+                        .font(.body)
+                        .lineLimit(1)
+                    Text(item.subtitle ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) {
+            if !isLast {
+                Divider().padding(.leading, 60)
+            }
+        }
+    }
+
+    private func browseItemFromContainer(_ item: SonosCloudAPI.AlbumTrackItem) -> BrowseItem {
+        let objectId = item.resource?.id?.objectId ?? item.id ?? ""
+        let serviceId = item.resource?.id?.serviceId
+        let accountId = item.resource?.id?.accountId
+        let rType = item.resource?.type ?? "CONTAINER"
+
+        let cloudType: String
+        if rType == "ALBUM" {
+            cloudType = "ALBUM"
+        } else if rType == "PLAYLIST" {
+            cloudType = "PLAYLIST"
+        } else {
+            cloudType = "COLLECTION"
+        }
+
+        return BrowseItem(
+            id: objectId,
+            title: item.title ?? "",
+            artist: item.subtitle ?? "",
+            album: "",
+            albumArtURL: item.images?.tile1x1,
+            uri: nil,
+            isContainer: true,
+            serviceId: serviceId.flatMap { searchManager.localSid(forCloudServiceId: $0) },
+            cloudType: cloudType
+        )
+    }
+
     private func trackActions(_ track: SonosCloudAPI.AlbumTrackItem) -> some View {
         HStack(spacing: 2) {
             if let dur = track.duration, let secs = Int(dur) {
@@ -267,6 +423,7 @@ struct PlaylistDetailView: View {
     @ViewBuilder
     private func trackContextMenu(_ track: SonosCloudAPI.AlbumTrackItem) -> some View {
         let item = browseItemFromTrack(track)
+        let trackFavorited = searchManager.isFavorited(item)
 
         Button { playTrack(track) } label: {
             Label("Play Now", systemImage: "play.fill")
@@ -288,7 +445,6 @@ struct PlaylistDetailView: View {
 
         Divider()
 
-        let trackFavorited = searchManager.isFavorited(item)
         Button {
             Task {
                 if trackFavorited {
@@ -365,6 +521,7 @@ struct PlaylistDetailView: View {
     // MARK: - Data Loading
 
     private func loadPlaylist() async {
+        guard response == nil else { isLoading = false; return }
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
             errorText = "Not logged in to Sonos Cloud"
@@ -389,11 +546,26 @@ struct PlaylistDetailView: View {
             .first { $0.serviceId == serviceId }?.accountId ?? "2"
 
         do {
-            response = try await SonosCloudAPI.browsePlaylist(
-                token: token, householdId: householdId,
-                serviceId: serviceId, accountId: accountId,
-                playlistId: playlistItem.id)
+            switch playlistItem.cloudType {
+            case "COLLECTION":
+                response = try await SonosCloudAPI.browseContainer(
+                    token: token, householdId: householdId,
+                    serviceId: serviceId, accountId: accountId,
+                    containerId: playlistItem.id)
+            case "ALBUM":
+                response = try await SonosCloudAPI.browseAlbum(
+                    token: token, householdId: householdId,
+                    serviceId: serviceId, accountId: accountId,
+                    albumId: playlistItem.id)
+            default:
+                response = try await SonosCloudAPI.browsePlaylist(
+                    token: token, householdId: householdId,
+                    serviceId: serviceId, accountId: accountId,
+                    playlistId: playlistItem.id)
+            }
             isLoading = false
+        } catch is CancellationError {
+            print("[PlaylistDetail] Load cancelled (tab switch)")
         } catch {
             print("[PlaylistDetail] Load failed: \(error)")
             errorText = error.localizedDescription

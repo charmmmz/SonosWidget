@@ -172,7 +172,7 @@ final class SearchManager {
     }
 
     var groupedFavorites: [FavoriteGroup] {
-        let order: [BrowseItem.FavoriteCategory] = [.playlist, .album, .artist, .station, .other]
+        let order: [BrowseItem.FavoriteCategory] = [.playlist, .album, .artist, .station, .collection]
         var dict: [BrowseItem.FavoriteCategory: [BrowseItem]] = [:]
         for item in favorites {
             let cat = item.favoriteCategory

@@ -12,7 +12,7 @@ struct AlbumDetailView: View {
     @State private var toastMessage: String?
     @State private var isFavorited = false
     @State private var coverImage: UIImage?
-    @State private var themeColor: Color = .pink
+    @State private var themeColor: Color?
 
     private var albumTitle: String { response?.title ?? albumItem.title }
     private var artistName: String { response?.subtitle ?? albumItem.artist }
@@ -36,7 +36,6 @@ struct AlbumDetailView: View {
         .background {
             albumBackground
         }
-        .navigationTitle(albumTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -79,7 +78,7 @@ struct AlbumDetailView: View {
             let img = UIImage(data: data)
             coverImage = img
             if let color = img?.dominantColor() {
-                withAnimation(.easeInOut(duration: 0.4)) { themeColor = color }
+                themeColor = color
             }
         } catch {
             print("[AlbumDetail] Cover image load failed: \(error)")
@@ -152,7 +151,7 @@ struct AlbumDetailView: View {
 
                 Text(artistName)
                     .font(.subheadline)
-                    .foregroundStyle(themeColor)
+                    .foregroundStyle(themeColor ?? .secondary)
 
                 if let total = response?.tracks?.total {
                     Text(albumSubtitle(trackCount: total))
@@ -220,7 +219,7 @@ struct AlbumDetailView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
-            .background(themeColor, in: RoundedRectangle(cornerRadius: 10))
+            .background(themeColor ?? .white.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
             .foregroundStyle(.white)
         }
         .disabled(isDisabled)
@@ -426,6 +425,7 @@ struct AlbumDetailView: View {
     // MARK: - Data Loading
 
     private func loadAlbum() async {
+        guard response == nil else { isLoading = false; return }
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
             errorText = "Not logged in to Sonos Cloud"
@@ -455,6 +455,8 @@ struct AlbumDetailView: View {
                 serviceId: serviceId, accountId: accountId,
                 albumId: albumItem.id)
             isLoading = false
+        } catch is CancellationError {
+            print("[AlbumDetail] Load cancelled (tab switch)")
         } catch {
             print("[AlbumDetail] Load failed: \(error)")
             errorText = error.localizedDescription

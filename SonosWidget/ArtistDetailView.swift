@@ -12,7 +12,7 @@ struct ArtistDetailView: View {
     @State private var toastMessage: String?
     @State private var isFavorited = false
     @State private var headerImage: UIImage?
-    @State private var themeColor: Color = .teal
+    @State private var themeColor: Color?
 
     private var artistName: String { response?.title ?? artistItem.title }
     private var headerImageURL: String? {
@@ -23,16 +23,15 @@ struct ArtistDetailView: View {
         ScrollView {
             VStack(spacing: 0) {
                 headerSection
-                actionButtons
+                    .padding(.bottom, 8)
                 albumsGrid
             }
         }
         .background { artistBackground }
-        .navigationTitle(artistName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                artistMenu
+                favoriteButton
             }
         }
         .task { await loadArtist() }
@@ -71,38 +70,23 @@ struct ArtistDetailView: View {
             let img = UIImage(data: data)
             headerImage = img
             if let color = img?.dominantColor() {
-                withAnimation(.easeInOut(duration: 0.4)) { themeColor = color }
+                themeColor = color
             }
         } catch {
             print("[ArtistDetail] Header image load failed: \(error)")
         }
     }
 
-    // MARK: - Three-Dot Menu
+    // MARK: - Favorite Toggle (Toolbar)
 
-    private var artistMenu: some View {
-        Menu {
-            Button {
-                toggleFavorite()
-            } label: {
-                Label(isFavorited ? "Remove from Sonos Favorites" : "Add to Sonos Favorites",
-                      systemImage: isFavorited ? "heart.fill" : "heart")
-            }
-
-            if let stationAction = response?.customActions?.first(where: { $0.action == "ACTION_PLAY_STATION" }) {
-                Divider()
-
-                Button {
-                    startStation(stationAction)
-                } label: {
-                    Label(stationAction.label ?? "Start Station",
-                          systemImage: "antenna.radiowaves.left.and.right")
-                }
-            }
+    private var favoriteButton: some View {
+        Button {
+            toggleFavorite()
         } label: {
-            Image(systemName: "ellipsis.circle")
+            Image(systemName: isFavorited ? "heart.fill" : "heart")
                 .font(.body)
                 .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(isFavorited ? .pink : .primary)
         }
     }
 
@@ -110,30 +94,16 @@ struct ArtistDetailView: View {
 
     private var headerSection: some View {
         VStack(spacing: 12) {
-            if let url = headerImageURL {
-                AsyncImage(url: URL(string: url)) { phase in
-                    if let img = phase.image {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        Circle().fill(.quaternary)
-                            .overlay {
-                                Image(systemName: "person.fill")
-                                    .font(.system(size: 48))
-                                    .foregroundStyle(.tertiary)
-                            }
-                    }
-                }
-                .frame(width: 200, height: 200)
-                .clipShape(Circle())
-                .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
-            } else {
-                Circle().fill(.quaternary)
+            ZStack(alignment: .topTrailing) {
+                artistAvatar
                     .frame(width: 200, height: 200)
-                    .overlay {
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 48))
-                            .foregroundStyle(.tertiary)
-                    }
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
+
+                if let stationAction = response?.customActions?.first(where: { $0.action == "ACTION_PLAY_STATION" }) {
+                    stationBadge(stationAction)
+                        .offset(x: 6, y: 6)
+                }
             }
 
             Text(artistName)
@@ -150,41 +120,55 @@ struct ArtistDetailView: View {
         .padding(.horizontal)
     }
 
-    // MARK: - Action Buttons
-
-    private var actionButtons: some View {
-        HStack(spacing: 12) {
-            if let stationAction = response?.customActions?.first(where: { $0.action == "ACTION_PLAY_STATION" }) {
-                let isActive = playingItemId == "station"
-                let isDisabled = playingItemId != nil && !isActive
-
-                Button {
-                    startStation(stationAction)
-                } label: {
-                    HStack(spacing: 6) {
-                        if isActive {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        } else {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.subheadline.weight(.semibold))
+    @ViewBuilder
+    private var artistAvatar: some View {
+        if let url = headerImageURL {
+            AsyncImage(url: URL(string: url)) { phase in
+                if let img = phase.image {
+                    img.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Circle().fill(.quaternary)
+                        .overlay {
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 48))
+                                .foregroundStyle(.tertiary)
                         }
-                        Text(stationAction.label ?? "Start Station")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(themeColor, in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
                 }
-                .disabled(isDisabled)
-                .opacity(isDisabled ? 0.4 : 1)
+            }
+        } else {
+            Circle().fill(.quaternary)
+                .overlay {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                }
+        }
+    }
+
+    private func stationBadge(_ action: SonosCloudAPI.CustomAction) -> some View {
+        let isActive = playingItemId == "station"
+
+        return Button {
+            startStation(action)
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(themeColor ?? .white.opacity(0.2))
+                    .frame(width: 48, height: 48)
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+
+                if isActive {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                } else {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
             }
         }
-        .padding(.horizontal)
-        .padding(.top, 16)
-        .padding(.bottom, 8)
+        .disabled(playingItemId != nil && !isActive)
     }
 
     // MARK: - Albums Grid
@@ -307,6 +291,7 @@ struct ArtistDetailView: View {
     // MARK: - Data Loading
 
     private func loadArtist() async {
+        guard response == nil else { isLoading = false; return }
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
             errorText = "Not logged in to Sonos Cloud"
@@ -338,6 +323,8 @@ struct ArtistDetailView: View {
                 serviceId: serviceId, accountId: accountId,
                 artistId: artistItem.id)
             isLoading = false
+        } catch is CancellationError {
+            print("[ArtistDetail] Load cancelled (tab switch)")
         } catch {
             print("[ArtistDetail] Browse failed (\(error)), trying search fallback for '\(artistItem.title)'")
             await searchFallback(token: token, householdId: householdId,
@@ -369,6 +356,8 @@ struct ArtistDetailView: View {
                 serviceId: serviceId, accountId: accountId,
                 artistId: correctId)
             isLoading = false
+        } catch is CancellationError {
+            print("[ArtistDetail] Search fallback cancelled (tab switch)")
         } catch {
             print("[ArtistDetail] Search fallback failed: \(error)")
             errorText = error.localizedDescription

@@ -238,7 +238,19 @@ struct AudioQuality: Codable, Equatable, Sendable {
                 return nil
             }
         }
-        else if mime.contains("mp3") || mime.contains("mpeg") { codec = "MP3" }
+        else if mime.contains("mp3") || mime.contains("mpeg") {
+            // Local library & radio: the MIME is the real codec → show "MP3".
+            // Streaming / unknown sources: UPnP often reports audio/mpeg even
+            // for lossless streams → return nil so the badge stays hidden until
+            // the Cloud API provides the real quality.
+            if source == .library || source == .radio {
+                codec = "MP3"
+            } else if parsedBD != nil || parsedSR != nil {
+                codec = "MP3"
+            } else {
+                return nil
+            }
+        }
         else if mime.contains("ogg") { codec = "OGG" }
         else if mime.contains("wma") { codec = "WMA" }
         else { codec = mime.replacingOccurrences(of: "audio/", with: "").uppercased() }
@@ -338,7 +350,7 @@ struct BrowseItem: Identifiable, Codable, Sendable {
         case album = "Albums"
         case station = "Stations"
         case artist = "Artists"
-        case other = "Other"
+        case collection = "Collections"
     }
 
     var favoriteCategory: FavoriteCategory {
@@ -347,13 +359,16 @@ struct BrowseItem: Identifiable, Codable, Sendable {
         if classStr.contains("audioBroadcast") || classStr.contains("audioItem") && !classStr.contains("musicTrack") { return .station }
         if classStr.contains("musicAlbum") { return .album }
         if classStr.contains("playlistContainer") || classStr.contains("sameArtist") { return .playlist }
-        // Fallback heuristics using URI scheme
+        // Fallback heuristics using URI scheme and metadata
+        let uriSources = [uri, resMD, metaXML].compactMap { $0 }
+        if uriSources.contains(where: { $0.contains("libraryfolder") }) { return .collection }
         if let uri {
             if uri.contains("x-sonosapi-radio:") || uri.contains("x-sonosapi-stream:") { return .station }
             if uri.contains("x-rincon-cpcontainer:") { return .playlist }
         }
+        if uriSources.contains(where: { $0.contains("x-sonosapi-radio:") || $0.contains("x-sonosapi-stream:") }) { return .station }
         if isContainer { return .playlist }
-        return .other
+        return .collection
     }
 
     private var upnpClass: String {
