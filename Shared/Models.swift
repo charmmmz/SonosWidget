@@ -16,6 +16,7 @@ enum PlaybackSource: String, Codable, Sendable {
     case amazonMusic
     case tidal
     case youtubeMusic
+    case neteaseMusic
     case airplay
     case radio
     case lineIn
@@ -24,16 +25,17 @@ enum PlaybackSource: String, Codable, Sendable {
 
     var displayName: String {
         switch self {
-        case .spotify:      return "Spotify"
-        case .appleMusic:   return "Apple Music"
-        case .amazonMusic:  return "Amazon Music"
-        case .tidal:        return "Tidal"
-        case .youtubeMusic: return "YouTube Music"
-        case .airplay:      return "AirPlay"
-        case .radio:        return "Radio"
-        case .lineIn:       return "Line-In"
-        case .library:      return "Library"
-        case .unknown:      return ""
+        case .spotify:       return "Spotify"
+        case .appleMusic:    return "Apple Music"
+        case .amazonMusic:   return "Amazon Music"
+        case .tidal:         return "Tidal"
+        case .youtubeMusic:  return "YouTube Music"
+        case .neteaseMusic:  return "网易云音乐"
+        case .airplay:       return "AirPlay"
+        case .radio:         return "Radio"
+        case .lineIn:        return "Line-In"
+        case .library:       return "Library"
+        case .unknown:       return ""
         }
     }
 
@@ -50,34 +52,53 @@ enum PlaybackSource: String, Codable, Sendable {
     /// Asset name in `BrandMedia` for services with bundled vector marks; otherwise `nil`.
     var brandAssetImageName: String? {
         switch self {
-        case .spotify: return "BrandSpotify"
-        case .appleMusic: return "BrandAppleMusic"
-        case .amazonMusic: return "BrandAmazonMusic"
-        case .youtubeMusic: return "BrandYouTubeMusic"
+        case .spotify:       return "BrandSpotify"
+        case .appleMusic:    return "BrandAppleMusic"
+        case .amazonMusic:   return "BrandAmazonMusic"
+        case .youtubeMusic:  return "BrandYouTubeMusic"
+        case .neteaseMusic:  return "BrandNeteaseMusic"
         default: return nil
         }
     }
 
     var badgeColor: Color {
         switch self {
-        case .spotify:      return Color(.sRGB, red: 0.12, green: 0.84, blue: 0.38, opacity: 1)
-        case .appleMusic:   return Color(.sRGB, red: 0.98, green: 0.24, blue: 0.35, opacity: 1)
-        case .amazonMusic:  return Color(.sRGB, red: 0.14, green: 0.74, blue: 0.85, opacity: 1)
-        case .tidal:        return Color(.sRGB, red: 0.0, green: 0.0, blue: 0.0, opacity: 1)
-        case .youtubeMusic: return Color(.sRGB, red: 1.0, green: 0.0, blue: 0.0, opacity: 1)
-        case .airplay:      return Color(.sRGB, red: 0.0, green: 0.48, blue: 1.0, opacity: 1)
-        case .radio:        return Color(.sRGB, red: 1.0, green: 0.58, blue: 0.0, opacity: 1)
-        case .lineIn:       return .gray
-        case .library:      return .purple
-        case .unknown:      return .clear
+        case .spotify:       return Color(.sRGB, red: 0.12, green: 0.84, blue: 0.38, opacity: 1)
+        case .appleMusic:    return Color(.sRGB, red: 0.98, green: 0.24, blue: 0.35, opacity: 1)
+        case .amazonMusic:   return Color(.sRGB, red: 0.14, green: 0.74, blue: 0.85, opacity: 1)
+        case .tidal:         return Color(.sRGB, red: 0.0, green: 0.0, blue: 0.0, opacity: 1)
+        case .youtubeMusic:  return Color(.sRGB, red: 1.0, green: 0.0, blue: 0.0, opacity: 1)
+        case .neteaseMusic:  return Color(.sRGB, red: 1.0, green: 0.23, blue: 0.23, opacity: 1)
+        case .airplay:       return Color(.sRGB, red: 0.0, green: 0.48, blue: 1.0, opacity: 1)
+        case .radio:         return Color(.sRGB, red: 1.0, green: 0.58, blue: 0.0, opacity: 1)
+        case .lineIn:        return .gray
+        case .library:       return .purple
+        case .unknown:       return .clear
         }
     }
 
     var isStreamingService: Bool {
         switch self {
-        case .spotify, .appleMusic, .amazonMusic, .tidal, .youtubeMusic: return true
+        case .spotify, .appleMusic, .amazonMusic, .tidal, .youtubeMusic, .neteaseMusic:
+            return true
         default: return false
         }
+    }
+
+    /// Map a human-readable streaming service name (as returned by the Sonos
+    /// cloud `service.name` field or by the speaker's `ListAvailableServices`)
+    /// to a typed `PlaybackSource`. Intentionally lenient — we just look for
+    /// brand keywords anywhere in the string because the canonical casing /
+    /// wording varies between Sonos's Cloud API response and SMAPI metadata.
+    nonisolated static func from(serviceName: String?) -> PlaybackSource {
+        guard let raw = serviceName?.lowercased(), !raw.isEmpty else { return .unknown }
+        if raw.contains("spotify")       { return .spotify }
+        if raw.contains("apple")         { return .appleMusic }
+        if raw.contains("amazon")        { return .amazonMusic }
+        if raw.contains("tidal")         { return .tidal }
+        if raw.contains("youtube")       { return .youtubeMusic }
+        if raw.contains("netease") || (serviceName ?? "").contains("网易") { return .neteaseMusic }
+        return .unknown
     }
 
     nonisolated static func from(trackURI: String) -> PlaybackSource {
@@ -108,7 +129,30 @@ enum PlaybackSource: String, Codable, Sendable {
         if uri.hasPrefix("x-file-cifs:") || uri.hasPrefix("x-rincon-playlist:") {
             return .library
         }
+
+        // Second-chance resolution: for streaming services whose local
+        // Sonos `sid` varies per installation (NetEase Cloud Music etc.),
+        // consult the sid → service-name map that `SearchManager` snapshots
+        // into `SharedStorage` after `ListAvailableServices`. Lets us tag
+        // sources correctly without hard-coding per-region sids, and gives
+        // the widget / Live Activity the same enrichment main-app UI gets.
+        if let sid = Self.extractSid(from: trackURI),
+           let serviceName = SharedStorage.serviceNamesByLocalSid[sid] {
+            let resolved = from(serviceName: serviceName)
+            if resolved != .unknown { return resolved }
+        }
+
         return .unknown
+    }
+
+    private static func extractSid(from uri: String) -> String? {
+        guard let queryPart = uri.split(separator: "?").last else { return nil }
+        for param in queryPart.split(separator: "&") {
+            let kv = param.split(separator: "=", maxSplits: 1)
+            guard kv.count == 2, kv[0] == "sid" else { continue }
+            return String(kv[1])
+        }
+        return nil
     }
 }
 
@@ -369,6 +413,10 @@ struct BrowseItem: Identifiable, Codable, Sendable {
     var serviceId: Int?
     /// Cloud API resource type: "TRACK", "ARTIST", "ALBUM", "PLAYLIST", "PROGRAM"
     var cloudType: String?
+    /// Set when this `BrowseItem` was sourced from the Sonos Cloud Control API's
+    /// `listFavorites` endpoint. Lets `playNow` route tap-to-play through
+    /// `loadFavorite` instead of UPnP when the app is in remote mode.
+    var cloudFavoriteId: String?
 
     var isArtist: Bool {
         if cloudType == "ARTIST" { return true }

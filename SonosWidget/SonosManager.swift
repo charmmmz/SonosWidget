@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import SwiftUI
 import WidgetKit
 import ActivityKit
@@ -36,8 +37,14 @@ final class SonosManager {
 
     let discovery = SonosDiscovery()
 
-    private var refreshTimer: Timer?
-    private var positionTimer: Timer?
+    /// Main polling loop (transport state, track info, volume). Kept as an
+    /// async `Task` rather than `Timer.scheduledTimer` so it survives run
+    /// loop mode changes — a `.default`-mode timer pauses while the user is
+    /// interacting with another tab's ScrollView or the tab bar's liquid
+    /// glass collapse animation, which is why the mini-player used to
+    /// freeze when not on the Home tab.
+    private var refreshTask: Task<Void, Never>?
+    private var positionTask: Task<Void, Never>?
     private var lastAlbumArtURL: String?
     private var lastWidgetTrackTitle: String?
     private var lastEnrichedTrackKey: String?
@@ -52,11 +59,30 @@ final class SonosManager {
 
     /// Cloud API group ID resolved for the currently selected speaker.
     private var cloudGroupId: String?
+    /// Cloud API player ID for the currently selected speaker — used by
+    /// `setPlayerVolume` via the Control API. May be nil if the player isn't
+    /// in the resolved household / hasn't been seen via `getGroups` yet.
+    private var cloudPlayerId: String?
     /// Cached cloud-sourced audio quality keyed by track title to survive UPnP refreshes.
     private var cachedCloudQuality: (track: String, quality: AudioQuality)?
     private var isEnrichingQuality = false
     /// When set, refreshState() will not overwrite isShuffling/repeatMode until this date.
     private var playModeLockUntil: Date = .distantPast
+
+    // MARK: - Transport Backend (LAN vs Cloud routing)
+
+    /// Which pipeline — direct UPnP on the LAN (`SonosAPI`) or the Sonos
+    /// Cloud Control API (`SonosCloudAPI`) — we dispatch control commands
+    /// through. `.unknown` means we haven't probed yet or the speaker is
+    /// totally unreachable.
+    enum TransportBackend: Equatable { case unknown, lan, cloud }
+
+    /// Current routing decision. Exposed so UI can show a "Remote" pill / gray
+    /// out LAN-only controls when on cloud.
+    private(set) var transportBackend: TransportBackend = .unknown
+    /// Serializes probes so concurrent callers (app foreground + manual
+    /// refresh + selectSpeaker) coalesce into a single TCP check.
+    private var probeTask: Task<TransportBackend, Never>?
 
     private static let albumArtSession: URLSession = {
         let config = URLSessionConfiguration.default
@@ -70,6 +96,22 @@ final class SonosManager {
     var isPlaying: Bool { transportState == .playing }
     var isConfigured: Bool { selectedSpeaker != nil }
     var currentCloudGroupId: String? { cloudGroupId }
+
+    /// True when the app is controlling the speaker via the Sonos Cloud
+    /// Control API (user is off-LAN). Views use this to render the "Remote"
+    /// pill and to pre-emptively hide LAN-only affordances (queue mutations,
+    /// add-to-favorites).
+    var isRemoteMode: Bool { transportBackend == .cloud }
+
+    /// True when we've probed and neither LAN nor Cloud gave us a usable
+    /// path — speaker is likely powered off, user isn't signed into Sonos,
+    /// or the internet is completely gone.
+    var isSpeakerUnreachable: Bool {
+        isConfigured && transportBackend == .unknown && !isProbing
+    }
+
+    /// Exposed so views can show a subtle spinner while the 1 s probe runs.
+    var isProbing: Bool { probeTask != nil }
 
     /// IP to send playback commands (group coordinator)
     private var playbackIP: String? { selectedSpeaker?.playbackIP }
@@ -86,6 +128,7 @@ final class SonosManager {
             selectedSpeaker = speaker
             Task {
                 await resolveCloudGroupId()
+                _ = await probeBackend()
                 await refreshState()
                 await refreshAllGroupStatuses()
             }
@@ -94,6 +137,7 @@ final class SonosManager {
             syncSpeakerToStorage(first)
             Task {
                 await resolveCloudGroupId()
+                _ = await probeBackend()
                 await refreshState()
                 await refreshAllGroupStatuses()
             }
@@ -152,6 +196,12 @@ final class SonosManager {
         albumArtImage = nil
         consecutiveFailures = 0
         cloudGroupId = nil
+        cloudPlayerId = nil
+        // Intentionally NOT resetting `transportBackend` here. The probe
+        // kicked off below will correct it within ~1s; in the meantime the
+        // previous backend is usually still valid (same LAN, different
+        // speaker on it), and clearing to `.unknown` would flash the
+        // "Speaker unreachable" banner during speaker switches on LAN.
         cachedCloudQuality = nil
         lastEnrichedTrackKey = nil
         lastCloudQualityAttempt = .distantPast
@@ -174,8 +224,15 @@ final class SonosManager {
             durationSeconds = 0
         }
 
-        await refreshState()
+        // Resolve cloud + probe FIRST so refreshState() can pick the right
+        // path (cloud endpoints need cloudGroupId; probe result drives
+        // `transportBackend`). Previously refreshState ran against .unknown
+        // and would internally probe — fine, but selectSpeaker is also where
+        // the Home tab's first paint happens, so ordering it explicitly keeps
+        // the initial "Loading speakers…" window minimal.
         await resolveCloudGroupId()
+        _ = await probeBackend()
+        await refreshState()
     }
 
     func rescan() {
@@ -191,39 +248,59 @@ final class SonosManager {
     // MARK: - Playback Controls
 
     func togglePlayPause() async {
-        guard let ip = playbackIP else { return }
+        guard let backend = await controlBackendEnsured() else {
+            errorMessage = SonosControlError.noBackend.localizedDescription
+            return
+        }
         let prev = transportState
-        transportState = isPlaying ? .paused : .playing
+        let wasPlaying = prev == .playing
+        transportState = wasPlaying ? .paused : .playing
         do {
-            if prev == .playing { try await SonosAPI.pause(ip: ip) }
-            else { try await SonosAPI.play(ip: ip) }
+            try await SonosControl.togglePlayPause(backend, currentlyPlaying: wasPlaying)
             try? await Task.sleep(for: .milliseconds(300))
             await refreshState()
         } catch {
             transportState = prev
             errorMessage = error.localizedDescription
+            await fallbackToCloudIfLANFailed(backend)
         }
     }
 
     func nextTrack() async {
-        guard let ip = playbackIP else { return }
+        guard let backend = await controlBackendEnsured() else {
+            errorMessage = SonosControlError.noBackend.localizedDescription
+            return
+        }
         do {
-            try await SonosAPI.next(ip: ip)
+            try await SonosControl.next(backend)
             try? await Task.sleep(for: .milliseconds(500))
             await refreshState()
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            errorMessage = error.localizedDescription
+            await fallbackToCloudIfLANFailed(backend)
+        }
     }
 
     func previousTrack() async {
-        guard let ip = playbackIP else { return }
+        guard let backend = await controlBackendEnsured() else {
+            errorMessage = SonosControlError.noBackend.localizedDescription
+            return
+        }
         do {
-            try await SonosAPI.previous(ip: ip)
+            try await SonosControl.previous(backend)
             try? await Task.sleep(for: .milliseconds(500))
             await refreshState()
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            errorMessage = error.localizedDescription
+            await fallbackToCloudIfLANFailed(backend)
+        }
     }
 
     func toggleShuffle() async {
+        // Play-mode changes are LAN-only — Sonos Cloud Control API has
+        // `/playback/playMode` but shuffle / repeat semantics are slightly
+        // different; keeping LAN-only here means the UI grays the button
+        // out in remote mode rather than surprising the user.
         guard let ip = playbackIP else { return }
         let prev = isShuffling
         isShuffling = !prev
@@ -255,21 +332,38 @@ final class SonosManager {
         }
     }
 
+    /// Helper: when a LAN command fails we assume reachability might have
+    /// flipped — invalidate the cached backend so the next probe re-classifies.
+    /// No-op in cloud mode (there we just show the error; cloud failures
+    /// don't usually mean we should retry differently).
+    private func fallbackToCloudIfLANFailed(_ backend: SonosControl.Backend) async {
+        if case .lan = backend {
+            invalidateBackend()
+            _ = await probeBackend()
+        }
+    }
+
     func seekTo(_ seconds: TimeInterval) async {
-        guard let ip = playbackIP else { return }
+        guard let backend = await controlBackendEnsured() else { return }
         positionSeconds = seconds
         do {
-            try await SonosAPI.seek(ip: ip, position: SonosTime.apiFormat(seconds))
-        } catch { errorMessage = error.localizedDescription }
+            try await SonosControl.seek(backend, to: seconds)
+        } catch {
+            errorMessage = error.localizedDescription
+            await fallbackToCloudIfLANFailed(backend)
+        }
     }
 
     func updateVolume(_ newVolume: Int) async {
-        guard let ip = volumeIP else { return }
+        guard let backend = await controlBackendEnsured() else { return }
         volume = newVolume
         do {
-            try await SonosAPI.setVolume(ip: ip, volume: newVolume)
+            try await SonosControl.setVolume(backend, newVolume)
             SharedStorage.cachedVolume = newVolume
-        } catch { errorMessage = error.localizedDescription }
+        } catch {
+            errorMessage = error.localizedDescription
+            await fallbackToCloudIfLANFailed(backend)
+        }
     }
 
     func fetchMemberVolumes() async {
@@ -620,6 +714,23 @@ final class SonosManager {
     }
 
     func refreshAllGroupStatuses() async {
+        switch transportBackend {
+        case .lan:
+            await refreshAllGroupStatusesLAN()
+        case .cloud:
+            await refreshAllGroupStatusesCloud()
+        case .unknown:
+            // Don't burn a LAN UPnP call (~30s timeout on cellular) while
+            // the backend is still being probed. The next polling tick — or
+            // whatever kicked off the probe — will re-route us into the
+            // correct branch once `transportBackend` settles. Meanwhile the
+            // Home tab's "Speaker unreachable" banner is the right terminal
+            // state for a genuinely unreachable speaker.
+            return
+        }
+    }
+
+    private func refreshAllGroupStatusesLAN() async {
         guard let anyIP = allSpeakers.first?.ipAddress ?? selectedSpeaker?.ipAddress else { return }
 
         do {
@@ -629,7 +740,12 @@ final class SonosManager {
             SharedStorage.savedSpeakers = fresh
 
             var statuses: [SpeakerGroupStatus] = []
+            // Sort alphabetically by display name — matches the cloud
+            // path's ordering, so when `probeBackend()` flips between
+            // .lan and .cloud the Home cards stay in the same slots
+            // instead of visibly reshuffling.
             let coordinators = fresh.filter(\.isCoordinator)
+                .sorted { $0.name.lowercased() < $1.name.lowercased() }
 
             for coord in coordinators {
                 let members = fresh.filter { $0.groupId == coord.groupId && !$0.isInvisible }
@@ -656,6 +772,279 @@ final class SonosManager {
             groupStatuses = statuses
             await loadGroupAlbumColors()
         } catch { /* keep existing data */ }
+    }
+
+    /// Cloud version of `refreshAllGroupStatuses`. Populates the Home tab
+    /// speaker-group cards from the Sonos Cloud Control API's `getGroups`
+    /// endpoint so the UI doesn't get stuck on "Loading speakers…" when the
+    /// user is off-LAN. Per-group track info / volume can't be fetched
+    /// cheaply for non-selected groups (would need one playbackMetadata call
+    /// per group), so:
+    ///   - The currently selected group gets the track info the main
+    ///     `refreshStateCloud` already filled in.
+    ///   - Other groups show the transport state from `playbackState` but
+    ///     leave `trackInfo` empty.
+    private func refreshAllGroupStatusesCloud() async {
+        guard let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else {
+            projectSkeletonGroupStatusesFromSavedSpeakers()
+            return
+        }
+        do {
+            let response = try await SonosCloudAPI.getGroups(
+                token: token, householdId: householdId)
+
+            // Merge cloud players with anything we already know locally
+            // (e.g. from a previous LAN session that got persisted). This
+            // keeps per-player IPs around even off-LAN — useful if Wi-Fi
+            // comes back and the probe flips to .lan.
+            //
+            // Name collisions happen in practice: a single speaker often
+            // appears twice in `allSpeakers` — the real entry plus a
+            // hidden (`isInvisible: true`) shadow for stereo-pair / home
+            // theater satellites. When both entries share a display name,
+            // prefer the *visible* one; otherwise the Home card picks up
+            // the hidden shadow and renders a blank speaker name (the
+            // `visibleMembers` filter drops it).
+            let savedByName = Dictionary(
+                allSpeakers.map { ($0.name, $0) },
+                uniquingKeysWith: { first, second in
+                    first.isInvisible && !second.isInvisible ? second : first
+                })
+
+            // Fetch per-group playback metadata concurrently so every card
+            // gets its track name / artist / album art — not just the
+            // currently selected group. For a typical 2-4 group household
+            // this is 2-4 parallel HTTPS calls, cheap enough to run every
+            // ~6s alongside the `getGroups` call above.
+            // Per-group fan-out: metadata (track name/art), playback status
+            // (position + actual transport state), and group volume. Each
+            // call is independent, so run them all in one big TaskGroup.
+            // Total cost for a household of N groups is 3N parallel HTTPS
+            // calls every ~6s — still small, and enough to give every
+            // card on Home a fully-populated mini-now-playing + volume.
+            typealias PerGroup = (
+                meta: SonosCloudAPI.CloudPlaybackMetadata?,
+                status: SonosCloudAPI.PlaybackStatus?,
+                volume: SonosCloudAPI.GroupVolume?
+            )
+            var perGroup: [String: PerGroup] = [:]
+            await withTaskGroup(of: (String, String, Any?).self) { group in
+                for cloudGroup in response.groups {
+                    let gid = cloudGroup.id
+                    group.addTask {
+                        let meta = try? await SonosCloudAPI.getPlaybackMetadata(
+                            token: token, groupId: gid)
+                        return (gid, "meta", meta as Any?)
+                    }
+                    group.addTask {
+                        let status = try? await SonosCloudAPI.getPlaybackStatus(
+                            token: token, groupId: gid)
+                        return (gid, "status", status as Any?)
+                    }
+                    group.addTask {
+                        let vol = try? await SonosCloudAPI.getGroupVolume(
+                            token: token, groupId: gid)
+                        return (gid, "volume", vol as Any?)
+                    }
+                }
+                for await (gid, kind, value) in group {
+                    var entry = perGroup[gid] ?? (nil, nil, nil)
+                    switch kind {
+                    case "meta":   entry.meta   = value as? SonosCloudAPI.CloudPlaybackMetadata
+                    case "status": entry.status = value as? SonosCloudAPI.PlaybackStatus
+                    case "volume": entry.volume = value as? SonosCloudAPI.GroupVolume
+                    default: break
+                    }
+                    perGroup[gid] = entry
+                }
+            }
+
+            var statuses: [SpeakerGroupStatus] = []
+            for cloudGroup in response.groups {
+                // Each group's members = cloud players whose ids match
+                // `playerIds`. Fall back to name matching for savedSpeakers
+                // which we saw via UPnP (those have RINCON ids, the cloud
+                // uses a parallel id scheme).
+                let players = response.players.filter { cloudGroup.playerIds.contains($0.id) }
+                let members: [SonosPlayer] = players.map { cloudPlayer in
+                    if let saved = savedByName[cloudPlayer.name] { return saved }
+                    // Synthesize a LAN-less placeholder; ip is empty so LAN
+                    // commands will no-op but group membership displays fine.
+                    return SonosPlayer(
+                        id: cloudPlayer.id, name: cloudPlayer.name,
+                        ipAddress: "", isCoordinator: true,
+                        groupId: cloudGroup.id)
+                }
+                let coord = members.first ?? SonosPlayer(
+                    id: cloudGroup.id, name: cloudGroup.name,
+                    ipAddress: "", isCoordinator: true,
+                    groupId: cloudGroup.id)
+
+                // Diagnostic: when the Home card's speaker name goes
+                // mysteriously blank, this log tells us (a) what cloud
+                // named the group, (b) which player ids it claims to
+                // contain, (c) which of those we actually resolved to
+                // non-invisible members for rendering.
+                let visibleCount = members.filter { !$0.isInvisible }.count
+                SonosLog.debug(.sonosCloud,
+                    "group '\(cloudGroup.name)' (\(cloudGroup.id.suffix(8))) → \(members.count) members (\(visibleCount) visible): \(members.map { "\($0.name)\($0.isInvisible ? "[hidden]" : "")" }.joined(separator: ", "))")
+
+                let isSelected = cloudGroup.id == cloudGroupId
+                let entry = perGroup[cloudGroup.id] ?? (meta: nil, status: nil, volume: nil)
+
+                // Prefer the live `playbackStatus` result for transport
+                // state (more authoritative than the `getGroups`-embedded
+                // `playbackState`); fall back to the main `transportState`
+                // when this group is the selected one and already fresh.
+                let state: TransportState = {
+                    if isSelected { return transportState }
+                    if let raw = entry.status?.playbackState {
+                        return Self.transportState(fromCloudPlaybackState: raw)
+                    }
+                    return Self.transportState(fromCloudPlaybackState: cloudGroup.playbackState)
+                }()
+
+                // Assemble a TrackInfo for the card: selected group reuses
+                // the one `refreshStateCloud` already enriched (has audio
+                // quality etc.); other groups get a minimal version built
+                // from their per-group metadata fetch above — now also
+                // carrying `position` so the card's progress ring fills in.
+                let track: TrackInfo? = {
+                    if isSelected { return trackInfo }
+                    guard let meta = entry.meta,
+                          let cloudTrack = meta.currentItem?.track else { return nil }
+                    // Same LAN-URL filter as `refreshStateCloud`: Sonos
+                    // Cloud often returns a speaker-local `getaa` URL
+                    // for `track.imageUrl`, which is useless over
+                    // cellular. Walk the fallbacks and keep only the
+                    // first publicly-reachable one.
+                    let artURL = Self.pickPublicArtURL(
+                        cloudTrack.imageUrl,
+                        cloudTrack.album?.imageUrl,
+                        meta.container?.imageUrl)
+                    let durSec = (cloudTrack.durationMillis).map {
+                        TimeInterval($0) / 1000.0
+                    } ?? 0
+                    let posSec: TimeInterval = (entry.status?.positionMillis).map {
+                        TimeInterval($0) / 1000.0
+                    } ?? 0
+                    let sourceName = cloudTrack.service?.name ?? meta.container?.name
+                    // Diagnostic: if cards keep showing the placeholder
+                    // disc icon, this line exposes which of the three
+                    // candidate art fields Sonos actually populates for
+                    // the track — the cloud API's schema varies across
+                    // services, so the JSON body we're parsing is the
+                    // ground truth.
+                    SonosLog.debug(.sonosCloud,
+                        "art for \(cloudGroup.id.suffix(8)) '\(cloudTrack.name ?? "?")': track=\(cloudTrack.imageUrl ?? "nil") album=\(cloudTrack.album?.imageUrl ?? "nil") container=\(meta.container?.imageUrl ?? "nil")")
+                    return TrackInfo(
+                        title: cloudTrack.name ?? "",
+                        artist: cloudTrack.artist?.name ?? "",
+                        album: cloudTrack.album?.name ?? "",
+                        albumArtURL: artURL,
+                        duration: SonosTime.apiFormat(durSec),
+                        position: SonosTime.apiFormat(posSec),
+                        source: PlaybackSource.from(serviceName: sourceName))
+                }()
+
+                // Group volume: selected group uses `manager.volume` (kept
+                // live for the full player); others read from the cloud
+                // `groupVolume` fan-out. Nil response → 0 as a safe sentinel.
+                let vol: Int = isSelected
+                    ? volume
+                    : (entry.volume?.volume ?? 0)
+
+                statuses.append(SpeakerGroupStatus(
+                    id: cloudGroup.id,
+                    coordinator: coord, members: members,
+                    trackInfo: track, transportState: state, volume: vol
+                ))
+            }
+            // Sonos Cloud's `getGroups` returns groups in *unstable* order
+            // across refreshes (often flipping every few seconds), which
+            // made the Home cards visibly jump around. Lock in a
+            // deterministic order: alphabetical by coordinator name, with
+            // group id as a tiebreaker so identically-named groups
+            // (shouldn't happen in practice, but defensively) also stay
+            // put. LAN mode uses a similar alphabetical order implicitly
+            // via discovery ordering, so Home stays consistent across
+            // both backends.
+            statuses.sort { lhs, rhs in
+                let ln = lhs.coordinator.name.lowercased()
+                let rn = rhs.coordinator.name.lowercased()
+                if ln != rn { return ln < rn }
+                return lhs.id < rhs.id
+            }
+            groupStatuses = statuses
+            await loadGroupAlbumColors()
+        } catch {
+            // `getGroups` failed (network blip, token drift, Sonos cloud
+            // hiccup). Don't leave the Home tab stuck on "Loading speakers…"
+            // — project whatever `savedSpeakers` we have into placeholder
+            // cards with unknown transport state so the user at least sees
+            // familiar scaffolding. The next refresh tick will overwrite
+            // with real data if the cloud recovers.
+            SonosLog.error(.sonosCloud, "refreshAllGroupStatusesCloud failed: \(error)")
+            projectSkeletonGroupStatusesFromSavedSpeakers()
+        }
+    }
+
+    /// Fallback used when the cloud-side group refresh fails but we still
+    /// have a saved roster from a prior LAN session. Produces minimal
+    /// `SpeakerGroupStatus` entries — enough to render speaker cards with
+    /// names + membership, but `trackInfo` / `transportState` are blanked.
+    /// Returns the first URL string that's actually reachable from the
+    /// current network. Sonos Cloud's `playbackMetadata` often hands back
+    /// a `track.imageUrl` pointing at the speaker's own LAN address
+    /// (`http://192.168.x.x:1400/getaa?…`) — great when you're in the
+    /// house, totally dead over cellular. Filter those out in cloud mode
+    /// so the CDN fallbacks (`album.imageUrl`, `container.imageUrl`)
+    /// actually get a chance to render.
+    private static func pickPublicArtURL(_ candidates: String?...) -> String? {
+        for case let url? in candidates where isPubliclyReachable(url) {
+            return url
+        }
+        return nil
+    }
+
+    private static func isPubliclyReachable(_ urlStr: String) -> Bool {
+        guard let url = URL(string: urlStr), let host = url.host else { return false }
+        // Accept https outright (mzstatic, aliyuncs, etc. — cross-network
+        // CDN URLs). Plain http is only accepted if the host is *not* a
+        // private IP literal — matches Sonos's pattern of serving art
+        // off the speaker itself on port 1400.
+        if url.scheme == "https" { return true }
+        // Host is a literal IP?
+        let parts = host.split(separator: ".").compactMap { UInt8($0) }
+        if parts.count == 4 {
+            let a = parts[0], b = parts[1]
+            let isPrivate =
+                a == 10 ||
+                (a == 192 && b == 168) ||
+                (a == 172 && (16...31).contains(b)) ||
+                a == 127
+            return !isPrivate
+        }
+        // Non-IP hostname over plain http — rare but let it through; ATS
+        // will block it if it's actually insecure.
+        return true
+    }
+
+    private func projectSkeletonGroupStatusesFromSavedSpeakers() {
+        guard groupStatuses.isEmpty, !allSpeakers.isEmpty else { return }
+        let coordinators = allSpeakers.filter(\.isCoordinator)
+        groupStatuses = coordinators
+            .sorted { $0.name.lowercased() < $1.name.lowercased() }
+            .map { coord in
+                let members = allSpeakers.filter {
+                    $0.groupId == coord.groupId && !$0.isInvisible
+                }
+                return SpeakerGroupStatus(
+                    id: coord.groupId ?? coord.id,
+                    coordinator: coord, members: members,
+                    trackInfo: nil, transportState: .unknown, volume: 0)
+            }
     }
 
     private func loadGroupAlbumColors() async {
@@ -716,7 +1105,31 @@ final class SonosManager {
 
     // MARK: - State Refresh
 
+    /// Drives both the LAN UPnP polling (fast, rich) and the Cloud Control
+    /// API polling (slower, lighter) via `transportBackend`. `.unknown`
+    /// triggers a probe first, then fills in whichever pipe succeeded.
     func refreshState() async {
+        switch transportBackend {
+        case .lan:
+            await refreshStateLAN()
+        case .cloud:
+            await refreshStateCloud()
+        case .unknown:
+            _ = await probeBackend()
+            // After probe, route accordingly (one level of recursion max).
+            if transportBackend == .lan { await refreshStateLAN() }
+            else if transportBackend == .cloud { await refreshStateCloud() }
+            else {
+                // Still nothing — keep existing state, surface friendly error.
+                connectionState = .disconnected
+                if errorMessage == nil {
+                    errorMessage = SonosControlError.noBackend.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func refreshStateLAN() async {
         guard let pIP = playbackIP, let vIP = volumeIP else { return }
         do {
             async let t = SonosAPI.getTransportInfo(ip: pIP)
@@ -725,6 +1138,10 @@ final class SonosManager {
             async let m = SonosAPI.getPlayMode(ip: pIP)
             async let mediaURI = SonosAPI.getMediaInfo(ip: pIP)
             transportState = try await t
+            // `getPositionInfo` already ran `PlaybackSource.from(trackURI:)`
+            // which consults SharedStorage's sid → name map for services
+            // whose local sid varies per install (NetEase etc.), so we no
+            // longer need a manual second pass here.
             trackInfo = try await p
             volume = try await v
             let mode = try await m
@@ -760,10 +1177,264 @@ final class SonosManager {
             if consecutiveFailures >= 3 {
                 connectionState = .disconnected
                 errorMessage = "Connection lost — pull to refresh."
+                // Mid-session LAN loss — maybe the user walked off the Wi-Fi.
+                // Invalidate the backend so the next command probes again
+                // and has a chance to fall over to cloud.
+                invalidateBackend()
             } else {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Cloud-based state refresh used when we're off-LAN. Much less detailed
+    /// than the LAN path — no queue, no raw transport URI, no per-speaker
+    /// volume — but enough to populate the mini-player and now-playing UI.
+    private func refreshStateCloud() async {
+        guard let gid = cloudGroupId,
+              let token = await SonosAuth.shared.validAccessToken() else {
+            connectionState = .disconnected
+            return
+        }
+        do {
+            // Two concurrent requests: playback status (transport + modes +
+            // position) and metadata (track name / artist / art).
+            async let statusCall = SonosCloudAPI.getPlaybackStatus(token: token, groupId: gid)
+            async let metaCall = SonosCloudAPI.getPlaybackMetadata(token: token, groupId: gid)
+            let status = try await statusCall
+            let meta = try await metaCall
+
+            transportState = Self.transportState(fromCloudPlaybackState: status.playbackState)
+
+            if Date() > playModeLockUntil,
+               let modes = status.playModes {
+                isShuffling = modes.shuffle ?? false
+                repeatMode = Self.repeatMode(fromCloud: modes.repeatMode, one: modes.repeatOne)
+            }
+
+            let track = meta.currentItem?.track
+            let durationSec: TimeInterval = (track?.durationMillis).map { TimeInterval($0) / 1000.0 } ?? 0
+            let positionSec: TimeInterval = (status.positionMillis).map { TimeInterval($0) / 1000.0 } ?? 0
+
+            var info = trackInfo ?? TrackInfo(title: "", artist: "", album: "")
+            info.title = track?.name ?? info.title
+            info.artist = track?.artist?.name ?? info.artist
+            info.album = track?.album?.name ?? info.album
+            // Album art falls through several Sonos Cloud JSON paths —
+            // `track.imageUrl` is most common, but album-art-only streams
+            // (radio stations, playlist headers, line-in) route art up to
+            // `container.imageUrl`, and some services shove it onto
+            // `album.imageUrl`. In cloud mode we also filter out LAN
+            // URLs (Sonos loves to return `http://192.168.x.x:1400/getaa`
+            // for `track.imageUrl`, which can't be loaded off-LAN), so
+            // the CDN-backed fallbacks actually win. Honor the previous
+            // value if every path above is nil, so we don't blank an
+            // art we already loaded.
+            let artURL = Self.pickPublicArtURL(
+                track?.imageUrl,
+                track?.album?.imageUrl,
+                meta.container?.imageUrl) ?? info.albumArtURL
+            info.albumArtURL = artURL
+            info.duration = SonosTime.apiFormat(durationSec)
+            info.position = SonosTime.apiFormat(positionSec)
+            // Tag the playback source so the now-playing badge renders.
+            // Cloud `playbackMetadata` ships the service name directly;
+            // fall back to the container name for line-in / radio /
+            // service-less cases.
+            let sourceHint = track?.service?.name ?? meta.container?.name
+            info.source = PlaybackSource.from(serviceName: sourceHint)
+            if let q = track?.quality, let mapped = AudioQuality.from(cloudQuality: q) {
+                info.audioQuality = mapped
+            }
+            trackInfo = info
+
+            positionSeconds = positionSec
+            durationSeconds = durationSec
+            positionFetchedAt = Date()
+
+            consecutiveFailures = 0
+            connectionState = .connected
+            errorMessage = nil
+
+            updateSharedCache()
+            await loadAlbumArt()
+            managePositionTimer()
+            manageLiveActivity()
+        } catch SonosCloudError.unauthorized {
+            _ = await SonosAuth.shared.refreshAccessToken()
+        } catch {
+            consecutiveFailures += 1
+            if consecutiveFailures >= 3 {
+                connectionState = .disconnected
+                errorMessage = "Remote control unavailable — check your connection."
+            } else {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private static func transportState(fromCloudPlaybackState raw: String?) -> TransportState {
+        switch raw {
+        case "PLAYBACK_STATE_PLAYING":   return .playing
+        case "PLAYBACK_STATE_PAUSED":    return .paused
+        case "PLAYBACK_STATE_BUFFERING": return .transitioning
+        case "PLAYBACK_STATE_IDLE":      return .stopped
+        default:                         return .stopped
+        }
+    }
+
+    private static func repeatMode(fromCloud raw: String?, one: Bool?) -> RepeatMode {
+        if one == true { return .one }
+        switch raw {
+        case "REPEAT_ALL", "ALL":  return .all
+        case "REPEAT_ONE", "ONE":  return .one
+        default:                   return .off
+        }
+    }
+
+
+    // MARK: - Transport Backend Probe
+
+    /// Decide whether we can reach the speaker over LAN or need to fall back
+    /// to the Sonos Cloud Control API. The TCP probe is short (1 s) so the
+    /// UI rarely blocks on it — subsequent commands just consult the cached
+    /// `transportBackend` value. Concurrent callers share the in-flight
+    /// `probeTask`, so e.g. "app foreground + speaker tap" only does one
+    /// probe.
+    @discardableResult
+    func probeBackend() async -> TransportBackend {
+        if let task = probeTask { return await task.value }
+
+        let task = Task<TransportBackend, Never> { [weak self] in
+            guard let self else { return .unknown }
+            let result = await self.runBackendProbe()
+            await MainActor.run {
+                self.transportBackend = result
+                SonosLog.info(.sonosCloud, "transport backend → \(result)")
+            }
+            return result
+        }
+        probeTask = task
+        defer { probeTask = nil }
+        return await task.value
+    }
+
+    /// Marks the current backend stale and kicks off a re-probe on the next
+    /// call. Useful when a LAN command unexpectedly times out mid-session —
+    /// the next UI action will silently re-route to cloud.
+    func invalidateBackend() {
+        transportBackend = .unknown
+        probeTask = nil
+    }
+
+    /// Pure probe logic; always returns the decision without touching state.
+    private func runBackendProbe() async -> TransportBackend {
+        guard let ip = playbackIP else { return .unknown }
+
+        // Try a 1s TCP connect to the speaker's control port. Anything that
+        // answers the TCP handshake is "LAN reachable" for our purposes —
+        // we don't need to verify UPnP semantics here, the next real SOAP
+        // call will surface a problem if the speaker's in a weird state.
+        let lanReachable = await Self.tcpProbe(host: ip, port: 1400, timeout: 1.0)
+        if lanReachable { return .lan }
+
+        // LAN unreachable. Only hard requirement for routing to `.cloud` is
+        // a valid OAuth token — if Sonos Cloud auth works, the actual
+        // `cloudGroupId` / `householdId` can resolve lazily inside the
+        // refresh code path. Previously this branch blocked on
+        // `resolveCloudGroupId()` succeeding first, which meant a single
+        // flaky `getGroups` response kept us stuck in `.unknown` and the
+        // Home tab's spinner spun forever. Kick off the resolve in the
+        // background (we'll need the id for control commands soon anyway)
+        // but don't wait on it.
+        guard await SonosAuth.shared.validAccessToken() != nil else {
+            return .unknown
+        }
+        if cloudGroupId == nil {
+            Task { await resolveCloudGroupId() }
+        }
+        return .cloud
+    }
+
+    /// Lightweight TCP reachability probe. Wrapping `NWConnection` in
+    /// `withCheckedContinuation` keeps the caller on async/await. We use
+    /// `.tcp` directly so the probe works even when the speaker isn't
+    /// advertising via Bonjour at the moment.
+    private static func tcpProbe(host: String, port: UInt16,
+                                 timeout: TimeInterval) async -> Bool {
+        let queue = DispatchQueue.global(qos: .userInitiated)
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: NWEndpoint.Port(rawValue: port)!,
+            using: .tcp)
+        // Use a class-based box so the timeout timer and state handler can
+        // race to resume the continuation safely — first one to win sets
+        // `done` under the lock and resumes; the loser is a no-op.
+        final class ResumeBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func tryComplete() -> Bool {
+                lock.lock(); defer { lock.unlock() }
+                if done { return false }
+                done = true
+                return true
+            }
+        }
+        let box = ResumeBox()
+
+        return await withCheckedContinuation { continuation in
+            queue.asyncAfter(deadline: .now() + timeout) {
+                if box.tryComplete() {
+                    connection.cancel()
+                    continuation.resume(returning: false)
+                }
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if box.tryComplete() {
+                        connection.cancel()
+                        continuation.resume(returning: true)
+                    }
+                case .failed, .cancelled:
+                    if box.tryComplete() {
+                        continuation.resume(returning: false)
+                    }
+                default: break
+                }
+            }
+            connection.start(queue: queue)
+        }
+    }
+
+    /// Package the current routing decision into a `SonosControl.Backend`
+    /// the verb dispatcher can use. Returns nil when we have nothing usable
+    /// (no speaker / failed probe / no cloud auth). Callers then surface
+    /// `SonosControlError.noBackend` to the user.
+    func currentControlBackend() -> SonosControl.Backend? {
+        switch transportBackend {
+        case .lan:
+            guard let ip = playbackIP,
+                  let vIP = volumeIP,
+                  let uuid = selectedSpeaker?.id else { return nil }
+            return .lan(ip: ip, volumeIP: vIP, speakerUUID: uuid)
+        case .cloud:
+            guard let gid = cloudGroupId,
+                  let token = SonosAuth.shared.cachedAccessToken,
+                  let hid = SonosAuth.shared.householdId else { return nil }
+            return .cloud(groupId: gid, token: token,
+                          householdId: hid, playerId: cloudPlayerId)
+        case .unknown:
+            return nil
+        }
+    }
+
+    /// Like `currentControlBackend` but probes first if we haven't already.
+    /// Use from async command entry points where an extra 1 s latency on
+    /// the first tap is acceptable; hot paths should cache.
+    func controlBackendEnsured() async -> SonosControl.Backend? {
+        if transportBackend == .unknown { _ = await probeBackend() }
+        return currentControlBackend()
     }
 
     // MARK: - Sonos Cloud API
@@ -804,8 +1475,15 @@ final class SonosManager {
                 })?.id
             }
 
+            // Pick a matching cloud player id (RINCON id is usually a substring
+            // of the cloud player id). Needed for per-player volume via Cloud
+            // Control API when the user is off-LAN.
+            cloudPlayerId = response.players.first { p in
+                p.id.contains(rincon) || rincon.contains(p.id) || p.name == speaker.name
+            }?.id
+
             if let gid = cloudGroupId {
-                SonosLog.info(.sonosCloud, "resolved cloudGroupId: \(gid)")
+                SonosLog.info(.sonosCloud, "resolved cloudGroupId: \(gid) player: \(cloudPlayerId ?? "?")")
                 SharedStorage.cloudGroupId = gid
             } else {
                 SonosLog.error(.sonosCloud, "Could not match speaker \(speaker.name) (id: \(rincon)) to any cloud group")
@@ -889,14 +1567,25 @@ final class SonosManager {
         endAllActivities()
 
         groupRefreshCounter = 0
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.refreshState()
+        refreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                // Cloud polling is rate-limited and higher-latency than LAN —
+                // refresh every other tick in cloud mode for ~6s cadence vs
+                // ~3s on LAN. (Same policy as the old Timer-based loop.)
+                let shouldRefresh = self.transportBackend != .cloud
+                    || self.groupRefreshCounter % 2 == 0
+                if shouldRefresh {
+                    await self.refreshState()
+                }
                 self.groupRefreshCounter += 1
+                // `refreshAllGroupStatuses` internally routes to either
+                // UPnP getZoneGroupState (LAN) or SonosCloudAPI.getGroups
+                // (cloud) — both are cheap enough to run every other tick.
                 if self.groupRefreshCounter % 2 == 0 {
                     await self.refreshAllGroupStatuses()
                 }
+                try? await Task.sleep(for: .seconds(3))
             }
         }
 
@@ -907,7 +1596,14 @@ final class SonosManager {
         }
         NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification,
                                                object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.stopBackgroundKeepalive() }
+            Task { @MainActor [weak self] in
+                self?.stopBackgroundKeepalive()
+                // LAN reachability may have flipped while we were in the
+                // background (user left home / came back). Invalidate the
+                // cached backend so the next command re-probes.
+                self?.invalidateBackend()
+                _ = await self?.probeBackend()
+            }
         }
         // End Live Activity when the app is killed so it doesn't linger on Lock Screen.
         // Note: willTerminate is NOT guaranteed on force-quit; endAllActivities() on
@@ -919,8 +1615,10 @@ final class SonosManager {
     }
 
     func stopAutoRefresh() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        positionTask?.cancel()
+        positionTask = nil
         stopBackgroundKeepalive()
         NotificationCenter.default.removeObserver(self,
             name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -967,15 +1665,22 @@ final class SonosManager {
 
     private func managePositionTimer() {
         if isPlaying && durationSeconds > 0 {
-            if positionTimer == nil {
-                positionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                    guard let self, self.isPlaying else { return }
-                    self.positionSeconds = min(self.positionSeconds + 1, self.durationSeconds)
+            if positionTask == nil {
+                positionTask = Task { @MainActor [weak self] in
+                    while !Task.isCancelled {
+                        guard let self else { return }
+                        guard self.isPlaying, self.durationSeconds > 0 else {
+                            self.positionTask = nil
+                            return
+                        }
+                        self.positionSeconds = min(self.positionSeconds + 1, self.durationSeconds)
+                        try? await Task.sleep(for: .seconds(1))
+                    }
                 }
             }
         } else {
-            positionTimer?.invalidate()
-            positionTimer = nil
+            positionTask?.cancel()
+            positionTask = nil
         }
     }
 

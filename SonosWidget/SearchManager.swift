@@ -247,6 +247,13 @@ final class SearchManager {
         localToCloudSid.removeAll()
         cloudServiceUsername.removeAll()
 
+        // Also snapshot local-sid → service name into SharedStorage so
+        // SonosManager (and the widget) can recognize the playing service
+        // even when no active search context is around. Primary use case:
+        // tagging `TrackInfo.source` for services whose local sid varies
+        // per installation (NetEase, regional partners).
+        var sidNameMap: [String: String] = [:]
+
         for account in linkedAccounts {
             guard let cloudId = account.serviceId else { continue }
             let cloudName = (account.name ?? account.nickname ?? "").lowercased()
@@ -257,6 +264,7 @@ final class SearchManager {
             }) {
                 cloudToLocalSid[cloudId] = match.id
                 localToCloudSid[match.id] = cloudId
+                sidNameMap[String(match.id)] = match.name
                 SonosLog.debug(.search, "Mapped Cloud \(cloudId) (\(account.displayName)) → local sid \(match.id)")
             }
 
@@ -264,6 +272,10 @@ final class SearchManager {
                 cloudServiceUsername[cloudId] = username
                 SonosLog.debug(.search, "Username for \(cloudId): \(username)")
             }
+        }
+
+        if !sidNameMap.isEmpty {
+            SharedStorage.serviceNamesByLocalSid = sidNameMap
         }
     }
 
@@ -619,25 +631,80 @@ final class SearchManager {
 
     // MARK: - Browse
 
-    func loadBrowseContent() async {
-        guard let ip = speakerIP else { return }
+    /// Populate the Browse tab's Favorites / Playlists / Radio sections.
+    ///
+    /// When the caller hints we're in remote mode (`cloudMode == true`), the
+    /// LAN UPnP `ContentDirectory/Browse` calls would just time out — instead
+    /// we pull favorites from the Sonos Cloud Control API. Playlists and
+    /// radio don't have first-class Cloud endpoints in the app yet, so those
+    /// sections stay empty in remote mode (the UI hides them).
+    func loadBrowseContent(cloudMode: Bool = false,
+                           cloudContext: CloudContext? = nil) async {
         isLoadingBrowse = true
         errorMessage = nil
 
-        async let favs = tryBrowse { try await SonosAPI.browseFavorites(ip: ip) }
-        async let lists = tryBrowse { try await SonosAPI.browsePlaylists(ip: ip) }
-        async let stations = tryBrowse { try await SonosAPI.browseRadio(ip: ip) }
+        if cloudMode, let ctx = cloudContext {
+            favorites = (try? await cloudFavoritesAsBrowseItems(context: ctx)) ?? []
+            playlists = []
+            radio = []
+        } else if let ip = speakerIP {
+            async let favs = tryBrowse { try await SonosAPI.browseFavorites(ip: ip) }
+            async let lists = tryBrowse { try await SonosAPI.browsePlaylists(ip: ip) }
+            async let stations = tryBrowse { try await SonosAPI.browseRadio(ip: ip) }
+            favorites = await favs
+            playlists = await lists
+            radio = await stations
 
-        favorites = await favs
-        playlists = await lists
-        radio = await stations
-
-        if musicServices.isEmpty {
-            musicServices = (try? await SonosAPI.listMusicServices(ip: ip)) ?? []
-            buildServiceIdMapping()
+            if musicServices.isEmpty {
+                musicServices = (try? await SonosAPI.listMusicServices(ip: ip)) ?? []
+                buildServiceIdMapping()
+            }
         }
 
         isLoadingBrowse = false
+    }
+
+    /// What SearchManager needs from SonosManager when in cloud / remote mode.
+    /// Kept decoupled from `SonosControl.Backend` so SearchManager doesn't
+    /// grow a hard dep on the router internals.
+    struct CloudContext {
+        let token: String
+        let householdId: String
+        let groupId: String
+    }
+
+    /// Fetch favorites from the Sonos Cloud Control API and convert them to
+    /// the same `BrowseItem` shape the rest of the Browse UI expects. We tag
+    /// each with `cloudFavoriteId` so the tap handler knows to dispatch via
+    /// `SonosCloudAPI.loadFavorite` rather than UPnP.
+    private func cloudFavoritesAsBrowseItems(context: CloudContext) async throws -> [BrowseItem] {
+        let cloudFavs = try await SonosCloudAPI.listFavorites(
+            token: context.token, householdId: context.householdId)
+        return cloudFavs.map { fav in
+            // Best-effort type inference from the resource metadata; the
+            // per-category rendering falls back to sensible defaults when
+            // the Cloud API's shape doesn't map cleanly.
+            let cloudType: String? = {
+                switch fav.resource?.type {
+                case "album":    return "ALBUM"
+                case "playlist": return "PLAYLIST"
+                case "track":    return "TRACK"
+                case "artist":   return "ARTIST"
+                case "station":  return "PROGRAM"
+                default:         return nil
+                }
+            }()
+            let cloudServiceId = fav.service?.id?.serviceId
+            let localSid = cloudServiceId.flatMap { cloudToLocalSid[$0] }
+            var item = BrowseItem(
+                id: fav.id, title: fav.name, artist: fav.description ?? "",
+                album: "", albumArtURL: fav.imageUrl,
+                uri: nil, metaXML: nil, resMD: nil,
+                isContainer: cloudType == "ALBUM" || cloudType == "PLAYLIST",
+                serviceId: localSid, cloudType: cloudType)
+            item.cloudFavoriteId = fav.id
+            return item
+        }
     }
 
     private func tryBrowse(_ block: () async throws -> [BrowseItem]) async -> [BrowseItem] {
@@ -1088,8 +1155,37 @@ final class SearchManager {
         // mirrors Apple Music's behavior of listing attempted plays.
         pushRecentlyPlayed(item)
 
+        // Remote mode: if the item is a cloud-sourced favorite, use the
+        // Control API's `loadFavorite` instead of the UPnP SetAVTransportURI
+        // / queue path (which doesn't work off-LAN).
+        if manager.transportBackend == .cloud,
+           let favId = item.cloudFavoriteId,
+           let token = await SonosAuth.shared.validAccessToken(),
+           let gid = manager.currentCloudGroupId {
+            do {
+                SonosLog.debug(.playback, "remote playNow → loadFavorite(\(favId))")
+                try await SonosCloudAPI.loadFavorite(token: token, groupId: gid,
+                                                    favoriteId: favId)
+                try? await Task.sleep(for: .milliseconds(800))
+                await manager.refreshState()
+            } catch {
+                SonosLog.error(.playback, "loadFavorite failed: \(error)")
+                errorMessage = error.localizedDescription
+            }
+            return
+        }
+
         if item.isArtist {
             await startStation(item: item, manager: manager)
+            return
+        }
+
+        // Everything below this line uses UPnP — gate on .cloud mode so users
+        // get a friendly "Requires LAN" error instead of a silent timeout.
+        if manager.transportBackend == .cloud {
+            errorMessage = SonosControlError
+                .unsupportedInCloudMode(feature: "Playing this item")
+                .localizedDescription
             return
         }
 
@@ -1175,6 +1271,14 @@ final class SearchManager {
 
 
     func playNext(item: BrowseItem, manager: SonosManager) async {
+        // Queue insertion is LAN-only (Cloud Control API has no per-track
+        // queue API). Show a friendly message instead of a stale timeout.
+        if manager.isRemoteMode {
+            errorMessage = SonosControlError
+                .unsupportedInCloudMode(feature: "Adding to the queue")
+                .localizedDescription
+            return
+        }
         guard let uri = item.uri else { return }
         await manager.playNext(uri: uri, metadata: playbackMetadata(for: item))
     }
@@ -1363,6 +1467,12 @@ final class SearchManager {
     }
 
     func addToQueue(item: BrowseItem, manager: SonosManager) async {
+        if manager.isRemoteMode {
+            errorMessage = SonosControlError
+                .unsupportedInCloudMode(feature: "Adding to the queue")
+                .localizedDescription
+            return
+        }
         guard let ip = manager.selectedSpeaker?.playbackIP,
               let uri = item.uri else { return }
         let meta = playbackMetadata(for: item)
@@ -1375,6 +1485,15 @@ final class SearchManager {
     }
 
     func addToFavorites(item: BrowseItem, manager: SonosManager) async -> Bool {
+        // Sonos Cloud Control API has no endpoint to CREATE a favorite —
+        // only UPnP CreateObject does that. Surface a clear message rather
+        // than letting the SOAP request time out silently.
+        if manager.isRemoteMode {
+            errorMessage = SonosControlError
+                .unsupportedInCloudMode(feature: "Adding Sonos Favorites")
+                .localizedDescription
+            return false
+        }
         guard let ip = manager.selectedSpeaker?.playbackIP,
               let uri = item.uri else { return false }
         let meta = playbackMetadata(for: item)
@@ -1416,6 +1535,14 @@ final class SearchManager {
     }
 
     func removeFromFavorites(item: BrowseItem, manager: SonosManager) async -> Bool {
+        // Cloud API has no "destroy favorite" endpoint — same UPnP-only
+        // constraint as `addToFavorites`.
+        if manager.isRemoteMode {
+            errorMessage = SonosControlError
+                .unsupportedInCloudMode(feature: "Removing Sonos Favorites")
+                .localizedDescription
+            return false
+        }
         guard let ip = manager.selectedSpeaker?.playbackIP else { return false }
         guard let favItem = findFavorite(matching: item) else {
             SonosLog.info(.favorites, "Item '\(item.title)' not found in favorites")

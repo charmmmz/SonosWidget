@@ -17,6 +17,12 @@ final class SonosAuth: NSObject {
         set { if let v = newValue { saveKeychain(.householdId, v) } else { deleteKeychain(.householdId) } }
     }
 
+    /// Synchronous read of the stored access token — no refresh attempt.
+    /// Callers that can tolerate the async refresh path should still prefer
+    /// `validAccessToken()`. Used by `SonosManager.currentControlBackend()`
+    /// where we need to synthesize a `Backend` without hopping to async.
+    var cachedAccessToken: String? { readKeychain(.accessToken) }
+
     private var presentationAnchor: ASPresentationAnchor?
 
     private override init() { super.init() }

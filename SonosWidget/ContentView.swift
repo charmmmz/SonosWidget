@@ -14,10 +14,19 @@ struct ContentView: View {
                 SearchView(manager: manager, searchManager: searchManager)
                     .miniPlayerLegacyInsetIfNeeded(manager: manager)
             }
+            Tab("Settings", systemImage: "gearshape") {
+                SettingsView(manager: manager, searchManager: searchManager)
+                    .miniPlayerLegacyInsetIfNeeded(manager: manager)
+            }
         }
         .tint(manager.albumArtDominantColor ?? .blue)
         .tabBarMinimizeOnScrollIfAvailable()
         .miniPlayerSystemAccessoryIfAvailable(manager: manager)
+        // Bound to the shared `manager.showingAddSpeaker` flag so either the
+        // first-run setup screen or the Settings tab can flip it from any tab.
+        .sheet(isPresented: $manager.showingAddSpeaker) {
+            AddSpeakerSheet(manager: manager)
+        }
         .animation(.spring(response: 0.4, dampingFraction: 0.85), value: manager.showFullPlayer)
         .overlay {
             GeometryReader { geo in

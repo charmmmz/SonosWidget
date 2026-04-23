@@ -4,7 +4,6 @@ struct SearchView: View {
     @Bindable var manager: SonosManager
     @Bindable var searchManager: SearchManager
     @State private var searchText = ""
-    @State private var showServiceSettings = false
     /// nil = "All", otherwise the serviceId string
     @State private var selectedServiceTab: String?
     /// Tracks which item is currently being loaded for playback
@@ -43,15 +42,6 @@ struct SearchView: View {
             // explanatory; a redundant title just costs vertical space.
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showServiceSettings = true
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                    }
-                }
-            }
             .toolbarBackground(.hidden, for: .navigationBar)
             .scrollContentBackground(.hidden)
             .preferredColorScheme(.dark)
@@ -74,18 +64,20 @@ struct SearchView: View {
             .onAppear {
                 searchManager.configure(speakerIP: manager.selectedSpeaker?.playbackIP)
                 Task {
-                    async let browse: () = searchManager.loadBrowseContent()
+                    async let browse: () = loadBrowseForCurrentBackend()
                     async let probe: () = searchManager.probeLinkedServices()
                     _ = await (browse, probe)
                 }
             }
-            .onChange(of: manager.selectedSpeaker?.ipAddress) { _, newIP in
+            .onChange(of: manager.selectedSpeaker?.ipAddress) { _, _ in
                 searchManager.configure(speakerIP: manager.selectedSpeaker?.playbackIP)
                 searchManager.resetProbe()
-                Task { await searchManager.loadBrowseContent() }
+                Task { await loadBrowseForCurrentBackend() }
             }
-            .sheet(isPresented: $showServiceSettings) {
-                ServiceSettingsSheet(searchManager: searchManager)
+            .onChange(of: manager.transportBackend) { _, _ in
+                // Flipping between LAN and Cloud changes where Sonos Favorites
+                // come from. Re-load so the list matches the active backend.
+                Task { await loadBrowseForCurrentBackend() }
             }
             .confirmationDialog("Start Station",
                                 isPresented: $searchManager.showStationPicker,
@@ -107,6 +99,22 @@ struct SearchView: View {
         Task {
             await searchManager.playNow(item: item, manager: manager)
             withAnimation(.easeOut(duration: 0.2)) { playingItemId = nil }
+        }
+    }
+
+    /// Dispatches Browse-tab content loading based on whether we're LAN or
+    /// remote. In remote mode we hand SearchManager a cloud context so it can
+    /// source Sonos Favorites from the Control API's `listFavorites` endpoint.
+    private func loadBrowseForCurrentBackend() async {
+        if manager.transportBackend == .cloud,
+           let token = SonosAuth.shared.cachedAccessToken,
+           let householdId = SonosAuth.shared.householdId,
+           let gid = manager.currentCloudGroupId {
+            await searchManager.loadBrowseContent(
+                cloudMode: true,
+                cloudContext: .init(token: token, householdId: householdId, groupId: gid))
+        } else {
+            await searchManager.loadBrowseContent()
         }
     }
 
@@ -1419,106 +1427,3 @@ struct FavoriteCategoryDetailView: View {
     }
 }
 
-// MARK: - Service Settings Sheet
-
-struct ServiceSettingsSheet: View {
-    @Bindable var searchManager: SearchManager
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if searchManager.isProbing {
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .controlSize(.large)
-                        Text("Detecting available services…")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if searchManager.linkedAccounts.isEmpty {
-                    ContentUnavailableView(
-                        "No Music Services Found",
-                        systemImage: "music.note.list",
-                        description: Text("Link a music service in the official Sonos app first, then tap refresh below.")
-                    )
-                } else {
-                    List {
-                        Section {
-                            ForEach(sortedAccounts, id: \.serviceId) { account in
-                                accountRow(account)
-                            }
-                        } header: {
-                            Text("Linked Services (\(searchManager.linkedAccounts.count))")
-                        } footer: {
-                            Text("These services are linked to your Sonos system. Search is proxied through the Sonos Cloud API — no extra login needed.")
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Search Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        Task { await searchManager.forceReprobe() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .preferredColorScheme(.dark)
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    private var sortedAccounts: [SonosCloudAPI.CloudMusicServiceAccount] {
-        let pinned: Set<String> = ["3079", "52231", "51463", "42247", "49671"]
-        return searchManager.linkedAccounts.sorted { a, b in
-            let aPinned = pinned.contains(a.serviceId ?? "")
-            let bPinned = pinned.contains(b.serviceId ?? "")
-            if aPinned != bPinned { return aPinned }
-            return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
-        }
-    }
-
-    private func accountRow(_ account: SonosCloudAPI.CloudMusicServiceAccount) -> some View {
-        let sid = account.serviceId ?? ""
-        let enabled = searchManager.serviceEnabled[sid] ?? true
-
-        return HStack(spacing: 12) {
-            CloudServiceBrandMark(
-                cloudServiceId: sid,
-                displayNameHint: account.displayName,
-                dimension: 24,
-                symbolUsesTitle3: true
-            )
-                .foregroundStyle(enabled ? .primary : .secondary)
-                .opacity(enabled ? 1 : 0.45)
-                .frame(width: 32)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(account.displayName)
-                    .foregroundStyle(enabled ? .primary : .secondary)
-                if let nick = account.nickname, nick != account.displayName {
-                    Text(nick)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
-            Spacer()
-
-            Toggle("", isOn: Binding(
-                get: { searchManager.serviceEnabled[sid] ?? true },
-                set: { searchManager.setServiceEnabled(serviceId: sid, enabled: $0) }
-            ))
-            .labelsHidden()
-        }
-    }
-
-}

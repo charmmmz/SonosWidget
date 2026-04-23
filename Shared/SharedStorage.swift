@@ -115,6 +115,22 @@ enum SharedStorage {
         set { defaults.set(newValue, forKey: "cloudGroupId") }
     }
 
+    /// Mapping of local Sonos service id (`sid=…` in track URIs) to that
+    /// service's human-readable name ("Spotify", "Apple Music",
+    /// "网易云音乐"…). Populated by `SearchManager.buildServiceIdMapping`
+    /// after `ListAvailableServices` finishes, and read by `SonosManager`
+    /// when enriching `TrackInfo.source` — the UPnP track URI alone doesn't
+    /// carry enough info to distinguish e.g. NetEase from any other
+    /// hard-coded service since NetEase's local sid varies per installation.
+    nonisolated static var serviceNamesByLocalSid: [String: String] {
+        get {
+            guard let dict = defaults.dictionary(forKey: "serviceNamesByLocalSid")
+                as? [String: String] else { return [:] }
+            return dict
+        }
+        set { defaults.set(newValue, forKey: "serviceNamesByLocalSid") }
+    }
+
     /// Total visible speakers in the currently playing group (including coordinator).
     nonisolated static var cachedGroupMemberCount: Int {
         get { defaults.integer(forKey: "groupMemberCount") }

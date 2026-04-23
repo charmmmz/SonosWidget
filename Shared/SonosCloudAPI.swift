@@ -40,7 +40,7 @@ enum SonosCloudAPI {
 
     static func getGroups(token: String, householdId: String) async throws -> GroupsResponse {
         let data = try await get(path: "/households/\(householdId)/groups", token: token)
-        return try JSONDecoder().decode(GroupsResponse.self, from: data)
+        return try decodeOrLog(GroupsResponse.self, from: data, endpoint: "getGroups")
     }
 
     // MARK: - Playback Metadata
@@ -53,6 +53,11 @@ enum SonosCloudAPI {
     struct MetadataContainer: Decodable {
         let name: String?
         let type: String?
+        /// Playlist / station / album artwork — served at the container level
+        /// instead of the track level for some Sonos Cloud sources (e.g. line-in,
+        /// radio stations, whole-playlist views where the track itself has no
+        /// per-track imagery). Used as a fallback when `track.imageUrl` is nil.
+        let imageUrl: String?
     }
 
     struct CurrentItem: Decodable {
@@ -64,10 +69,34 @@ enum SonosCloudAPI {
         let artist: CloudArtist?
         let album: CloudAlbum?
         let quality: CloudTrackQuality?
+        let imageUrl: String?
+        let durationMillis: Int?
+        /// Identifies which streaming service the track is coming from —
+        /// Sonos embeds a `service.name` blob in the playbackMetadata
+        /// response so clients can render a "playing via Apple Music" badge
+        /// without having to map internal service IDs themselves.
+        let service: CloudTrackService?
     }
 
-    struct CloudArtist: Decodable { let name: String? }
-    struct CloudAlbum: Decodable { let name: String? }
+    struct CloudTrackService: Decodable {
+        let name: String?
+        // NOTE: intentionally omitted here. Sonos's `playbackMetadata`
+        // response sometimes emits `service.id` as a bare string ("52231")
+        // and sometimes as a nested object ({objectId, serviceId, …}); a
+        // strict Decodable definition crashed the whole decode with
+        // "The data couldn't be read because it isn't in the correct
+        // format." Since we only use `name` for the badge, not carrying
+        // the id is the cheapest unblock.
+    }
+
+    struct CloudArtist: Decodable {
+        let name: String?
+        let imageUrl: String?
+    }
+    struct CloudAlbum: Decodable {
+        let name: String?
+        let imageUrl: String?
+    }
 
     struct CloudTrackQuality: Decodable, Sendable {
         let codec: String?
@@ -79,7 +108,7 @@ enum SonosCloudAPI {
 
     static func getPlaybackMetadata(token: String, groupId: String) async throws -> CloudPlaybackMetadata {
         let data = try await get(path: "/groups/\(groupId)/playbackMetadata", token: token)
-        return try JSONDecoder().decode(CloudPlaybackMetadata.self, from: data)
+        return try decodeOrLog(CloudPlaybackMetadata.self, from: data, endpoint: "playbackMetadata")
     }
 
     // MARK: - Music Service Accounts
@@ -630,6 +659,26 @@ enum SonosCloudAPI {
         return try JSONDecoder().decode(NowPlayingResponse.self, from: data)
     }
 
+    // MARK: - Decode helpers
+
+    /// Wraps `JSONDecoder().decode(...)` with a descriptive error log that
+    /// includes the first 1 KB of the response body when decoding fails.
+    /// Makes the otherwise-opaque "The data couldn't be read because it
+    /// isn't in the correct format." error actionable — we immediately see
+    /// which endpoint + which bytes tripped it up.
+    fileprivate static func decodeOrLog<T: Decodable>(
+        _ type: T.Type, from data: Data, endpoint: String
+    ) throws -> T {
+        do {
+            return try JSONDecoder().decode(type, from: data)
+        } catch {
+            let bodyPreview = String(data: data, encoding: .utf8)?.prefix(1024) ?? ""
+            SonosLog.error(.cloudAPI, "decode failed for \(endpoint): \(error)")
+            SonosLog.error(.cloudAPI, "body: \(bodyPreview)")
+            throw error
+        }
+    }
+
     // MARK: - Networking
 
     private static func get(path: String, token: String) async throws -> Data {
@@ -646,6 +695,256 @@ enum SonosCloudAPI {
             throw SonosCloudError.httpError(http.statusCode)
         }
         return data
+    }
+
+    // MARK: - Control POST helper
+
+    /// POST a JSON-body command against the Sonos Control API. `body` may be
+    /// `nil` for commands that take no arguments (most transport verbs).
+    /// Returns the raw response data (many endpoints respond 200 with `{}` or
+    /// 204 with no body — caller usually ignores it).
+    @discardableResult
+    private static func postControl(path: String, token: String,
+                                    body: [String: Any]? = nil) async throws -> Data {
+        guard let url = URL(string: baseURL + path) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        if status == 401 { throw SonosCloudError.unauthorized }
+        guard (200...299).contains(status) else {
+            let bodyStr = String(data: data, encoding: .utf8) ?? ""
+            SonosLog.error(.cloudAPI, "POST \(path) → HTTP \(status): \(bodyStr.prefix(500))")
+            throw SonosCloudError.httpError(status)
+        }
+        return data
+    }
+
+    // MARK: - Transport Control (POST /groups/{gid}/playback/*)
+
+    static func play(token: String, groupId: String) async throws {
+        try await postControl(path: "/groups/\(groupId)/playback/play", token: token)
+    }
+
+    static func pause(token: String, groupId: String) async throws {
+        try await postControl(path: "/groups/\(groupId)/playback/pause", token: token)
+    }
+
+    static func togglePlayPause(token: String, groupId: String) async throws {
+        try await postControl(path: "/groups/\(groupId)/playback/togglePlayPause", token: token)
+    }
+
+    static func skipToNextTrack(token: String, groupId: String) async throws {
+        try await postControl(path: "/groups/\(groupId)/playback/skipToNextTrack", token: token)
+    }
+
+    static func skipToPreviousTrack(token: String, groupId: String) async throws {
+        try await postControl(path: "/groups/\(groupId)/playback/skipToPreviousTrack", token: token)
+    }
+
+    /// Seek within the current track. Position is in **milliseconds**.
+    static func seek(token: String, groupId: String, positionMillis: Int) async throws {
+        try await postControl(
+            path: "/groups/\(groupId)/playback/seek",
+            token: token,
+            body: ["positionMillis": positionMillis])
+    }
+
+    // MARK: - Volume
+
+    /// Set group-level volume (0–100).
+    static func setGroupVolume(token: String, groupId: String, volume: Int) async throws {
+        let clamped = max(0, min(100, volume))
+        try await postControl(
+            path: "/groups/\(groupId)/groupVolume",
+            token: token,
+            body: ["volume": clamped])
+    }
+
+    /// Read-side counterpart to `setGroupVolume`. Used to populate the
+    /// per-group volume slider on non-selected cards when in cloud mode,
+    /// where we don't have LAN access to per-speaker volume.
+    struct GroupVolume: Decodable {
+        let volume: Int?
+        let muted: Bool?
+        /// `"FIXED"` / `"VARIABLE"` — players that output to fixed-level
+        /// line-in can't be volume-controlled. We just surface whatever
+        /// the API returns; the app rarely needs to inspect this.
+        let fixed: Bool?
+    }
+
+    static func getGroupVolume(token: String, groupId: String) async throws -> GroupVolume {
+        let data = try await get(path: "/groups/\(groupId)/groupVolume", token: token)
+        return try decodeOrLog(GroupVolume.self, from: data, endpoint: "groupVolume")
+    }
+
+    /// Set single-player volume (0–100).
+    static func setPlayerVolume(token: String, playerId: String, volume: Int) async throws {
+        let clamped = max(0, min(100, volume))
+        try await postControl(
+            path: "/players/\(playerId)/playerVolume",
+            token: token,
+            body: ["volume": clamped])
+    }
+
+    static func setGroupMuted(token: String, groupId: String, muted: Bool) async throws {
+        try await postControl(
+            path: "/groups/\(groupId)/groupVolume/mute",
+            token: token,
+            body: ["muted": muted])
+    }
+
+    // MARK: - Lightweight Transport Status (GET /groups/{gid}/playback)
+
+    /// Subset of fields returned by `GET /groups/{gid}/playback`. Much cheaper
+    /// than `getPlaybackMetadata` — use this for the 5s cloud polling cadence.
+    struct PlaybackStatus: Decodable {
+        /// `"PLAYBACK_STATE_PLAYING"` / `"..._PAUSED"` / `"..._IDLE"` / `"..._BUFFERING"`.
+        let playbackState: String?
+        /// Current position within the track, milliseconds.
+        let positionMillis: Int?
+        /// Available play modes (shuffle / repeat etc.).
+        let playModes: PlayModes?
+
+        struct PlayModes: Decodable {
+            let repeatMode: String?
+            let repeatOne: Bool?
+            let shuffle: Bool?
+            let crossfade: Bool?
+        }
+    }
+
+    static func getPlaybackStatus(token: String, groupId: String) async throws -> PlaybackStatus {
+        let data = try await get(path: "/groups/\(groupId)/playback", token: token)
+        return try decodeOrLog(PlaybackStatus.self, from: data, endpoint: "playback")
+    }
+
+    // MARK: - Favorites (household-scoped, Control API)
+
+    struct CloudFavorite: Decodable, Identifiable {
+        let id: String
+        let name: String
+        let description: String?
+        let imageUrl: String?
+        let service: Service?
+        let resource: FavoriteResource?
+
+        struct Service: Decodable {
+            let name: String?
+            let id: ServiceId?
+
+            struct ServiceId: Decodable {
+                let accountId: String?
+                let objectId: String?
+                let serviceId: String?
+            }
+        }
+
+        struct FavoriteResource: Decodable {
+            let type: String?
+            let name: String?
+        }
+    }
+
+    private struct FavoritesResponse: Decodable {
+        let version: String?
+        let items: [CloudFavorite]
+    }
+
+    static func listFavorites(token: String, householdId: String) async throws -> [CloudFavorite] {
+        let data = try await get(path: "/households/\(householdId)/favorites", token: token)
+        return try JSONDecoder().decode(FavoritesResponse.self, from: data).items
+    }
+
+    /// Start playing a favorite on the given group. `playOnCompletion` controls
+    /// whether playback auto-starts after the load (default true, matches the
+    /// Sonos app's tap-to-play behavior).
+    static func loadFavorite(token: String, groupId: String, favoriteId: String,
+                             playOnCompletion: Bool = true) async throws {
+        try await postControl(
+            path: "/groups/\(groupId)/favorites",
+            token: token,
+            body: [
+                "favoriteId": favoriteId,
+                "playOnCompletion": playOnCompletion
+            ])
+    }
+
+    // MARK: - Playlists (Sonos-managed household playlists)
+
+    /// Load a Sonos-managed playlist (from `SQ:` on LAN, household-scoped on
+    /// cloud). `action`: `"REPLACE"` (clear queue) / `"APPEND"` / `"INSERT"` /
+    /// `"INSERT_NEXT"`. Default REPLACE matches the "play now" semantics the
+    /// app uses elsewhere.
+    static func loadPlaylist(token: String, groupId: String, playlistId: String,
+                             action: String = "REPLACE",
+                             playOnCompletion: Bool = true) async throws {
+        try await postControl(
+            path: "/groups/\(groupId)/playlists",
+            token: token,
+            body: [
+                "playlistId": playlistId,
+                "action": action,
+                "playOnCompletion": playOnCompletion
+            ])
+    }
+
+    // MARK: - Load Stream URL (artist station / arbitrary stream)
+
+    /// Push an arbitrary stream URI to the group. Used as the remote-mode
+    /// equivalent of `SetAVTransportURI` — in particular for `x-sonosapi-radio:`
+    /// station URIs constructed by `SearchManager.startStation`. Sonos may
+    /// refuse non-standard schemes; caller should fall back to LAN when this
+    /// errors.
+    static func loadStreamUrl(token: String, groupId: String, streamUrl: String,
+                              itemId: String? = nil,
+                              playOnCompletion: Bool = true) async throws {
+        var body: [String: Any] = [
+            "streamUrl": streamUrl,
+            "playOnCompletion": playOnCompletion
+        ]
+        if let itemId { body["itemId"] = itemId }
+        try await postControl(
+            path: "/groups/\(groupId)/playbackSession/loadStreamUrl",
+            token: token,
+            body: body)
+    }
+
+    // MARK: - Grouping
+
+    /// Create a new group from a list of players. Returns the new group id
+    /// embedded in the response body.
+    struct CreateGroupResponse: Decodable {
+        let group: CloudGroup
+    }
+
+    @discardableResult
+    static func createGroup(token: String, householdId: String,
+                            playerIds: [String],
+                            musicContextGroupId: String? = nil) async throws -> CreateGroupResponse {
+        var body: [String: Any] = ["playerIds": playerIds]
+        if let musicContextGroupId { body["musicContextGroupId"] = musicContextGroupId }
+        let data = try await postControl(
+            path: "/households/\(householdId)/groups/createGroup",
+            token: token,
+            body: body)
+        return try JSONDecoder().decode(CreateGroupResponse.self, from: data)
+    }
+
+    /// Replace the full member list of an existing group. Simpler than
+    /// `modifyGroupMembers` (add/remove deltas) and covers our grouping UI.
+    static func setGroupMembers(token: String, groupId: String,
+                                playerIds: [String]) async throws {
+        try await postControl(
+            path: "/groups/\(groupId)/groups/setGroupMembers",
+            token: token,
+            body: ["playerIds": playerIds])
     }
 }
 

@@ -5,7 +5,9 @@ struct PlayerView: View {
     @Bindable var searchManager: SearchManager
     @State private var newSpeakerIP = ""
     @State private var showManualEntry = false
-    @State private var isConnectingSonos = false
+    /// Tracked per-session so we only auto-connect on the *first* discovery
+    /// result. After the auto-attempt, any speaker change is user-initiated.
+    @State private var didAutoConnect = false
 
     var body: some View {
         Group {
@@ -24,7 +26,6 @@ struct PlayerView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .sheet(isPresented: $manager.showingAddSpeaker) { addSpeakerSheet }
         .onAppear { manager.loadSavedState() }
     }
 
@@ -38,48 +39,6 @@ struct PlayerView: View {
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(.hidden, for: .navigationBar)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Menu {
-                            Button { manager.showingAddSpeaker = true } label: {
-                                Label("Enter IP Manually", systemImage: "keyboard")
-                            }
-                            Button { manager.rescan() } label: {
-                                Label("Rescan Network", systemImage: "arrow.clockwise")
-                            }
-
-                            Divider()
-
-                            if SonosAuth.shared.isLoggedIn {
-                                Button(role: .destructive) {
-                                    SonosAuth.shared.logout()
-                                } label: {
-                                    Label("Disconnect Sonos Account", systemImage: "person.crop.circle.badge.minus")
-                                }
-                            } else {
-                                Button {
-                                    isConnectingSonos = true
-                                    Task {
-                                        let window = UIApplication.shared.connectedScenes
-                                            .compactMap { $0 as? UIWindowScene }
-                                            .first?.windows.first
-                                        await SonosAuth.shared.startLogin(from: window)
-                                        if SonosAuth.shared.isLoggedIn {
-                                            await manager.resolveCloudGroupId()
-                                            await manager.refreshState()
-                                        }
-                                        isConnectingSonos = false
-                                    }
-                                } label: {
-                                    Label("Connect Sonos Account", systemImage: "person.crop.circle.badge.plus")
-                                }
-                                .disabled(isConnectingSonos)
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                    }
-                }
         }
         .scrollContentBackground(.hidden)
     }
@@ -109,6 +68,12 @@ struct PlayerView: View {
     private var speakersHomeView: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 20) {
+                // Surfaced when probe found no viable backend — user is
+                // off-LAN and not signed in to Sonos Cloud (or cloud group
+                // hasn't resolved). Tap-to-refresh runs another probe.
+                if manager.isSpeakerUnreachable {
+                    unreachableBanner
+                }
                 if manager.groupStatuses.isEmpty {
                     HStack {
                         Spacer()
@@ -164,7 +129,24 @@ struct PlayerView: View {
 
                 Spacer(minLength: 20)
             }
-            .padding(.top, 4)
+            // Home tab has no navigation title, so without a top inset the
+            // first speaker card hugs the status bar and leaves the lower
+            // half of the screen visually empty. A 48pt pad breathes the
+            // group cards away from the notch while still letting taller
+            // lists flow off the bottom normally.
+            .padding(.top, 48)
+        }
+        // Single source of truth for the "we're driving via Sonos Cloud"
+        // affordance. Floats at the top-left inside the breathing space
+        // above the first speaker card, so it doesn't push the cards
+        // down. Not scroll-linked by design — the connection state is
+        // relevant regardless of where you've scrolled to.
+        .overlay(alignment: .topLeading) {
+            if manager.transportBackend == .cloud {
+                remoteModePill
+                    .padding(.leading, 16)
+                    .padding(.top, 16)
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             ungroupZone
@@ -188,6 +170,49 @@ struct PlayerView: View {
         .onAppear {
             Task { await manager.refreshAllGroupStatuses() }
         }
+    }
+
+    private var remoteModePill: some View {
+        Label("Remote", systemImage: "cloud.fill")
+            .labelStyle(.titleAndIcon)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.8))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.white.opacity(0.12), in: Capsule())
+            .accessibilityLabel("Controlling via Sonos Cloud")
+    }
+
+    private var unreachableBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.title3)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Speaker unreachable")
+                    .font(.subheadline.weight(.semibold))
+                Text("Pull down to retry.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+                Task { _ = await manager.probeBackend() }
+            } label: {
+                if manager.isProbing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal)
+        .padding(.top, 8)
     }
 
     private var ungroupZone: some View {
@@ -262,7 +287,7 @@ struct PlayerView: View {
                 .font(.title2.bold())
                 .padding(.bottom, 6)
 
-            if manager.discovery.isScanning {
+            if manager.discovery.isScanning && manager.discovery.discoveredSpeakers.isEmpty {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("Searching your network…")
@@ -279,9 +304,18 @@ struct PlayerView: View {
                 .buttonStyle(.bordered)
                 .padding(.bottom, 20)
             } else {
-                Text("Select a speaker to get started:")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                    .padding(.bottom, 16)
+                // Speakers found → we auto-connect to the first coordinator
+                // so the user lands on the player straight away. All other
+                // speakers still show up via topology once we're in. Tapping
+                // a specific row below still works as an explicit override.
+                HStack(spacing: 8) {
+                    if manager.isLoading {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(autoConnectMessage)
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 16)
             }
 
             if !manager.discovery.discoveredSpeakers.isEmpty {
@@ -350,44 +384,36 @@ struct PlayerView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: manager.discovery.discoveredSpeakers.count)
         .animation(.easeInOut(duration: 0.25), value: showManualEntry)
-    }
-
-    // MARK: - Add Speaker Sheet
-
-    private var addSpeakerSheet: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                TextField("Speaker IP Address", text: $newSpeakerIP)
-                    .textFieldStyle(.roundedBorder).keyboardType(.decimalPad)
-                Button {
-                    Task {
-                        await manager.addSpeaker(ip: newSpeakerIP)
-                        if manager.errorMessage == nil {
-                            manager.showingAddSpeaker = false
-                            newSpeakerIP = ""
-                        }
-                    }
-                } label: {
-                    if manager.isLoading { ProgressView().frame(maxWidth: .infinity) }
-                    else { Text("Connect").frame(maxWidth: .infinity) }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(newSpeakerIP.isEmpty || manager.isLoading)
-                if let error = manager.errorMessage {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                }
-                Spacer()
-            }
-            .padding()
-            .navigationTitle("Add Speaker")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { manager.showingAddSpeaker = false }
-                }
-            }
+        .onChange(of: manager.discovery.discoveredSpeakers.count) { _, _ in
+            attemptAutoConnect()
         }
+        .onAppear { attemptAutoConnect() }
     }
+
+    /// Picks the first coordinator from discovery and connects immediately.
+    /// Safe to call repeatedly — the `didAutoConnect` latch + `isLoading` /
+    /// `isConfigured` guards stop duplicate attempts.
+    private func attemptAutoConnect() {
+        guard !didAutoConnect,
+              !manager.isConfigured,
+              !manager.isLoading,
+              let preferred = manager.discovery.discoveredSpeakers.first(where: \.isCoordinator)
+                  ?? manager.discovery.discoveredSpeakers.first
+        else { return }
+        didAutoConnect = true
+        Task { await manager.connectFromDiscovery(preferred) }
+    }
+
+    private var autoConnectMessage: String {
+        let speakers = manager.discovery.discoveredSpeakers
+        let target = speakers.first(where: \.isCoordinator) ?? speakers.first
+        if manager.isLoading, let name = target?.name {
+            return "Connecting to \(name)…"
+        }
+        let n = speakers.count
+        return n == 1 ? "Found 1 speaker" : "Found \(n) speakers"
+    }
+
 }
 
 // MARK: - Speaker Group Card
@@ -1520,9 +1546,21 @@ struct MiniPlayerBar: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(manager.trackInfo?.title ?? "Not Playing")
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(manager.trackInfo?.title ?? "Not Playing")
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        // Only the unreachable warning remains inline — the
+                        // cloud/remote affordance lives exclusively on the
+                        // Home speakers list so the mini-player stays quiet
+                        // in the common case.
+                        if let glyph = backendMiniGlyph {
+                            Image(systemName: glyph.name)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(glyph.tint)
+                                .accessibilityLabel(glyph.label)
+                        }
+                    }
                     Text(manager.trackInfo?.artist ?? "—")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1583,6 +1621,19 @@ struct MiniPlayerBar: View {
                     }
                 }
         )
+    }
+
+    /// Mini-player only lights up when the speaker is genuinely unreachable
+    /// (no LAN, no cloud). Cloud mode is signaled instead by the pill at the
+    /// top-left of the Home speakers list so we don't stamp a glyph onto
+    /// every track title while remote-controlling normally.
+    private var backendMiniGlyph: (name: String, tint: Color, label: String)? {
+        switch manager.transportBackend {
+        case .unknown where manager.isConfigured:
+            return ("wifi.exclamationmark", .orange, "Speaker unreachable")
+        default:
+            return nil
+        }
     }
 }
 
