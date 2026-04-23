@@ -65,7 +65,7 @@ final class SearchManager {
         guard !hasProbed else { return }
 
         if !linkedAccounts.isEmpty {
-            print("[Search] Using \(linkedAccounts.count) cached linked accounts")
+            SonosLog.debug(.search, "Using \(linkedAccounts.count) cached linked accounts")
             buildServiceIdMapping()
             hasProbed = true
             return
@@ -80,7 +80,7 @@ final class SearchManager {
 
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
-            print("[Search] No Sonos Cloud auth, cannot detect services")
+            SonosLog.info(.search, "No Sonos Cloud auth, cannot detect services")
             isProbing = false
             hasProbed = true
             return
@@ -91,9 +91,9 @@ final class SearchManager {
                 token: token, householdId: householdId)
             linkedAccounts = accounts
             persistAccounts(accounts)
-            print("[Search] Cloud API detected \(accounts.count) linked services:")
+            SonosLog.info(.search, "Cloud API detected \(accounts.count) linked services")
             for a in accounts {
-                print("[Search]   \(a.nickname ?? a.serviceId ?? "?") (service-id=\(a.serviceId ?? "?"))")
+                SonosLog.debug(.search, "  \(a.nickname ?? a.serviceId ?? "?") (service-id=\(a.serviceId ?? "?"))")
             }
 
             let saved = UserDefaults.standard.dictionary(forKey: Self.enabledKey) as? [String: Bool] ?? [:]
@@ -102,7 +102,7 @@ final class SearchManager {
                 serviceEnabled[sid] = saved[sid] ?? true
             }
         } catch {
-            print("[Search] Cloud API detection failed: \(error)")
+            SonosLog.error(.search, "Cloud API detection failed: \(error)")
         }
 
         buildServiceIdMapping()
@@ -131,7 +131,7 @@ final class SearchManager {
             guard let sid = account.serviceId else { continue }
             serviceEnabled[sid] = saved[sid] ?? true
         }
-        print("[Search] Restored \(accounts.count) cached linked accounts")
+        SonosLog.debug(.search, "Restored \(accounts.count) cached linked accounts")
     }
 
     func setServiceEnabled(serviceId: String, enabled: Bool) {
@@ -172,7 +172,7 @@ final class SearchManager {
     }
 
     var groupedFavorites: [FavoriteGroup] {
-        let order: [BrowseItem.FavoriteCategory] = [.playlist, .album, .artist, .station, .collection]
+        let order: [BrowseItem.FavoriteCategory] = [.playlist, .album, .song, .artist, .station, .collection]
         var dict: [BrowseItem.FavoriteCategory: [BrowseItem]] = [:]
         for item in favorites {
             let cat = item.favoriteCategory
@@ -209,12 +209,12 @@ final class SearchManager {
             }) {
                 cloudToLocalSid[cloudId] = match.id
                 localToCloudSid[match.id] = cloudId
-                print("[Search] Mapped Cloud \(cloudId) (\(account.displayName)) → local sid \(match.id)")
+                SonosLog.debug(.search, "Mapped Cloud \(cloudId) (\(account.displayName)) → local sid \(match.id)")
             }
 
             if let username = account.username, !username.isEmpty {
                 cloudServiceUsername[cloudId] = username
-                print("[Search] Username for \(cloudId): \(username)")
+                SonosLog.debug(.search, "Username for \(cloudId): \(username)")
             }
         }
     }
@@ -227,11 +227,131 @@ final class SearchManager {
         localToCloudSid[sid]
     }
 
+    /// **Prefer the typed factory methods** (`makeArtistItem`, `makeAlbumItem`,
+    /// `makePlaylistItem`, `makeTrackItem`, `makeStationItem`) over calling this
+    /// directly — they guarantee `uri` / `cloudType` / `isContainer` agree.
+    /// This wrapper exists only for low-level callers that already have a raw
+    /// `type` string (e.g. tests, dynamic dispatch, internal helpers).
     func buildPlayableURIPublic(objectId: String, serviceId: String,
                                 accountId: String, type: String,
                                 mimeType: String? = nil) -> String? {
         buildPlayableURI(objectId: objectId, serviceId: serviceId,
                          accountId: accountId, type: type, mimeType: mimeType)
+    }
+
+    // MARK: - Typed BrowseItem Factories
+    //
+    // Single source of truth: each Cloud object kind binds together its
+    // `cloudType` raw string, URI scheme, metadata prefix, and `isContainer`
+    // flag. Always construct navigation/playback BrowseItems through these
+    // factories so the four fields can never drift apart (which previously
+    // caused artist favorites to be saved with a `x-sonosapi-radio:` URI).
+
+    /// Cloud Music API object kind. Drives URI scheme, metadata prefix, and
+    /// `isContainer` for every BrowseItem we hand to playback / favorites.
+    enum CloudObjectType: String {
+        case artist     = "ARTIST"
+        case album      = "ALBUM"
+        case playlist   = "PLAYLIST"
+        case track      = "TRACK"
+        case program    = "PROGRAM"     // radio station
+        case collection = "COLLECTION"  // library folder
+
+        /// Whether browsing this object should expand into multiple tracks
+        /// when added to the queue.
+        var isContainer: Bool {
+            switch self {
+            case .album, .playlist, .collection: return true
+            case .artist, .track, .program:      return false
+            }
+        }
+
+        /// Value of `<r:type>` Sonos expects in a favorite's outer DIDL.
+        /// Artists (and other pure-container "bookmark" favorites) must use
+        /// `shortcut`; directly-playable items use `instantPlay`. Using the
+        /// wrong value causes SOAP fault 803 — verified by dumping existing
+        /// favorites added via the official Sonos app.
+        var favoriteRType: String {
+            switch self {
+            case .artist, .collection: return "shortcut"
+            case .album, .playlist, .track, .program: return "instantPlay"
+            }
+        }
+
+        /// Whether the outer favorite DIDL should include a `<res>` element
+        /// carrying the real URI. Artist favorites use an empty `<res></res>`
+        /// (Sonos derives navigation from the inner resMD); everything else
+        /// carries the real playable URI.
+        var emitsFavoriteRes: Bool {
+            switch self {
+            case .artist, .collection: return false
+            case .album, .playlist, .track, .program: return true
+            }
+        }
+    }
+
+    /// Build an artist BrowseItem suitable for navigation, "Add to Sonos
+    /// Favorites", and `isFavorited` matching.
+    func makeArtistItem(objectId: String, name: String, artURL: String? = nil,
+                        cloudServiceId: String, accountId: String) -> BrowseItem {
+        makeCloudItem(type: .artist, objectId: objectId, title: name,
+                      artist: "", album: "", artURL: artURL,
+                      mimeType: nil,
+                      cloudServiceId: cloudServiceId, accountId: accountId)
+    }
+
+    func makeAlbumItem(objectId: String, title: String, artist: String,
+                       artURL: String? = nil,
+                       cloudServiceId: String, accountId: String) -> BrowseItem {
+        makeCloudItem(type: .album, objectId: objectId, title: title,
+                      artist: artist, album: title, artURL: artURL,
+                      mimeType: nil,
+                      cloudServiceId: cloudServiceId, accountId: accountId)
+    }
+
+    func makePlaylistItem(objectId: String, title: String, artist: String = "",
+                          artURL: String? = nil,
+                          cloudServiceId: String, accountId: String) -> BrowseItem {
+        makeCloudItem(type: .playlist, objectId: objectId, title: title,
+                      artist: artist, album: "", artURL: artURL,
+                      mimeType: nil,
+                      cloudServiceId: cloudServiceId, accountId: accountId)
+    }
+
+    func makeTrackItem(objectId: String, title: String, artist: String,
+                       album: String = "", artURL: String? = nil,
+                       mimeType: String? = nil,
+                       cloudServiceId: String, accountId: String) -> BrowseItem {
+        makeCloudItem(type: .track, objectId: objectId, title: title,
+                      artist: artist, album: album, artURL: artURL,
+                      mimeType: mimeType,
+                      cloudServiceId: cloudServiceId, accountId: accountId)
+    }
+
+    /// Build a station/radio BrowseItem (e.g. an artist radio program). Use
+    /// `makeArtistItem` instead if you want to navigate to the artist page.
+    func makeStationItem(objectId: String, title: String, artistName: String = "",
+                         artURL: String? = nil,
+                         cloudServiceId: String, accountId: String) -> BrowseItem {
+        makeCloudItem(type: .program, objectId: objectId, title: title,
+                      artist: artistName, album: "", artURL: artURL,
+                      mimeType: nil,
+                      cloudServiceId: cloudServiceId, accountId: accountId)
+    }
+
+    private func makeCloudItem(type: CloudObjectType, objectId: String,
+                               title: String, artist: String, album: String,
+                               artURL: String?, mimeType: String?,
+                               cloudServiceId: String, accountId: String) -> BrowseItem {
+        let uri = buildPlayableURI(
+            objectId: objectId, serviceId: cloudServiceId,
+            accountId: accountId, type: type.rawValue, mimeType: mimeType)
+        return BrowseItem(
+            id: objectId, title: title, artist: artist, album: album,
+            albumArtURL: artURL, uri: uri,
+            isContainer: type.isContainer,
+            serviceId: cloudToLocalSid[cloudServiceId],
+            cloudType: type.rawValue)
     }
 
     struct FavoriteCloudIds {
@@ -331,7 +451,7 @@ final class SearchManager {
         }
 
         guard let sid = localSid, let cloudSid = localToCloudSid[sid] else {
-            print("[parseCloudIds] Fallback: no localSid from desc tag")
+            SonosLog.debug(.parseCloudIds, "Fallback: no localSid from desc tag")
             return nil
         }
 
@@ -349,12 +469,12 @@ final class SearchManager {
         }
 
         guard let oid = objectId else {
-            print("[parseCloudIds] Fallback: no objectId from item id attribute")
+            SonosLog.debug(.parseCloudIds, "Fallback: no objectId from item id attribute")
             return nil
         }
 
         let accountId = extractedSn ?? "2"
-        print("[parseCloudIds] Fallback success: objectId=\(oid), cloudSid=\(cloudSid), sn=\(accountId)")
+        SonosLog.debug(.parseCloudIds, "Fallback success: objectId=\(oid), cloudSid=\(cloudSid), sn=\(accountId)")
         return FavoriteCloudIds(objectId: oid, cloudServiceId: cloudSid, accountId: accountId)
     }
 
@@ -421,7 +541,7 @@ final class SearchManager {
 
             let serviceIds = activeServiceIds
             guard !serviceIds.isEmpty else {
-                print("[Search] No active services to search")
+                SonosLog.info(.search, "No active services to search")
                 searchResults = []
                 isSearching = false
                 return
@@ -429,13 +549,13 @@ final class SearchManager {
 
             guard let token = await SonosAuth.shared.validAccessToken(),
                   let householdId = SonosAuth.shared.householdId else {
-                print("[Search] No Cloud auth for search")
+                SonosLog.info(.search, "No Cloud auth for search")
                 searchResults = []
                 isSearching = false
                 return
             }
 
-            print("[Search] Searching \(serviceIds.count) services for: \(query)")
+            SonosLog.debug(.search, "Searching \(serviceIds.count) services for: \(query)")
             lastSearchQuery = query
             serviceDetailResults = [:]
 
@@ -463,7 +583,7 @@ final class SearchManager {
                         let sid = serviceResult.serviceId ?? UUID().uuidString
                         results.append(ServiceSearchResult(
                             id: sid, serviceName: serviceName, items: items))
-                        print("[Search] \(serviceName) → \(items.count) results")
+                        SonosLog.debug(.search, "\(serviceName) → \(items.count) results")
                     }
                 }
 
@@ -471,7 +591,7 @@ final class SearchManager {
                 searchResults = results
             } catch {
                 if !Task.isCancelled {
-                    print("[Search] Cloud search failed: \(error)")
+                    SonosLog.error(.search, "Cloud search failed: \(error)")
                     searchResults = []
                 }
             }
@@ -503,18 +623,18 @@ final class SearchManager {
             let allResources = response.allResources
             let typeCounts = Dictionary(grouping: allResources, by: { $0.type ?? "nil" })
                 .mapValues { $0.count }
-            print("[Search] Detail \(serviceId) types: \(typeCounts)")
+            SonosLog.debug(.search, "Detail \(serviceId) types: \(typeCounts)")
 
             let serviceName = allResources.first?.id?.serviceName ?? account.displayName
             let items = allResources.compactMap { resource -> BrowseItem? in
                 convertToBrowseItem(resource, serviceId: serviceId, accountId: aid)
             }
-            print("[Search] Detail \(serviceName) → \(items.count) results")
+            SonosLog.debug(.search, "Detail \(serviceName) → \(items.count) results")
 
             serviceDetailResults[serviceId] = ServiceSearchResult(
                 id: serviceId, serviceName: serviceName, items: items)
         } catch {
-            print("[Search] Detail search failed for \(serviceId): \(error)")
+            SonosLog.error(.search, "Detail search failed for \(serviceId): \(error)")
         }
     }
 
@@ -566,7 +686,7 @@ final class SearchManager {
 
         let localSid = cloudToLocalSid[cloudSid]
         guard let sid = localSid else {
-            print("[Search] No local sid mapping for Cloud serviceId \(cloudSid)")
+            SonosLog.debug(.search, "No local sid mapping for Cloud serviceId \(cloudSid)")
             return nil
         }
 
@@ -582,6 +702,10 @@ final class SearchManager {
             return "x-rincon-cpcontainer:1006206c\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
         case "PROGRAM":
             return "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
+        case "ARTIST":
+            // Artist favorites use a cp-container URI with the bare object id
+            // (no `10052064` prefix on the URI side — only the metadata id has it).
+            return "x-rincon-cpcontainer:\(encodedId)?sid=\(sid)&flags=8300&sn=\(aid)"
         default:
             return nil
         }
@@ -634,12 +758,23 @@ final class SearchManager {
         return nil
     }
 
-    /// Build DIDL metadata for Cloud search results matching the official Sonos app format.
+    /// Build DIDL metadata for Cloud items, matching the exact field sets the
+    /// official Sonos app produces for each `cloudType`. Sonos validates the
+    /// inner DIDL strictly when used as `<r:resMD>` for favorites — including
+    /// fields that don't belong (e.g. `<upnp:albumArtURI>` inside an ARTIST
+    /// item, or empty `<dc:creator>` tags) causes SOAP fault 803.
+    ///
+    /// Per-type field whitelist (verified by dumping existing favorites):
+    ///   - ARTIST   → title, class, desc                          (minimal)
+    ///   - PROGRAM  → title, class, desc                          (radio station)
+    ///   - ALBUM    → title, class, albumArtURI, creator, albumArtist, desc
+    ///   - PLAYLIST → title, class, albumArtURI, creator, desc
+    ///   - TRACK    → title, class, albumArtURI, creator, album, albumArtist, desc
     private func buildCloudDIDLMetadata(item: BrowseItem, localSid: Int, accountId: String) -> String {
         let cloudSid = localToCloudSid[localSid] ?? String(localSid)
         let username = cloudServiceUsername[cloudSid] ?? "X_#Svc\(cloudSid)-0-Token"
         let desc = "SA_RINCON\(cloudSid)_\(username)"
-        print("[Playback] desc=\(desc) cloudType=\(item.cloudType ?? "nil")")
+        SonosLog.debug(.playback, "desc=\(desc) cloudType=\(item.cloudType ?? "nil")")
 
         let encodedObjId = item.id.replacingOccurrences(of: ":", with: "%3a")
         let cloudType = item.cloudType ?? "TRACK"
@@ -647,27 +782,40 @@ final class SearchManager {
         let (itemId, upnpClass, xmlTag) = metadataComponents(
             cloudType: cloudType, objectId: encodedObjId, uri: item.uri)
 
-        let t = SonosAPI.escapeXML(item.title)
-        let a = SonosAPI.escapeXML(item.artist)
-        let al = SonosAPI.escapeXML(item.album)
-        let art = SonosAPI.escapeXML(item.albumArtURL ?? "")
+        var inner = "<dc:title>\(SonosAPI.escapeXML(item.title))</dc:title>" +
+            "<upnp:class>\(upnpClass)</upnp:class>"
 
-        return """
-        <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" \
-        xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" \
-        xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" \
-        xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">\
-        <\(xmlTag) id="\(itemId)" parentID="" restricted="true">\
-        <dc:title>\(t)</dc:title>\
-        <upnp:class>\(upnpClass)</upnp:class>\
-        <upnp:albumArtURI>\(art)</upnp:albumArtURI>\
-        <dc:creator>\(a)</dc:creator>\
-        <upnp:album>\(al)</upnp:album>\
-        <r:albumArtist>\(a)</r:albumArtist>\
-        <desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">\
-        \(desc)</desc>\
-        </\(xmlTag)></DIDL-Lite>
-        """
+        // Only TRACK/ALBUM/PLAYLIST carry rich metadata in their inner DIDL.
+        // ARTIST and PROGRAM use a bare-minimum item (title + class + desc).
+        let wantsRichMetadata = (cloudType == "TRACK" ||
+                                 cloudType == "ALBUM" ||
+                                 cloudType == "PLAYLIST")
+        if wantsRichMetadata {
+            if let art = item.albumArtURL, !art.isEmpty {
+                inner += "<upnp:albumArtURI>\(SonosAPI.escapeXML(art))</upnp:albumArtURI>"
+            }
+            if !item.artist.isEmpty {
+                let a = SonosAPI.escapeXML(item.artist)
+                inner += "<dc:creator>\(a)</dc:creator>"
+                // Tracks and albums identify their album-artist; pure playlists don't.
+                if cloudType != "PLAYLIST" {
+                    inner += "<r:albumArtist>\(a)</r:albumArtist>"
+                }
+            }
+            // Only TRACK items reference their containing album by name.
+            if cloudType == "TRACK", !item.album.isEmpty {
+                inner += "<upnp:album>\(SonosAPI.escapeXML(item.album))</upnp:album>"
+            }
+        }
+        inner += "<desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">\(desc)</desc>"
+
+        return "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
+            "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
+            "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" " +
+            "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">" +
+            "<\(xmlTag) id=\"\(itemId)\" parentID=\"\" restricted=\"true\">" +
+            inner +
+            "</\(xmlTag)></DIDL-Lite>"
     }
 
     /// Returns (itemId, upnpClass, xmlTag) based on cloudType.
@@ -692,6 +840,13 @@ final class SearchManager {
         case "PROGRAM":
             return ("000c206c\(objectId)",
                     "object.item.audioItem.audioBroadcast.#programRadio",
+                    "item")
+        case "ARTIST":
+            // Sonos Apple Music artist favorites use prefix `10052064` and
+            // wrap the metadata in <item> (not <container>) — verified by
+            // dumping existing artist favorites added via the official app.
+            return ("10052064\(objectId)",
+                    "object.container.person.musicArtist",
                     "item")
         default:
             return (objectId, "object.item.audioItem.musicTrack", "item")
@@ -764,12 +919,12 @@ final class SearchManager {
         }
 
         guard let params = extractServiceParams() else {
-            print("[Playback] Could not find service params from existing favorites")
+            SonosLog.debug(.playback, "Could not find service params from existing favorites")
             return "x-rincon-cpcontainer:\(itemId)"
         }
 
         let uri = "x-rincon-cpcontainer:\(itemId)?sid=\(params.sid)&flags=\(flags)&sn=\(params.sn)"
-        print("[Playback] Constructed full URI: \(uri)")
+        SonosLog.debug(.playback, "Constructed full URI: \(uri)")
         return uri
     }
 
@@ -779,11 +934,10 @@ final class SearchManager {
             return
         }
 
-        print("[Playback] ====== playNow START ======")
-        print("[Playback] title=\(item.title) isContainer=\(item.isContainer) id=\(item.id)")
+        SonosLog.debug(.playback, "playNow START title=\(item.title) isContainer=\(item.isContainer) id=\(item.id)")
 
         guard let ip = manager.selectedSpeaker?.playbackIP else {
-            print("[Playback] ABORT: no speaker IP")
+            SonosLog.error(.playback, "ABORT: no speaker IP")
             return
         }
 
@@ -801,16 +955,16 @@ final class SearchManager {
         }
 
         guard let uri = playURI, !uri.isEmpty else {
-            print("[Playback] ABORT: no URI. metaXML=\(item.metaXML ?? "nil")")
+            SonosLog.error(.playback, "ABORT: no URI. metaXML=\(item.metaXML ?? "nil")")
             return
         }
 
-        print("[Playback] uri=\(uri)")
-        print("[Playback] metadata=\(playMeta.prefix(300))")
+        SonosLog.debug(.playback, "uri=\(uri)")
+        SonosLog.debug(.playback, "metadata=\(playMeta.prefix(300))")
 
         do {
             guard let uuid = manager.selectedSpeaker?.id else {
-                print("[Playback] ABORT: no speaker UUID")
+                SonosLog.error(.playback, "ABORT: no speaker UUID")
                 return
             }
 
@@ -819,43 +973,45 @@ final class SearchManager {
                 || uri.contains("x-sonosapi-hls:")
 
             if isRadio {
-                print("[Playback] → Direct transport (radio/stream, queue preserved)")
+                SonosLog.debug(.playback, "→ Direct transport (radio/stream, queue preserved)")
                 try await SonosAPI.setAVTransportURI(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.play(ip: ip)
-                print("[Playback] Radio playback started")
+                SonosLog.info(.playback, "Radio playback started")
             } else if item.isContainer || uri.contains("x-rincon-cpcontainer:") {
-                print("[Playback] → Queue approach (container)")
+                SonosLog.debug(.playback, "→ Queue approach (container)")
                 try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
                 let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
                 try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
                 try await SonosAPI.play(ip: ip)
-                print("[Playback] Queue playback started at track \(trackNr)")
+                SonosLog.info(.playback, "Queue playback started at track \(trackNr)")
             } else {
-                print("[Playback] → Queue approach (single track)")
+                SonosLog.debug(.playback, "→ Queue approach (single track)")
                 try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
                 let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
                 try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
                 try await SonosAPI.play(ip: ip)
-                print("[Playback] Queue playback started at track \(trackNr)")
+                SonosLog.info(.playback, "Queue playback started at track \(trackNr)")
             }
 
             try? await Task.sleep(for: .milliseconds(1500))
 
+            #if DEBUG
             if let rawXML = try? await SonosAPI.getRawPositionInfo(ip: ip) {
                 let curURI = SonosAPI.extractTag("TrackURI", from: rawXML) ?? "nil"
                 let curMeta = SonosAPI.extractTag("TrackMetaData", from: rawXML) ?? "nil"
-                print("[Playback] DIAGNOSTIC currentURI=\(SonosAPI.decodeXMLEntities(curURI))")
-                print("[Playback] DIAGNOSTIC currentMeta=\(SonosAPI.decodeXMLEntities(curMeta))")
+                SonosLog.debug(.playback, "DIAGNOSTIC currentURI=\(SonosAPI.decodeXMLEntities(curURI))")
+                SonosLog.debug(.playback, "DIAGNOSTIC currentMeta=\(SonosAPI.decodeXMLEntities(curMeta))")
             }
+            #endif
 
             await manager.refreshState()
         } catch {
-            print("[Playback] FAILED: \(error)")
+            SonosLog.error(.playback, "FAILED: \(error)")
             errorMessage = error.localizedDescription
         }
-        print("[Playback] ====== playNow END ======")
+        SonosLog.debug(.playback, "playNow END")
     }
 
 
@@ -868,17 +1024,16 @@ final class SearchManager {
     /// Searches Cloud API for the artist's Apple Music ID, then constructs radio:ra.{id}
     /// — the same format the official Sonos app uses for "Start Station".
     func startStation(item: BrowseItem, manager: SonosManager) async {
-        print("[Station] ====== startStation START ======")
-        print("[Station] title=\"\(item.title)\" id=\(item.id)")
+        SonosLog.debug(.station, "startStation START title=\"\(item.title)\" id=\(item.id)")
 
         guard let ip = manager.selectedSpeaker?.playbackIP else {
-            print("[Station] ABORT: no speaker IP")
+            SonosLog.error(.station, "ABORT: no speaker IP")
             return
         }
 
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
-            print("[Station] ABORT: no Cloud auth")
+            SonosLog.error(.station, "ABORT: no Cloud auth")
             errorMessage = "Not logged in to Sonos Cloud"
             return
         }
@@ -886,7 +1041,7 @@ final class SearchManager {
         if !hasProbed { await probeLinkedServices() }
         let serviceIds = activeServiceIds
         guard !serviceIds.isEmpty else {
-            print("[Station] ABORT: no active services")
+            SonosLog.error(.station, "ABORT: no active services")
             errorMessage = "No music services linked"
             return
         }
@@ -914,7 +1069,7 @@ final class SearchManager {
                         cloudServiceId = svc.serviceId
                         cloudAccountId = svc.accountId
                         artistArtURL = resource.images?.first?.url ?? item.albumArtURL
-                        print("[Station] Matched artist: \(name), id=\(objId)")
+                        SonosLog.debug(.station, "Matched artist: \(name), id=\(objId)")
                         break
                     }
                 }
@@ -931,7 +1086,7 @@ final class SearchManager {
                             cloudServiceId = svc.serviceId
                             cloudAccountId = svc.accountId
                             artistArtURL = resource.images?.first?.url ?? item.albumArtURL
-                            print("[Station] Fallback artist: \(resource.name ?? "?"), id=\(objId)")
+                            SonosLog.debug(.station, "Fallback artist: \(resource.name ?? "?"), id=\(objId)")
                             break
                         }
                     }
@@ -940,7 +1095,7 @@ final class SearchManager {
             }
 
             guard let amArtistId = artistId else {
-                print("[Station] No artist found in search results")
+                SonosLog.error(.station, "No artist found in search results")
                 errorMessage = "Could not find artist \(item.title)"
                 return
             }
@@ -948,7 +1103,7 @@ final class SearchManager {
             // Construct radio:ra.{artist_id} — this is the "Start Station" format
             let radioId = "radio:ra.\(amArtistId)"
             let stationName = "\(item.title) Radio"
-            print("[Station] Constructed radioId=\(radioId) name=\"\(stationName)\"")
+            SonosLog.debug(.station, "Constructed radioId=\(radioId) name=\"\(stationName)\"")
 
             await playRadioStation(
                 ip: ip, radioId: radioId, stationName: stationName,
@@ -956,10 +1111,10 @@ final class SearchManager {
                 artURL: artistArtURL, resMD: item.resMD, manager: manager)
 
         } catch {
-            print("[Station] Failed: \(error)")
+            SonosLog.error(.station, "Failed: \(error)")
             errorMessage = error.localizedDescription
         }
-        print("[Station] ====== startStation END ======")
+        SonosLog.debug(.station, "startStation END")
     }
 
     /// Play a selected radio station option (from station picker).
@@ -983,7 +1138,7 @@ final class SearchManager {
 
         let encodedId = radioId.replacingOccurrences(of: ":", with: "%3a")
         let radioURI = "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(sn)"
-        print("[Station] radioURI=\(radioURI)")
+        SonosLog.debug(.station, "radioURI=\(radioURI)")
 
         let descTag: String
         if let fromMD = extractDescTag(from: resMD ?? "") {
@@ -993,7 +1148,7 @@ final class SearchManager {
         } else {
             descTag = "SA_RINCON\(sid)_X_#Svc\(sid)-\(sn)-Token"
         }
-        print("[Station] descTag=\(descTag)")
+        SonosLog.debug(.station, "descTag=\(descTag)")
         let artTag = artURL.map { "<upnp:albumArtURI>\(SonosAPI.escapeXML($0))</upnp:albumArtURI>" } ?? ""
         let radioMeta = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
             "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
@@ -1008,30 +1163,30 @@ final class SearchManager {
             "\(descTag)</desc></item></DIDL-Lite>"
 
         do {
-            print("[Station] → SetAVTransportURI...")
+            SonosLog.debug(.station, "→ SetAVTransportURI...")
             try await SonosAPI.setAVTransportURI(ip: ip, uri: radioURI, metadata: radioMeta)
             try? await Task.sleep(for: .milliseconds(800))
-            print("[Station] → Play...")
+            SonosLog.debug(.station, "→ Play...")
             try await SonosAPI.play(ip: ip)
 
             try? await Task.sleep(for: .milliseconds(2500))
             let state = try? await SonosAPI.getTransportInfo(ip: ip)
             let newInfo = try? await SonosAPI.getPositionInfo(ip: ip)
-            print("[Station] after: transport=\(state?.rawValue ?? "nil") title=\"\(newInfo?.title ?? "nil")\"")
+            SonosLog.debug(.station, "after: transport=\(state?.rawValue ?? "nil") title=\"\(newInfo?.title ?? "nil")\"")
 
             if state == .stopped {
-                print("[Station] Still STOPPED — retrying Play after extra delay...")
+                SonosLog.info(.station, "Still STOPPED — retrying Play after extra delay...")
                 try? await Task.sleep(for: .milliseconds(2000))
                 try await SonosAPI.play(ip: ip)
                 try? await Task.sleep(for: .milliseconds(2000))
                 let retryState = try? await SonosAPI.getTransportInfo(ip: ip)
                 let retryInfo = try? await SonosAPI.getPositionInfo(ip: ip)
-                print("[Station] retry: transport=\(retryState?.rawValue ?? "nil") title=\"\(retryInfo?.title ?? "nil")\"")
+                SonosLog.debug(.station, "retry: transport=\(retryState?.rawValue ?? "nil") title=\"\(retryInfo?.title ?? "nil")\"")
             }
 
             await manager.refreshState()
         } catch {
-            print("[Station] UPnP playback FAILED: \(error)")
+            SonosLog.error(.station, "UPnP playback FAILED: \(error)")
             errorMessage = error.localizedDescription
         }
     }
@@ -1059,32 +1214,56 @@ final class SearchManager {
         guard let ip = manager.selectedSpeaker?.playbackIP,
               let uri = item.uri else { return false }
         let meta = playbackMetadata(for: item)
+
+        // Dispatch the correct outer-DIDL shape per cloudType. CloudObjectType
+        // is the single source of truth for r:type (shortcut vs instantPlay),
+        // whether <res> carries the real URI, and what goes in r:description.
+        let type = item.cloudType.flatMap { CloudObjectType(rawValue: $0) }
+        let rType = type?.favoriteRType ?? "instantPlay"
+        let emitRes = type?.emitsFavoriteRes ?? true
+        let description = (type?.emitsFavoriteRes ?? true)
+            ? item.title                           // instantPlay: title
+            : (serviceDisplayName(for: item) ?? "Apple Music")  // shortcut: service name
+
+        SonosLog.debug(.favorites, "Adding '\(item.title)' (type=\(item.cloudType ?? "nil"), rType=\(rType)) — uri=\(uri)")
+        SonosLog.debug(.favorites, "metadata=\(meta)")
         do {
-            try await SonosAPI.addToFavorites(ip: ip, title: item.title, uri: uri,
-                                              metadata: meta, albumArtURI: item.albumArtURL)
-            print("[Favorites] Added '\(item.title)' to Sonos Favorites")
+            try await SonosAPI.addToFavorites(
+                ip: ip, title: item.title, uri: uri, metadata: meta,
+                albumArtURI: item.albumArtURL,
+                rType: rType, description: description, emitRes: emitRes)
+            SonosLog.info(.favorites, "Added '\(item.title)' to Sonos Favorites")
+            try? await Task.sleep(for: .milliseconds(500))
             await refreshFavorites(ip: ip)
             return true
         } catch {
-            print("[Favorites] Failed to add: \(error)")
+            SonosLog.error(.favorites, "Failed to add: \(error)")
             errorMessage = error.localizedDescription
             return false
         }
     }
 
+    /// Display name of the music service a BrowseItem belongs to (e.g.
+    /// "Apple Music", "Spotify") — used as `<r:description>` for shortcut-
+    /// type favorites like artists. Returns nil if the service isn't linked.
+    private func serviceDisplayName(for item: BrowseItem) -> String? {
+        guard let localSid = item.serviceId else { return nil }
+        return musicServices.first { $0.id == localSid }?.name
+    }
+
     func removeFromFavorites(item: BrowseItem, manager: SonosManager) async -> Bool {
         guard let ip = manager.selectedSpeaker?.playbackIP else { return false }
         guard let favItem = findFavorite(matching: item) else {
-            print("[Favorites] Item '\(item.title)' not found in favorites")
+            SonosLog.info(.favorites, "Item '\(item.title)' not found in favorites")
             return false
         }
         do {
             try await SonosAPI.removeFromFavorites(ip: ip, objectId: favItem.id)
-            print("[Favorites] Removed '\(item.title)' from Sonos Favorites")
+            SonosLog.info(.favorites, "Removed '\(item.title)' from Sonos Favorites")
             await refreshFavorites(ip: ip)
             return true
         } catch {
-            print("[Favorites] Failed to remove: \(error)")
+            SonosLog.error(.favorites, "Failed to remove: \(error)")
             errorMessage = error.localizedDescription
             return false
         }
@@ -1109,9 +1288,11 @@ final class SearchManager {
 
     private func refreshFavorites(ip: String) async {
         do {
-            favorites = try await SonosAPI.browseFavorites(ip: ip)
+            let items = try await SonosAPI.browseFavorites(ip: ip)
+            SonosLog.info(.favorites, "Refresh: \(items.count) items loaded")
+            favorites = items
         } catch {
-            print("[Favorites] Refresh failed: \(error)")
+            SonosLog.error(.favorites, "Refresh failed: \(error)")
         }
     }
 }

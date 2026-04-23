@@ -81,7 +81,7 @@ struct AlbumDetailView: View {
                 themeColor = color
             }
         } catch {
-            print("[AlbumDetail] Cover image load failed: \(error)")
+            SonosLog.error(.albumDetail, "Cover image load failed: \(error)")
         }
     }
 
@@ -149,9 +149,7 @@ struct AlbumDetailView: View {
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
 
-                Text(artistName)
-                    .font(.subheadline)
-                    .foregroundStyle(themeColor ?? .secondary)
+                artistLabel
 
                 if let total = response?.tracks?.total {
                     Text(albumSubtitle(trackCount: total))
@@ -163,6 +161,47 @@ struct AlbumDetailView: View {
             .padding(.horizontal)
         }
         .padding(.top, 20)
+    }
+
+    @ViewBuilder
+    private var artistLabel: some View {
+        let label = Text(artistName)
+            .font(.subheadline)
+            .foregroundStyle(themeColor ?? .secondary)
+
+        if let nav = artistBrowseItem {
+            NavigationLink {
+                ArtistDetailView(artistItem: nav, searchManager: searchManager, manager: manager)
+            } label: {
+                label
+            }
+            .buttonStyle(.plain)
+        } else {
+            label
+        }
+    }
+
+    /// Resolve the album's primary artist into a navigable `BrowseItem`.
+    /// Uses the first track whose primary artist matches the album subtitle so
+    /// "Various Artists" / featured artist tracks don't hijack the link.
+    private var artistBrowseItem: BrowseItem? {
+        let preferred = tracks.first { $0.artists?.first?.name == artistName } ?? tracks.first
+        guard let track = preferred,
+              let artist = track.artists?.first,
+              let rawId = artist.id,
+              let serviceId = track.resource?.id?.serviceId,
+              let accountId = track.resource?.id?.accountId else { return nil }
+
+        // `id` looks like "appleMusic:artist:12345#…" — strip the suffix and take the last component.
+        let base = rawId.firstIndex(of: "#").map { String(rawId[..<$0]) } ?? rawId
+        guard let objectId = base.components(separatedBy: ":").last,
+              !objectId.isEmpty else { return nil }
+
+        return searchManager.makeArtistItem(
+            objectId: objectId,
+            name: artist.name ?? artistName,
+            cloudServiceId: serviceId,
+            accountId: accountId)
     }
 
     private func albumSubtitle(trackCount: Int) -> String {
@@ -397,29 +436,24 @@ struct AlbumDetailView: View {
 
     private func browseItemFromTrack(_ track: SonosCloudAPI.AlbumTrackItem) -> BrowseItem {
         let objectId = track.resource?.id?.objectId ?? ""
-        let serviceId = track.resource?.id?.serviceId
-        let accountId = track.resource?.id?.accountId
+        let title = track.title ?? ""
+        let trackArtist = track.artists?.first?.name ?? artistName
         let mimeType = track.resource?.defaults.flatMap { defaults -> String? in
             guard let data = Data(base64Encoded: defaults),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
             return json["mimeType"] as? String
         }
 
-        return BrowseItem(
-            id: objectId,
-            title: track.title ?? "",
-            artist: track.artists?.first?.name ?? artistName,
-            album: albumTitle,
-            albumArtURL: coverURL,
-            uri: (serviceId != nil && accountId != nil)
-                ? searchManager.buildPlayableURIPublic(
-                    objectId: objectId, serviceId: serviceId!,
-                    accountId: accountId!, type: "TRACK", mimeType: mimeType)
-                : nil,
-            isContainer: false,
-            serviceId: serviceId.flatMap { searchManager.localSid(forCloudServiceId: $0) },
-            cloudType: "TRACK"
-        )
+        guard let serviceId = track.resource?.id?.serviceId,
+              let accountId = track.resource?.id?.accountId else {
+            return BrowseItem(id: objectId, title: title, artist: trackArtist,
+                              album: albumTitle, albumArtURL: coverURL,
+                              isContainer: false)
+        }
+        return searchManager.makeTrackItem(
+            objectId: objectId, title: title, artist: trackArtist,
+            album: albumTitle, artURL: coverURL, mimeType: mimeType,
+            cloudServiceId: serviceId, accountId: accountId)
     }
 
     // MARK: - Data Loading
@@ -456,9 +490,9 @@ struct AlbumDetailView: View {
                 albumId: albumItem.id)
             isLoading = false
         } catch is CancellationError {
-            print("[AlbumDetail] Load cancelled (tab switch)")
+            SonosLog.debug(.albumDetail, "Load cancelled (tab switch)")
         } catch {
-            print("[AlbumDetail] Load failed: \(error)")
+            SonosLog.error(.albumDetail, "Load failed: \(error)")
             errorText = error.localizedDescription
             isLoading = false
         }

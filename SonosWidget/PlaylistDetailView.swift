@@ -82,7 +82,7 @@ struct PlaylistDetailView: View {
                 themeColor = color
             }
         } catch {
-            print("[PlaylistDetail] Cover image load failed: \(error)")
+            SonosLog.error(.playlistDetail, "Cover image load failed: \(error)")
         }
     }
 
@@ -506,29 +506,26 @@ struct PlaylistDetailView: View {
 
     private func browseItemFromTrack(_ track: SonosCloudAPI.AlbumTrackItem) -> BrowseItem {
         let objectId = track.resource?.id?.objectId ?? ""
-        let serviceId = track.resource?.id?.serviceId
-        let accountId = track.resource?.id?.accountId
+        let title = track.title ?? ""
+        let trackArtist = track.artists?.first?.name ?? ""
+        let albumName = track.subtitle ?? ""
+        let artURL = track.images?.tile1x1
         let mimeType = track.resource?.defaults.flatMap { defaults -> String? in
             guard let data = Data(base64Encoded: defaults),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
             return json["mimeType"] as? String
         }
 
-        return BrowseItem(
-            id: objectId,
-            title: track.title ?? "",
-            artist: track.artists?.first?.name ?? "",
-            album: track.subtitle ?? "",
-            albumArtURL: track.images?.tile1x1,
-            uri: (serviceId != nil && accountId != nil)
-                ? searchManager.buildPlayableURIPublic(
-                    objectId: objectId, serviceId: serviceId!,
-                    accountId: accountId!, type: "TRACK", mimeType: mimeType)
-                : nil,
-            isContainer: false,
-            serviceId: serviceId.flatMap { searchManager.localSid(forCloudServiceId: $0) },
-            cloudType: "TRACK"
-        )
+        guard let serviceId = track.resource?.id?.serviceId,
+              let accountId = track.resource?.id?.accountId else {
+            return BrowseItem(id: objectId, title: title, artist: trackArtist,
+                              album: albumName, albumArtURL: artURL,
+                              isContainer: false)
+        }
+        return searchManager.makeTrackItem(
+            objectId: objectId, title: title, artist: trackArtist,
+            album: albumName, artURL: artURL, mimeType: mimeType,
+            cloudServiceId: serviceId, accountId: accountId)
     }
 
     // MARK: - Data Loading
@@ -588,9 +585,9 @@ struct PlaylistDetailView: View {
             }
             allPagesLoaded = true
         } catch is CancellationError {
-            print("[PlaylistDetail] Load cancelled (tab switch)")
+            SonosLog.debug(.playlistDetail, "Load cancelled (tab switch)")
         } catch {
-            print("[PlaylistDetail] Load failed: \(error)")
+            SonosLog.error(.playlistDetail, "Load failed: \(error)")
             errorText = error.localizedDescription
             isLoading = false
         }
@@ -620,12 +617,12 @@ struct PlaylistDetailView: View {
                 if newItems.isEmpty { break }
                 extraTracks.append(contentsOf: newItems)
                 offset += newItems.count
-                print("[PlaylistDetail] Pagination: loaded \(offset)/\(total)")
+                SonosLog.debug(.playlistDetail, "Pagination: loaded \(offset)/\(total)")
             } catch is CancellationError {
-                print("[PlaylistDetail] Pagination cancelled")
+                SonosLog.debug(.playlistDetail, "Pagination cancelled")
                 return
             } catch {
-                print("[PlaylistDetail] Pagination error at offset \(offset): \(error)")
+                SonosLog.error(.playlistDetail, "Pagination error at offset \(offset): \(error)")
                 break
             }
         }

@@ -26,7 +26,7 @@ final class SonosAuth: NSObject {
     @MainActor
     func startLogin(from window: UIWindow?) async -> Bool {
         guard !Self.clientID.isEmpty else {
-            print("[SonosAuth] clientID not configured")
+            SonosLog.error(.sonosAuth, "clientID not configured")
             return false
         }
 
@@ -122,7 +122,7 @@ final class SonosAuth: NSObject {
             SharedStorage.cloudTokenExpiry = expiry
             return true
         } catch {
-            print("[SonosAuth] token request failed: \(error)")
+            SonosLog.error(.sonosAuth, "token request failed: \(error)")
             return false
         }
     }

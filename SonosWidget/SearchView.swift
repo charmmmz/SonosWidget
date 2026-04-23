@@ -2,7 +2,7 @@ import SwiftUI
 
 struct SearchView: View {
     @Bindable var manager: SonosManager
-    @State var searchManager = SearchManager()
+    @Bindable var searchManager: SearchManager
     @State private var searchText = ""
     @State private var showServiceSettings = false
     /// nil = "All", otherwise the serviceId string
@@ -319,44 +319,45 @@ struct SearchView: View {
     private func albumNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "ALBUM" { return item }
         guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
-        return BrowseItem(
-            id: ids.objectId, title: item.title, artist: item.artist,
-            album: item.title, albumArtURL: item.albumArtURL,
-            uri: item.uri, isContainer: true,
-            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
-            cloudType: "ALBUM")
+        var nav = searchManager.makeAlbumItem(
+            objectId: ids.objectId, title: item.title, artist: item.artist,
+            artURL: item.albumArtURL,
+            cloudServiceId: ids.cloudServiceId, accountId: ids.accountId)
+        // Preserve the Sonos browse URI as a safety net (it's known to work for
+        // this specific favorite); fall back to the factory-built URI if absent.
+        if let original = item.uri { nav.uri = original }
+        return nav
     }
 
     /// Build a BrowseItem suitable for ArtistDetailView from a Favorite.
     private func artistNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "ARTIST" { return item }
         guard let ids = searchManager.parseCloudIds(from: item) else {
-            print("[artistNavItem] parseCloudIds failed for '\(item.title)' uri=\(item.uri ?? "nil") resMD=\(item.resMD?.prefix(200) ?? "nil")")
+            SonosLog.debug(.navItem, "artistNavItem parseCloudIds failed for '\(item.title)' uri=\(item.uri ?? "nil") resMD=\(item.resMD?.prefix(200) ?? "nil")")
             return nil
         }
-        print("[artistNavItem] OK for '\(item.title)' objectId=\(ids.objectId) cloudSid=\(ids.cloudServiceId)")
-        return BrowseItem(
-            id: ids.objectId, title: item.title, artist: "",
-            album: "", albumArtURL: item.albumArtURL,
-            uri: nil, isContainer: false,
-            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
-            cloudType: "ARTIST")
+        return searchManager.makeArtistItem(
+            objectId: ids.objectId, name: item.title, artURL: item.albumArtURL,
+            cloudServiceId: ids.cloudServiceId, accountId: ids.accountId)
     }
 
     private func playlistNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "PLAYLIST" { return item }
         guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
-        return BrowseItem(
-            id: ids.objectId, title: item.title, artist: item.artist,
-            album: "", albumArtURL: item.albumArtURL,
-            uri: item.uri, isContainer: true,
-            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
-            cloudType: "PLAYLIST")
+        var nav = searchManager.makePlaylistItem(
+            objectId: ids.objectId, title: item.title, artist: item.artist,
+            artURL: item.albumArtURL,
+            cloudServiceId: ids.cloudServiceId, accountId: ids.accountId)
+        if let original = item.uri { nav.uri = original }
+        return nav
     }
 
     private func collectionNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "COLLECTION" { return item }
         if let ids = searchManager.parseCloudIds(from: item) {
+            // COLLECTION is a generic library folder; we don't have a dedicated
+            // factory because there's no canonical URI scheme — preserve the
+            // existing browse URI verbatim and just normalize the type fields.
             return BrowseItem(
                 id: ids.objectId, title: item.title, artist: item.artist,
                 album: "", albumArtURL: item.albumArtURL,
@@ -386,6 +387,7 @@ struct SearchView: View {
             switch cat {
             case .playlist: return item.artist.isEmpty ? "Playlist" : item.artist
             case .album: return item.artist.isEmpty ? "Album" : "\(item.artist) · Album"
+            case .song: return item.artist.isEmpty ? "Song" : "\(item.artist) · Song"
             case .station: return "Station"
             case .artist: return "Artist"
             case .collection: return item.artist.isEmpty ? "Collection" : item.artist
@@ -394,10 +396,11 @@ struct SearchView: View {
 
         if !subtitle.isEmpty {
             HStack(spacing: 4) {
-                if cat == .station || cat == .playlist || cat == .album || cat == .collection {
-                    Image(systemName: "applelogo")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
+                if cat == .station || cat == .playlist || cat == .album || cat == .collection || cat == .song {
+                    FavoritesStreamingGlyph(
+                        cloudServiceId: item.serviceId.flatMap { searchManager.cloudServiceId(forLocalSid: $0) },
+                        size: 10
+                    )
                 }
                 Text(subtitle)
                     .font(.caption2)
@@ -412,6 +415,7 @@ struct SearchView: View {
         switch cat {
         case .playlist: return "music.note.list"
         case .album: return "opticaldisc"
+        case .song: return "music.note"
         case .station: return "antenna.radiowaves.left.and.right"
         case .artist: return "person.fill"
         case .collection: return "folder.fill"
@@ -520,10 +524,9 @@ struct SearchView: View {
     private var serviceTabBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                serviceTabChip(id: nil, label: "All", icon: nil)
+                serviceTabChip(id: nil, label: "All")
                 ForEach(searchManager.searchResults) { group in
-                    serviceTabChip(id: group.id, label: group.serviceName,
-                                   icon: serviceTabIcon(group.id))
+                    serviceTabChip(id: group.id, label: group.serviceName)
                 }
             }
             .padding(.horizontal)
@@ -531,16 +534,21 @@ struct SearchView: View {
         }
     }
 
-    private func serviceTabChip(id: String?, label: String, icon: String?) -> some View {
+    private func serviceTabChip(id: String?, label: String) -> some View {
         let isSelected = selectedServiceTab == id
         return Button {
             withAnimation(.easeInOut(duration: 0.2)) { selectedServiceTab = id }
             if let id { Task { await searchManager.loadServiceDetail(serviceId: id) } }
         } label: {
             HStack(spacing: 6) {
-                if let icon {
-                    Image(systemName: icon)
-                        .font(.caption)
+                if let id {
+                    CloudServiceBrandMark(
+                        cloudServiceId: id,
+                        displayNameHint: label,
+                        dimension: 14,
+                        symbolUsesTitle3: false,
+                        lightChromeBackdrop: isSelected
+                    )
                 }
                 Text(label)
                     .font(.subheadline.weight(.medium))
@@ -552,17 +560,6 @@ struct SearchView: View {
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
-    }
-
-    private func serviceTabIcon(_ serviceId: String) -> String? {
-        switch serviceId {
-        case "52231": return "apple.logo"
-        case "3079": return "bolt.horizontal.circle.fill"
-        case "42247": return "cloud.fill"
-        case "49671": return "waveform.circle.fill"
-        case "77575": return "antenna.radiowaves.left.and.right"
-        default: return "music.note"
-        }
     }
 
     // MARK: Grouped Results
@@ -630,11 +627,13 @@ struct SearchView: View {
 
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
-                if let icon = serviceTabIcon(group.id) {
-                    Image(systemName: icon)
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                }
+                CloudServiceBrandMark(
+                    cloudServiceId: group.id,
+                    displayNameHint: group.serviceName,
+                    dimension: 26,
+                    symbolUsesTitle3: true
+                )
+                    .foregroundStyle(.secondary)
                 Text(group.serviceName)
                     .font(.title2.bold())
                 Image(systemName: "chevron.right")
@@ -1135,34 +1134,31 @@ struct FavoriteCategoryDetailView: View {
     private func albumNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "ALBUM" { return item }
         guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
-        return BrowseItem(
-            id: ids.objectId, title: item.title, artist: item.artist,
-            album: item.title, albumArtURL: item.albumArtURL,
-            uri: item.uri, isContainer: true,
-            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
-            cloudType: "ALBUM")
+        var nav = searchManager.makeAlbumItem(
+            objectId: ids.objectId, title: item.title, artist: item.artist,
+            artURL: item.albumArtURL,
+            cloudServiceId: ids.cloudServiceId, accountId: ids.accountId)
+        if let original = item.uri { nav.uri = original }
+        return nav
     }
 
     private func artistNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "ARTIST" { return item }
         guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
-        return BrowseItem(
-            id: ids.objectId, title: item.title, artist: "",
-            album: "", albumArtURL: item.albumArtURL,
-            uri: nil, isContainer: false,
-            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
-            cloudType: "ARTIST")
+        return searchManager.makeArtistItem(
+            objectId: ids.objectId, name: item.title, artURL: item.albumArtURL,
+            cloudServiceId: ids.cloudServiceId, accountId: ids.accountId)
     }
 
     private func playlistNavItem(for item: BrowseItem) -> BrowseItem? {
         if item.cloudType == "PLAYLIST" { return item }
         guard let ids = searchManager.parseCloudIds(from: item) else { return nil }
-        return BrowseItem(
-            id: ids.objectId, title: item.title, artist: item.artist,
-            album: "", albumArtURL: item.albumArtURL,
-            uri: item.uri, isContainer: true,
-            serviceId: searchManager.localSid(forCloudServiceId: ids.cloudServiceId),
-            cloudType: "PLAYLIST")
+        var nav = searchManager.makePlaylistItem(
+            objectId: ids.objectId, title: item.title, artist: item.artist,
+            artURL: item.albumArtURL,
+            cloudServiceId: ids.cloudServiceId, accountId: ids.accountId)
+        if let original = item.uri { nav.uri = original }
+        return nav
     }
 
     private func collectionNavItem(for item: BrowseItem) -> BrowseItem? {
@@ -1194,6 +1190,7 @@ struct FavoriteCategoryDetailView: View {
         switch category {
         case .playlist: return "music.note.list"
         case .album: return "opticaldisc"
+        case .song: return "music.note"
         case .station: return "antenna.radiowaves.left.and.right"
         case .artist: return "person.fill"
         case .collection: return "folder.fill"
@@ -1206,6 +1203,7 @@ struct FavoriteCategoryDetailView: View {
             switch category {
             case .playlist: return item.artist.isEmpty ? "Playlist" : item.artist
             case .album: return item.artist.isEmpty ? "Album" : "\(item.artist) · Album"
+            case .song: return item.artist.isEmpty ? "Song" : "\(item.artist) · Song"
             case .station: return "Station"
             case .artist: return "Artist"
             case .collection: return item.artist.isEmpty ? "Collection" : item.artist
@@ -1214,10 +1212,11 @@ struct FavoriteCategoryDetailView: View {
 
         if !subtitle.isEmpty {
             HStack(spacing: 4) {
-                if category == .station || category == .playlist || category == .album {
-                    Image(systemName: "applelogo")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
+                if category == .station || category == .playlist || category == .album || category == .song {
+                    FavoritesStreamingGlyph(
+                        cloudServiceId: item.serviceId.flatMap { searchManager.cloudServiceId(forLocalSid: $0) },
+                        size: 10
+                    )
                 }
                 Text(subtitle)
                     .font(.caption2)
@@ -1344,7 +1343,7 @@ struct ServiceSettingsSheet: View {
     }
 
     private var sortedAccounts: [SonosCloudAPI.CloudMusicServiceAccount] {
-        let pinned: Set<String> = ["3079", "52231", "42247", "49671"]
+        let pinned: Set<String> = ["3079", "52231", "51463", "42247", "49671"]
         return searchManager.linkedAccounts.sorted { a, b in
             let aPinned = pinned.contains(a.serviceId ?? "")
             let bPinned = pinned.contains(b.serviceId ?? "")
@@ -1358,9 +1357,14 @@ struct ServiceSettingsSheet: View {
         let enabled = searchManager.serviceEnabled[sid] ?? true
 
         return HStack(spacing: 12) {
-            Image(systemName: serviceIcon(for: sid))
-                .font(.title3)
-                .foregroundStyle(enabled ? .green : .secondary)
+            CloudServiceBrandMark(
+                cloudServiceId: sid,
+                displayNameHint: account.displayName,
+                dimension: 24,
+                symbolUsesTitle3: true
+            )
+                .foregroundStyle(enabled ? .primary : .secondary)
+                .opacity(enabled ? 1 : 0.45)
                 .frame(width: 32)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -1383,14 +1387,4 @@ struct ServiceSettingsSheet: View {
         }
     }
 
-    private func serviceIcon(for serviceId: String) -> String {
-        switch serviceId {
-        case "3079": return "bolt.horizontal.circle.fill" // Spotify
-        case "52231": return "apple.logo" // Apple Music
-        case "42247": return "cloud.fill" // NetEase
-        case "49671": return "waveform.circle.fill" // Lizhi
-        case "77575": return "antenna.radiowaves.left.and.right" // Sonos Radio
-        default: return "music.note"
-        }
-    }
 }

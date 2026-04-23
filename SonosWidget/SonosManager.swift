@@ -772,26 +772,26 @@ final class SonosManager {
     func resolveCloudGroupId() async {
         guard let speaker = selectedSpeaker,
               let token = await SonosAuth.shared.validAccessToken() else {
-            print("[SonosCloud] resolveCloudGroupId skipped — speaker: \(selectedSpeaker?.name ?? "nil"), loggedIn: \(SonosAuth.shared.isLoggedIn)")
+            SonosLog.debug(.sonosCloud, "resolveCloudGroupId skipped — speaker: \(selectedSpeaker?.name ?? "nil"), loggedIn: \(SonosAuth.shared.isLoggedIn)")
             return
         }
 
         do {
             if SonosAuth.shared.householdId == nil {
                 let households = try await SonosCloudAPI.getHouseholds(token: token)
-                print("[SonosCloud] households: \(households.map { "\($0.id) (\($0.name ?? "?")" })")
+                SonosLog.debug(.sonosCloud, "households: \(households.map { "\($0.id) (\($0.name ?? "?")" })")
                 SonosAuth.shared.householdId = households.first?.id
             }
             guard let householdId = SonosAuth.shared.householdId else {
-                print("[SonosCloud] no householdId")
+                SonosLog.error(.sonosCloud, "no householdId")
                 return
             }
 
             let response = try await SonosCloudAPI.getGroups(token: token, householdId: householdId)
             let rincon = speaker.id
-            print("[SonosCloud] speaker id: \(rincon), name: \(speaker.name)")
-            print("[SonosCloud] groups: \(response.groups.map { "\($0.id) playerIds=\($0.playerIds)" })")
-            print("[SonosCloud] players: \(response.players.map { "\($0.id) name=\($0.name)" })")
+            SonosLog.debug(.sonosCloud, "speaker id: \(rincon), name: \(speaker.name)")
+            SonosLog.debug(.sonosCloud, "groups: \(response.groups.map { "\($0.id) playerIds=\($0.playerIds)" })")
+            SonosLog.debug(.sonosCloud, "players: \(response.players.map { "\($0.id) name=\($0.name)" })")
 
             cloudGroupId = response.groups.first(where: { group in
                 group.playerIds.contains(where: { $0.contains(rincon) || rincon.contains($0) })
@@ -805,16 +805,16 @@ final class SonosManager {
             }
 
             if let gid = cloudGroupId {
-                print("[SonosCloud] resolved cloudGroupId: \(gid)")
+                SonosLog.info(.sonosCloud, "resolved cloudGroupId: \(gid)")
                 SharedStorage.cloudGroupId = gid
             } else {
-                print("[SonosCloud] Could not match speaker \(speaker.name) (id: \(rincon)) to any cloud group")
+                SonosLog.error(.sonosCloud, "Could not match speaker \(speaker.name) (id: \(rincon)) to any cloud group")
             }
         } catch SonosCloudError.unauthorized {
-            print("[SonosCloud] unauthorized, refreshing token...")
+            SonosLog.info(.sonosCloud, "unauthorized, refreshing token...")
             _ = await SonosAuth.shared.refreshAccessToken()
         } catch {
-            print("[SonosCloud] resolveCloudGroupId error: \(error)")
+            SonosLog.error(.sonosCloud, "resolveCloudGroupId error: \(error)")
         }
     }
 
@@ -863,7 +863,7 @@ final class SonosManager {
             _ = await SonosAuth.shared.refreshAccessToken()
         } catch {
             lastEnrichedTrackKey = trackKey
-            print("[SonosCloud] playbackMetadata error: \(error)")
+            SonosLog.error(.sonosCloud, "playbackMetadata error: \(error)")
         }
     }
 
@@ -871,7 +871,7 @@ final class SonosManager {
         do {
             return try await SonosCloudAPI.getPlaybackMetadata(token: token, groupId: groupId)
         } catch SonosCloudError.httpError(410) {
-            print("[SonosCloud] playbackMetadata 410 — re-resolving cloudGroupId…")
+            SonosLog.info(.sonosCloud, "playbackMetadata 410 — re-resolving cloudGroupId…")
             cloudGroupId = nil
             await resolveCloudGroupId()
             guard let newGroupId = cloudGroupId else { throw SonosCloudError.groupNotFound }

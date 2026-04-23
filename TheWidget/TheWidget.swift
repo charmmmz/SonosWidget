@@ -253,11 +253,22 @@ struct SonosWidgetMediumView: View {
                                     .lineLimit(1)
                             }
                             if let quality = entry.audioQualityLabel {
-                                Text("IN \(quality.uppercased())")
-                                    .font(.system(size: 7, weight: .bold))
-                                    .tracking(0.8)
-                                    .foregroundStyle(.white.opacity(0.3))
-                                    .lineLimit(1)
+                                HStack(alignment: .center, spacing: 4) {
+                                    if let badge = AudioQuality.badgeImageName(forQualityLabel: quality) {
+                                        Image(badge)
+                                            .resizable()
+                                            .renderingMode(.template)
+                                            .foregroundStyle(.white.opacity(0.45))
+                                            .scaledToFit()
+                                            .frame(height: 8)
+                                            .accessibilityHidden(true)
+                                    }
+                                    Text("IN \(quality.uppercased())")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .tracking(0.8)
+                                        .foregroundStyle(.white.opacity(0.3))
+                                        .lineLimit(1)
+                                }
                             }
                         }
                         Spacer(minLength: 4)

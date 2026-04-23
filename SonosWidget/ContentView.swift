@@ -2,14 +2,15 @@ import SwiftUI
 
 struct ContentView: View {
     @State var manager = SonosManager()
+    @State var searchManager = SearchManager()
 
     var body: some View {
         TabView {
             Tab("Home", systemImage: "play.circle.fill") {
-                PlayerView(manager: manager)
+                PlayerView(manager: manager, searchManager: searchManager)
             }
             Tab("Search", systemImage: "magnifyingglass") {
-                SearchView(manager: manager)
+                SearchView(manager: manager, searchManager: searchManager)
             }
         }
         .tint(manager.albumArtDominantColor ?? .blue)
@@ -26,7 +27,7 @@ struct ContentView: View {
                 }()
 
                 if manager.isConfigured {
-                    NowPlayingOverlay(manager: manager)
+                    NowPlayingOverlay(manager: manager, searchManager: searchManager)
                         .offset(y: overlayY)
                         .allowsHitTesting(manager.showFullPlayer || manager.miniPlayerDragOffset < -5)
                 }

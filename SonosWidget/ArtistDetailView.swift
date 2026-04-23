@@ -73,7 +73,7 @@ struct ArtistDetailView: View {
                 themeColor = color
             }
         } catch {
-            print("[ArtistDetail] Header image load failed: \(error)")
+            SonosLog.error(.artistDetail, "Header image load failed: \(error)")
         }
     }
 
@@ -244,26 +244,19 @@ struct ArtistDetailView: View {
 
     private func browseItem(from item: SonosCloudAPI.ArtistSectionItem) -> BrowseItem {
         let objectId = item.resource?.id?.objectId ?? ""
-        let serviceId = item.resource?.id?.serviceId
-        let accountId = item.resource?.id?.accountId
-
-        return BrowseItem(
-            id: objectId,
-            title: item.title ?? "",
-            artist: artistName,
-            album: item.title ?? "",
-            albumArtURL: item.images?.tile1x1,
-            uri: serviceId.flatMap { sid in
-                accountId.flatMap { aid in
-                    searchManager.buildPlayableURIPublic(
-                        objectId: objectId, serviceId: sid,
-                        accountId: aid, type: "ALBUM")
-                }
-            },
-            isContainer: true,
-            serviceId: serviceId.flatMap { searchManager.localSid(forCloudServiceId: $0) },
-            cloudType: "ALBUM"
-        )
+        let title = item.title ?? ""
+        guard let serviceId = item.resource?.id?.serviceId,
+              let accountId = item.resource?.id?.accountId else {
+            // No cloud account → return a typeless placeholder so the row still
+            // shows up; tapping it will fail playback but not crash.
+            return BrowseItem(id: objectId, title: title, artist: artistName,
+                              album: title, albumArtURL: item.images?.tile1x1,
+                              isContainer: true)
+        }
+        return searchManager.makeAlbumItem(
+            objectId: objectId, title: title, artist: artistName,
+            artURL: item.images?.tile1x1,
+            cloudServiceId: serviceId, accountId: accountId)
     }
 
     // MARK: - Toast
@@ -315,7 +308,7 @@ struct ArtistDetailView: View {
         let accountId = searchManager.linkedAccounts
             .first { $0.serviceId == serviceId }?.accountId ?? "2"
 
-        print("[ArtistDetail] Loading artist: id=\(artistItem.id), serviceId=\(serviceId), accountId=\(accountId)")
+        SonosLog.debug(.artistDetail, "Loading artist: id=\(artistItem.id), serviceId=\(serviceId), accountId=\(accountId)")
 
         do {
             response = try await SonosCloudAPI.browseArtist(
@@ -324,9 +317,9 @@ struct ArtistDetailView: View {
                 artistId: artistItem.id)
             isLoading = false
         } catch is CancellationError {
-            print("[ArtistDetail] Load cancelled (tab switch)")
+            SonosLog.debug(.artistDetail, "Load cancelled (tab switch)")
         } catch {
-            print("[ArtistDetail] Browse failed (\(error)), trying search fallback for '\(artistItem.title)'")
+            SonosLog.info(.artistDetail, "Browse failed (\(error)), trying search fallback for '\(artistItem.title)'")
             await searchFallback(token: token, householdId: householdId,
                                  serviceId: serviceId, accountId: accountId)
         }
@@ -350,16 +343,16 @@ struct ArtistDetailView: View {
                 return
             }
 
-            print("[ArtistDetail] Search fallback: found artistId=\(correctId)")
+            SonosLog.debug(.artistDetail, "Search fallback: found artistId=\(correctId)")
             response = try await SonosCloudAPI.browseArtist(
                 token: token, householdId: householdId,
                 serviceId: serviceId, accountId: accountId,
                 artistId: correctId)
             isLoading = false
         } catch is CancellationError {
-            print("[ArtistDetail] Search fallback cancelled (tab switch)")
+            SonosLog.debug(.artistDetail, "Search fallback cancelled (tab switch)")
         } catch {
-            print("[ArtistDetail] Search fallback failed: \(error)")
+            SonosLog.error(.artistDetail, "Search fallback failed: \(error)")
             errorText = error.localizedDescription
             isLoading = false
         }
@@ -375,19 +368,10 @@ struct ArtistDetailView: View {
 
         playingItemId = "station"
 
-        let item = BrowseItem(
-            id: objectId,
-            title: "\(artistName) Station",
-            artist: artistName,
-            album: "",
-            albumArtURL: headerImageURL,
-            uri: searchManager.buildPlayableURIPublic(
-                objectId: objectId, serviceId: serviceId,
-                accountId: accountId, type: "PROGRAM"),
-            isContainer: false,
-            serviceId: searchManager.localSid(forCloudServiceId: serviceId),
-            cloudType: "PROGRAM"
-        )
+        let item = searchManager.makeStationItem(
+            objectId: objectId, title: "\(artistName) Station",
+            artistName: artistName, artURL: headerImageURL,
+            cloudServiceId: serviceId, accountId: accountId)
 
         Task {
             await searchManager.playNow(item: item, manager: manager)
@@ -402,7 +386,13 @@ struct ArtistDetailView: View {
                 if ok { isFavorited = false }
                 showToast(ok ? "Removed from Favorites" : "Failed to remove")
             } else {
-                let ok = await searchManager.addToFavorites(item: artistItem, manager: manager)
+                // Prefer the loaded artist header image (high-res from Apple
+                // Music) over whatever low-res or nil albumArtURL was passed
+                // in via navigation — this is the URL that ends up in
+                // <upnp:albumArtURI> and drives the favorite's cover art.
+                var itemForFav = artistItem
+                if let url = headerImageURL { itemForFav.albumArtURL = url }
+                let ok = await searchManager.addToFavorites(item: itemForFav, manager: manager)
                 if ok { isFavorited = true }
                 showToast(ok ? "Added to Favorites" : "Failed to add")
             }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PlayerView: View {
     @Bindable var manager: SonosManager
+    @Bindable var searchManager: SearchManager
     @State private var newSpeakerIP = ""
     @State private var showManualEntry = false
     @State private var isConnectingSonos = false
@@ -820,24 +821,31 @@ private struct GroupVolumeBar: View {
 
 struct NowPlayingOverlay: View {
     @Bindable var manager: SonosManager
+    var searchManager: SearchManager
     @State private var volumeSliderValue: Double = 0
     @State private var isDraggingVolume = false
     @State private var premuteVolume: Int?
     @State private var scrubPosition: TimeInterval = 0
     @State private var isScrubbing = false
     @State private var dragDownOffset: CGFloat = 0
+    @State private var nowPlayingInfo: SonosCloudAPI.NowPlayingResponse?
+    @State private var lastFetchedTrackURI: String?
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
-        GeometryReader { geo in
-            let isLandscape = geo.size.width > geo.size.height
-            if isLandscape {
-                landscapeLayout(geo: geo)
-            } else {
-                portraitLayout(geo: geo)
+        NavigationStack {
+            GeometryReader { geo in
+                let isLandscape = geo.size.width > geo.size.height
+                if isLandscape {
+                    landscapeLayout(geo: geo)
+                } else {
+                    portraitLayout(geo: geo)
+                }
             }
+            .background { artBackground }
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .navigationBarTitleDisplayMode(.inline)
         }
-        .background { artBackground }
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 6)
         .padding(.top, 4)
@@ -845,6 +853,17 @@ struct NowPlayingOverlay: View {
         .ignoresSafeArea(edges: .bottom)
         .onChange(of: manager.showFullPlayer) { _, isOpen in
             if !isOpen { dragDownOffset = 0 }
+        }
+        .onChange(of: manager.trackInfo?.trackURI) { _, newURI in
+            guard let uri = newURI, uri != lastFetchedTrackURI else { return }
+            lastFetchedTrackURI = uri
+            Task { await fetchNowPlaying(trackURI: uri) }
+        }
+        .task {
+            if let uri = manager.trackInfo?.trackURI, uri != lastFetchedTrackURI {
+                lastFetchedTrackURI = uri
+                await fetchNowPlaying(trackURI: uri)
+            }
         }
         .sheet(isPresented: $manager.showingSpeakerPicker) {
             SpeakerPickerView(manager: manager)
@@ -1078,10 +1097,104 @@ struct NowPlayingOverlay: View {
         VStack(spacing: 4) {
             Text(manager.trackInfo?.title ?? "Not Playing")
                 .font(.title3.bold()).foregroundStyle(.white).lineLimit(1)
-            Text(manager.trackInfo?.artist ?? "—")
-                .font(.body).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
-            Text(manager.trackInfo?.album ?? "")
-                .font(.subheadline).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
+
+            if let artistNav = artistBrowseItem {
+                NavigationLink {
+                    ArtistDetailView(artistItem: artistNav, searchManager: searchManager, manager: manager)
+                } label: {
+                    Text(manager.trackInfo?.artist ?? "—")
+                        .font(.body).foregroundStyle(manager.albumArtDominantColor ?? .white.opacity(0.7)).lineLimit(1)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(manager.trackInfo?.artist ?? "—")
+                    .font(.body).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+            }
+
+            if let albumNav = albumBrowseItem {
+                NavigationLink {
+                    AlbumDetailView(albumItem: albumNav, searchManager: searchManager, manager: manager)
+                } label: {
+                    Text(manager.trackInfo?.album ?? "")
+                        .font(.subheadline).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text(manager.trackInfo?.album ?? "")
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
+            }
+        }
+    }
+
+    // MARK: - Now Playing Navigation
+
+    private var artistBrowseItem: BrowseItem? {
+        guard let artist = nowPlayingInfo?.item?.artists?.first,
+              let objectId = artist.objectId,
+              let serviceId = nowPlayingInfo?.item?.resource?.id?.serviceId,
+              let accountId = nowPlayingInfo?.item?.resource?.id?.accountId else { return nil }
+        return searchManager.makeArtistItem(
+            objectId: objectId, name: artist.name ?? "",
+            cloudServiceId: serviceId, accountId: accountId)
+    }
+
+    private var albumBrowseItem: BrowseItem? {
+        guard let item = nowPlayingInfo?.item,
+              let albumId = item.albumId,
+              let serviceId = item.resource?.id?.serviceId,
+              let accountId = item.resource?.id?.accountId else { return nil }
+        return searchManager.makeAlbumItem(
+            objectId: albumId,
+            title: item.albumName ?? manager.trackInfo?.album ?? "",
+            artist: manager.trackInfo?.artist ?? "",
+            artURL: nowPlayingInfo?.images?.tile1x1,
+            cloudServiceId: serviceId, accountId: accountId)
+    }
+
+    private func fetchNowPlaying(trackURI: String) async {
+        guard let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else { return }
+
+        var localSid: Int?
+        var accountId = "2"
+        if let queryPart = trackURI.split(separator: "?").last {
+            for param in queryPart.split(separator: "&") {
+                let kv = param.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                if kv[0] == "sid" { localSid = Int(kv[1]) }
+                if kv[0] == "sn" { accountId = String(kv[1]) }
+            }
+        }
+
+        guard let sid = localSid,
+              let cloudSid = searchManager.cloudServiceId(forLocalSid: sid) else {
+            nowPlayingInfo = nil
+            return
+        }
+
+        var objectId = trackURI.split(separator: "?").first.map(String.init) ?? trackURI
+        if let colonRange = objectId.range(of: ":", options: .backwards) {
+            objectId = String(objectId[colonRange.upperBound...])
+        }
+        if objectId.count > 8, objectId.prefix(8).allSatisfy({ $0.isHexDigit }) {
+            objectId = String(objectId.dropFirst(8))
+        }
+        if let dotIdx = objectId.lastIndex(of: "."), dotIdx > objectId.startIndex {
+            let ext = String(objectId[dotIdx...])
+            if [".mp4", ".mp3", ".flac", ".unknown", ".m4a", ".ogg"].contains(ext.lowercased()) {
+                objectId = String(objectId[..<dotIdx])
+            }
+        }
+
+        do {
+            let response = try await SonosCloudAPI.nowPlaying(
+                token: token, householdId: householdId,
+                serviceId: cloudSid, accountId: accountId,
+                trackObjectId: objectId)
+            nowPlayingInfo = response
+        } catch {
+            SonosLog.error(.nowPlaying, "Fetch failed: \(error)")
+            nowPlayingInfo = nil
         }
     }
 
@@ -1111,7 +1224,15 @@ struct NowPlayingOverlay: View {
                 Spacer()
 
                 if let quality = manager.trackInfo?.audioQuality {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
+                        if let badge = quality.badgeAssetImageName {
+                            Image(badge)
+                                .resizable()
+                                .renderingMode(.template)
+                                .scaledToFit()
+                                .frame(height: 11)
+                                .accessibilityLabel(quality.label)
+                        }
                         Text(quality.label)
                             .font(.system(size: 9, weight: .semibold))
                         if let sr = quality.sampleRate, let bd = quality.bitDepth {

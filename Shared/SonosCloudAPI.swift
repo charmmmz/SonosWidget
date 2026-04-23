@@ -125,7 +125,7 @@ enum SonosCloudAPI {
         let http = response as? HTTPURLResponse
         let status = http?.statusCode ?? -1
         let text = String(data: data, encoding: .utf8) ?? ""
-        print("[CloudAPI] integrations/registrations → HTTP \(status), \(data.count)B: \(text.prefix(2000))")
+        SonosLog.debug(.cloudAPI, "integrations/registrations → HTTP \(status), \(data.count)B: \(text.prefix(2000))")
 
         guard (200...299).contains(status) else {
             throw SonosCloudError.httpError(status)
@@ -149,7 +149,7 @@ enum SonosCloudAPI {
                 }
             }
         }
-        print("[CloudAPI] Could not parse integrations/registrations response")
+        SonosLog.error(.cloudAPI, "Could not parse integrations/registrations response")
         return []
     }
 
@@ -225,7 +225,7 @@ enum SonosCloudAPI {
             "?query=\(encodedTerm)&services=\(idsParam)"
 
         guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
-        print("[CloudSearch] GET \(urlStr.prefix(200))")
+        SonosLog.debug(.cloudSearch, "GET \(urlStr.prefix(200))")
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -234,12 +234,12 @@ enum SonosCloudAPI {
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        print("[CloudSearch] HTTP \(statusCode), \(data.count) bytes")
+        SonosLog.debug(.cloudSearch, "HTTP \(statusCode), \(data.count) bytes")
 
         if statusCode == 401 { throw SonosCloudError.unauthorized }
         if !(200...299).contains(statusCode) {
             let body = String(data: data, encoding: .utf8) ?? ""
-            print("[CloudSearch] Error body: \(body.prefix(500))")
+            SonosLog.error(.cloudSearch, "Error body: \(body.prefix(500))")
             throw SonosCloudError.httpError(statusCode)
         }
 
@@ -257,7 +257,7 @@ enum SonosCloudAPI {
             "/search?query=\(encodedTerm)&count=\(count)"
 
         guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
-        print("[CloudSearch] GET \(urlStr.prefix(200))")
+        SonosLog.debug(.cloudSearch, "GET \(urlStr.prefix(200))")
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -266,12 +266,12 @@ enum SonosCloudAPI {
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        print("[CloudSearch] HTTP \(statusCode), \(data.count) bytes")
+        SonosLog.debug(.cloudSearch, "HTTP \(statusCode), \(data.count) bytes")
 
         if statusCode == 401 { throw SonosCloudError.unauthorized }
         if !(200...299).contains(statusCode) {
             let body = String(data: data, encoding: .utf8) ?? ""
-            print("[CloudSearch] Error body: \(body.prefix(500))")
+            SonosLog.error(.cloudSearch, "Error body: \(body.prefix(500))")
             throw SonosCloudError.httpError(statusCode)
         }
 
@@ -392,7 +392,7 @@ enum SonosCloudAPI {
             "/accounts/\(accountId)/artists/\(encodedArtist)/browse?muse2=true"
 
         guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
-        print("[CloudAPI] browseArtist GET \(urlStr.prefix(200))")
+        SonosLog.debug(.cloudAPI, "browseArtist GET \(urlStr.prefix(200))")
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -401,7 +401,7 @@ enum SonosCloudAPI {
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        print("[CloudAPI] browseArtist HTTP \(statusCode), \(data.count) bytes")
+        SonosLog.debug(.cloudAPI, "browseArtist HTTP \(statusCode), \(data.count) bytes")
 
         if statusCode == 401 { throw SonosCloudError.unauthorized }
         if !(200...299).contains(statusCode) {
@@ -475,7 +475,7 @@ enum SonosCloudAPI {
             "/accounts/\(accountId)/albums/\(encodedAlbum)/browse?muse2=true&count=\(count)"
 
         guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
-        print("[CloudAPI] browseAlbum GET \(urlStr.prefix(200))")
+        SonosLog.debug(.cloudAPI, "browseAlbum GET \(urlStr.prefix(200))")
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -484,7 +484,7 @@ enum SonosCloudAPI {
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        print("[CloudAPI] browseAlbum HTTP \(statusCode), \(data.count) bytes")
+        SonosLog.debug(.cloudAPI, "browseAlbum HTTP \(statusCode), \(data.count) bytes")
 
         if statusCode == 401 { throw SonosCloudError.unauthorized }
         if !(200...299).contains(statusCode) {
@@ -507,7 +507,7 @@ enum SonosCloudAPI {
         if offset > 0 { urlStr += "&offset=\(offset)" }
 
         guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
-        print("[CloudAPI] browsePlaylist GET \(urlStr.prefix(200))")
+        SonosLog.debug(.cloudAPI, "browsePlaylist GET \(urlStr.prefix(200))")
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -516,7 +516,7 @@ enum SonosCloudAPI {
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        print("[CloudAPI] browsePlaylist HTTP \(statusCode), \(data.count) bytes")
+        SonosLog.debug(.cloudAPI, "browsePlaylist HTTP \(statusCode), \(data.count) bytes")
 
         if statusCode == 401 { throw SonosCloudError.unauthorized }
         if !(200...299).contains(statusCode) {
@@ -539,7 +539,7 @@ enum SonosCloudAPI {
         if offset > 0 { urlStr += "&offset=\(offset)" }
 
         guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
-        print("[CloudAPI] browseContainer GET \(urlStr.prefix(200))")
+        SonosLog.debug(.cloudAPI, "browseContainer GET \(urlStr.prefix(200))")
 
         var request = URLRequest(url: url, timeoutInterval: 15)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -548,7 +548,7 @@ enum SonosCloudAPI {
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        print("[CloudAPI] browseContainer HTTP \(statusCode), \(data.count) bytes")
+        SonosLog.debug(.cloudAPI, "browseContainer HTTP \(statusCode), \(data.count) bytes")
 
         if statusCode == 401 { throw SonosCloudError.unauthorized }
         if !(200...299).contains(statusCode) {
@@ -556,6 +556,78 @@ enum SonosCloudAPI {
         }
 
         return try JSONDecoder().decode(AlbumBrowseResponse.self, from: data)
+    }
+
+    // MARK: - Now Playing (v2)
+
+    struct NowPlayingResponse: Decodable {
+        let title: String?
+        let subtitle: String?
+        let type: String?
+        let images: ContentImages?
+        let item: NowPlayingItem?
+    }
+
+    struct NowPlayingItem: Decodable {
+        let id: String?
+        let title: String?
+        let subtitle: String?
+        let type: String?
+        let images: ContentImages?
+        let resource: ArtistItemResource?
+        let artists: [NowPlayingArtist]?
+        let duration: String?
+        let isExplicit: Bool?
+
+        private var decodedDefaults: [String: Any]? {
+            guard let defaults = resource?.defaults else { return nil }
+            var b64 = defaults
+            while b64.count % 4 != 0 { b64.append("=") }
+            guard let data = Data(base64Encoded: b64) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+
+        var albumId: String? { decodedDefaults?["containerId"] as? String }
+        var albumName: String? { decodedDefaults?["containerName"] as? String }
+    }
+
+    struct NowPlayingArtist: Decodable {
+        let id: String?
+        let name: String?
+
+        var objectId: String? {
+            guard let id else { return nil }
+            let base = id.firstIndex(of: "#").map { String(id[..<$0]) } ?? id
+            return base.components(separatedBy: ":").last
+        }
+    }
+
+    static func nowPlaying(token: String, householdId: String,
+                           serviceId: String, accountId: String,
+                           trackObjectId: String) async throws -> NowPlayingResponse {
+        let encodedTrack = trackObjectId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trackObjectId
+        let urlStr = "\(playBaseURL.replacingOccurrences(of: "/v1", with: "/v2"))" +
+            "/households/\(householdId)/services/\(serviceId)" +
+            "/accounts/\(accountId)/tracks/\(encodedTrack)/nowplaying"
+
+        guard let url = URL(string: urlStr) else { throw URLError(.badURL) }
+        SonosLog.debug(.cloudAPI, "nowPlaying GET \(urlStr.prefix(200))")
+
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let http = response as? HTTPURLResponse
+        let statusCode = http?.statusCode ?? -1
+        SonosLog.debug(.cloudAPI, "nowPlaying HTTP \(statusCode), \(data.count) bytes")
+
+        if statusCode == 401 { throw SonosCloudError.unauthorized }
+        if !(200...299).contains(statusCode) {
+            throw SonosCloudError.httpError(statusCode)
+        }
+
+        return try JSONDecoder().decode(NowPlayingResponse.self, from: data)
     }
 
     // MARK: - Networking

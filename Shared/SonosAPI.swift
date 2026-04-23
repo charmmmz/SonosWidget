@@ -310,15 +310,49 @@ enum SonosAPI {
 
     // MARK: - Sonos Favorites
 
+    /// Add an item to Sonos Favorites (FV:2) via UPnP `CreateObject`.
+    ///
+    /// Sonos validates the outer DIDL strictly against the inner's
+    /// `upnp:class` — sending the wrong shape for the wrong type returns
+    /// SOAP fault 803 with no diagnostic info. Two shapes, distinguished
+    /// by caller via `rType` / `emitRes`:
+    ///
+    /// - **instantPlay** (albums, playlists, tracks, radio stations):
+    ///   `<res protocolInfo="{scheme}:*:*:*">{uri}</res>` + real albumArt,
+    ///   description usually echoes the title.
+    /// - **shortcut** (artists, library folders — "bookmark" favorites):
+    ///   empty `<res></res>` without `protocolInfo`, description is the
+    ///   service name (e.g. "Apple Music"), albumArt is optional.
+    ///
+    /// Both use `<upnp:class>object.itemobject.item.sonos-favorite</upnp:class>`
+    /// (the Sonos-specific class — NOT `object.item.sonos-favorite`).
     nonisolated static func addToFavorites(ip: String, title: String, uri: String,
-                                            metadata: String, albumArtURI: String? = nil) async throws {
-        var innerElements = "<dc:title>\(escapeXML(title))</dc:title>" +
-            "<res>\(escapeXML(uri))</res>" +
-            "<r:resMD>\(escapeXML(metadata))</r:resMD>"
+                                            metadata: String, albumArtURI: String? = nil,
+                                            rType: String = "instantPlay",
+                                            description: String? = nil,
+                                            emitRes: Bool = true) async throws {
+        let descText = description ?? title
+
+        var innerElements = "<dc:title>\(escapeXML(title))</dc:title>"
+        innerElements += "<upnp:class>object.itemobject.item.sonos-favorite</upnp:class>"
+
+        if emitRes {
+            let scheme = uri.split(separator: ":").first.map(String.init) ?? "x-rincon-cpcontainer"
+            let protocolInfo = "\(scheme):*:*:*"
+            innerElements += "<res protocolInfo=\"\(protocolInfo)\">\(escapeXML(uri))</res>"
+        } else {
+            // Artist / collection favorites carry an empty <res></res> with no
+            // protocolInfo attribute — matches the format dumped from existing
+            // favorites added via the official Sonos app.
+            innerElements += "<res></res>"
+        }
+
         if let art = albumArtURI, !art.isEmpty {
             innerElements += "<upnp:albumArtURI>\(escapeXML(art))</upnp:albumArtURI>"
         }
-        innerElements += "<upnp:class>object.item.sonos-favorite</upnp:class>"
+        innerElements += "<r:type>\(rType)</r:type>"
+        innerElements += "<r:description>\(escapeXML(descText))</r:description>"
+        innerElements += "<r:resMD>\(escapeXML(metadata))</r:resMD>"
 
         let didl = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
             "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
@@ -328,10 +362,13 @@ enum SonosAPI {
             innerElements +
             "</item></DIDL-Lite>"
 
-        _ = try await soap(ip: ip, endpoint: contentDirectory, service: "ContentDirectory",
+        SonosLog.debug(.favorites, "OUTER didl=\(didl)")
+
+        let result = try await soap(ip: ip, endpoint: contentDirectory, service: "ContentDirectory",
                            action: "CreateObject",
                            body: "<ContainerID>FV:2</ContainerID>" +
                            "<Elements>\(escapeXML(didl))</Elements>")
+        SonosLog.debug(.favorites, "SOAP response: \(result.prefix(500))")
     }
 
     nonisolated static func removeFromFavorites(ip: String, objectId: String) async throws {
@@ -498,7 +535,19 @@ enum SonosAPI {
         request.httpBody = envelope(service: service, action: action, body: body).data(using: .utf8)
 
         let (data, _) = try await URLSession.shared.data(for: request)
-        return String(data: data, encoding: .utf8) ?? ""
+        let response = String(data: data, encoding: .utf8) ?? ""
+        if response.contains("<s:Fault>") || response.contains("UPnPError") {
+            let code = extractTag("errorCode", from: response) ?? "?"
+            let desc = extractTag("errorDescription", from: response) ?? "SOAP Fault"
+            SonosLog.error(.soap, "Fault in \(action): code=\(code) desc=\(desc)")
+            // Dump the raw fault body in Debug builds — Sonos sometimes embeds
+            // extra context (e.g. which field failed validation) outside the
+            // standard errorCode/errorDescription tags.
+            SonosLog.debug(.soap, "Fault body: \(response)")
+            throw NSError(domain: "SonosSOAP", code: Int(code) ?? -1,
+                          userInfo: [NSLocalizedDescriptionKey: "\(action) failed: \(desc) (code \(code))"])
+        }
+        return response
     }
 
     private nonisolated static func envelope(service: String, action: String, body: String) -> String {

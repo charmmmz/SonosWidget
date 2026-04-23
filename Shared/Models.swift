@@ -47,6 +47,17 @@ enum PlaybackSource: String, Codable, Sendable {
         }
     }
 
+    /// Asset name in `BrandMedia` for services with bundled vector marks; otherwise `nil`.
+    var brandAssetImageName: String? {
+        switch self {
+        case .spotify: return "BrandSpotify"
+        case .appleMusic: return "BrandAppleMusic"
+        case .amazonMusic: return "BrandAmazonMusic"
+        case .youtubeMusic: return "BrandYouTubeMusic"
+        default: return nil
+        }
+    }
+
     var badgeColor: Color {
         switch self {
         case .spotify:      return Color(.sRGB, red: 0.12, green: 0.84, blue: 0.38, opacity: 1)
@@ -172,7 +183,8 @@ struct AudioQuality: Codable, Equatable, Sendable {
 
     var isLossless: Bool {
         let c = codec.lowercased()
-        if c == "lossless" || c.contains("flac") || c.contains("alac") || c.contains("wav")
+        if c.contains("hi-res") || c.contains("hires") || c.contains("hi res") { return true }
+        if c == "lossless" || c.contains("lossless") || c.contains("flac") || c.contains("alac") || c.contains("wav")
             || c.contains("aiff") || c.contains("pcm") {
             return true
         }
@@ -186,6 +198,26 @@ struct AudioQuality: Codable, Equatable, Sendable {
     var isHiRes: Bool {
         guard isLossless else { return false }
         return (sampleRate ?? 0) > 48000 || ((sampleRate ?? 0) >= 48000 && (bitDepth ?? 0) >= 24)
+    }
+
+    /// Marketing badge in `BrandMedia` (Dolby Atmos, Apple Lossless mark, etc.).
+    /// Hi-Res Lossless uses the same mark as Lossless (`BadgeAppleLossless`).
+    var badgeAssetImageName: String? {
+        if isAtmos { return "BadgeDolbyAtmos" }
+        if isLossless { return "BadgeAppleLossless" }
+        return nil
+    }
+
+    /// Derives a badge from a display label when `AudioQuality` is not available (e.g. widget string cache).
+    nonisolated static func badgeImageName(forQualityLabel label: String?) -> String? {
+        guard let label else { return nil }
+        let lower = label.lowercased()
+        if lower.contains("atmos") { return "BadgeDolbyAtmos" }
+        if lower.contains("lossless") || lower.contains("hi-res") || lower.contains("hi res")
+            || lower.contains("hires") || lower.contains("hi_res") {
+            return "BadgeAppleLossless"
+        }
+        return nil
     }
 
     nonisolated static func from(protocolInfo: String, sampleRate: String?, bitDepth: String?,
@@ -348,6 +380,7 @@ struct BrowseItem: Identifiable, Codable, Sendable {
     enum FavoriteCategory: String, CaseIterable {
         case playlist = "Playlists"
         case album = "Albums"
+        case song = "Songs"
         case station = "Stations"
         case artist = "Artists"
         case collection = "Collections"
@@ -356,6 +389,7 @@ struct BrowseItem: Identifiable, Codable, Sendable {
     var favoriteCategory: FavoriteCategory {
         let classStr = upnpClass
         if classStr.contains("musicArtist") { return .artist }
+        if classStr.contains("musicTrack") { return .song }
         if classStr.contains("audioBroadcast") || classStr.contains("audioItem") && !classStr.contains("musicTrack") { return .station }
         if classStr.contains("musicAlbum") { return .album }
         if classStr.contains("playlistContainer") || classStr.contains("sameArtist") { return .playlist }
@@ -368,7 +402,9 @@ struct BrowseItem: Identifiable, Codable, Sendable {
         }
         if uriSources.contains(where: { $0.contains("x-sonosapi-radio:") || $0.contains("x-sonosapi-stream:") }) { return .station }
         if isContainer { return .playlist }
-        return .collection
+        // Non-container favorite that didn't match any container scheme —
+        // almost always a single track saved by the user.
+        return .song
     }
 
     private var upnpClass: String {
