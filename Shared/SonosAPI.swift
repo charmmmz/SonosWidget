@@ -391,6 +391,15 @@ enum SonosAPI {
         try await browseContainer(ip: ip, objectID: "R:0/0")
     }
 
+    /// Enumerate the tracks inside a Sonos system playlist (`SQ:<n>`). The
+    /// Cloud API doesn't know about these (they're local to the Sonos
+    /// household), so the local playlist detail view calls UPnP directly.
+    nonisolated static func browsePlaylistTracks(ip: String, playlistId: String,
+                                                  start: Int = 0,
+                                                  count: Int = 100) async throws -> [BrowseItem] {
+        try await browseContainer(ip: ip, objectID: playlistId, start: start, count: count)
+    }
+
     private nonisolated static func browseContainer(ip: String, objectID: String, start: Int = 0,
                                                      count: Int = 100) async throws -> [BrowseItem] {
         let body = "<ObjectID>\(objectID)</ObjectID>" +

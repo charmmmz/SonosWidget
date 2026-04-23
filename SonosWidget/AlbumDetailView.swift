@@ -16,8 +16,19 @@ struct AlbumDetailView: View {
 
     private var albumTitle: String { response?.title ?? albumItem.title }
     private var artistName: String { response?.subtitle ?? albumItem.artist }
+    /// Resolves the album cover from any non-empty image source. NetEase Cloud
+    /// Music's browseAlbum often omits the album-level image but populates
+    /// each track's `images.tile1x1`, so we fall through to the first track's
+    /// art before giving up and showing the placeholder disc icon.
     private var coverURL: String? {
-        response?.images?.tile1x1 ?? albumItem.albumArtURL
+        let candidates: [String?] = [
+            response?.images?.tile1x1,
+            albumItem.albumArtURL,
+            response?.tracks?.items?.first?.images?.tile1x1
+        ]
+        return candidates.lazy
+            .compactMap { $0 }
+            .first { !$0.isEmpty }
     }
     private var tracks: [SonosCloudAPI.AlbumTrackItem] {
         response?.tracks?.items ?? []

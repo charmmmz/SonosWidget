@@ -387,6 +387,21 @@ struct BrowseItem: Identifiable, Codable, Sendable {
     }
 
     var favoriteCategory: FavoriteCategory {
+        // Authoritative source when present: factory-built items (from
+        // `makeAlbumItem`, `makeArtistItem`, etc.) carry `cloudType` directly,
+        // so we should trust that over URI / upnp:class heuristics — otherwise
+        // e.g. an album with URI `x-rincon-cpcontainer:1004206c album%3A…`
+        // ends up misclassified as Playlist (both share that URI scheme).
+        switch cloudType {
+        case "ALBUM":      return .album
+        case "ARTIST":     return .artist
+        case "PLAYLIST":   return .playlist
+        case "TRACK":      return .song
+        case "PROGRAM":    return .station
+        case "COLLECTION": return .collection
+        default:           break
+        }
+
         let classStr = upnpClass
         if classStr.contains("musicArtist") { return .artist }
         if classStr.contains("musicTrack") { return .song }

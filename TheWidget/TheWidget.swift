@@ -254,6 +254,10 @@ struct SonosWidgetMediumView: View {
                             }
                             if let quality = entry.audioQualityLabel {
                                 HStack(alignment: .center, spacing: 4) {
+                                    Text("IN")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .tracking(0.8)
+                                        .foregroundStyle(.white.opacity(0.3))
                                     if let badge = AudioQuality.badgeImageName(forQualityLabel: quality) {
                                         Image(badge)
                                             .resizable()
@@ -263,7 +267,7 @@ struct SonosWidgetMediumView: View {
                                             .frame(height: 8)
                                             .accessibilityHidden(true)
                                     }
-                                    Text("IN \(quality.uppercased())")
+                                    Text(quality.uppercased())
                                         .font(.system(size: 7, weight: .bold))
                                         .tracking(0.8)
                                         .foregroundStyle(.white.opacity(0.3))

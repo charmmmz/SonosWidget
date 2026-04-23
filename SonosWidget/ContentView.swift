@@ -8,12 +8,17 @@ struct ContentView: View {
         TabView {
             Tab("Home", systemImage: "play.circle.fill") {
                 PlayerView(manager: manager, searchManager: searchManager)
+                    .miniPlayerLegacyInsetIfNeeded(manager: manager)
             }
-            Tab("Search", systemImage: "magnifyingglass") {
+            Tab("Browse", systemImage: "magnifyingglass") {
                 SearchView(manager: manager, searchManager: searchManager)
+                    .miniPlayerLegacyInsetIfNeeded(manager: manager)
             }
         }
         .tint(manager.albumArtDominantColor ?? .blue)
+        .tabBarMinimizeOnScrollIfAvailable()
+        .miniPlayerSystemAccessoryIfAvailable(manager: manager)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: manager.showFullPlayer)
         .overlay {
             GeometryReader { geo in
                 let screenH = geo.size.height + geo.safeAreaInsets.bottom

@@ -31,65 +31,57 @@ struct PlayerView: View {
     // MARK: - Configured View
 
     private var configuredView: some View {
-        ZStack(alignment: .bottom) {
-            NavigationStack {
-                speakersHomeView
-                    .background {
-                        blurredArtBackground.ignoresSafeArea()
-                    }
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbarBackground(.hidden, for: .navigationBar)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Menu {
-                                Button { manager.showingAddSpeaker = true } label: {
-                                    Label("Enter IP Manually", systemImage: "keyboard")
-                                }
-                                Button { manager.rescan() } label: {
-                                    Label("Rescan Network", systemImage: "arrow.clockwise")
-                                }
-
-                                Divider()
-
-                                if SonosAuth.shared.isLoggedIn {
-                                    Button(role: .destructive) {
-                                        SonosAuth.shared.logout()
-                                    } label: {
-                                        Label("Disconnect Sonos Account", systemImage: "person.crop.circle.badge.minus")
-                                    }
-                                } else {
-                                    Button {
-                                        isConnectingSonos = true
-                                        Task {
-                                            let window = UIApplication.shared.connectedScenes
-                                                .compactMap { $0 as? UIWindowScene }
-                                                .first?.windows.first
-                                            await SonosAuth.shared.startLogin(from: window)
-                                            if SonosAuth.shared.isLoggedIn {
-                                                await manager.resolveCloudGroupId()
-                                                await manager.refreshState()
-                                            }
-                                            isConnectingSonos = false
-                                        }
-                                    } label: {
-                                        Label("Connect Sonos Account", systemImage: "person.crop.circle.badge.plus")
-                                    }
-                                    .disabled(isConnectingSonos)
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
+        NavigationStack {
+            speakersHomeView
+                .background {
+                    blurredArtBackground.ignoresSafeArea()
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.hidden, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button { manager.showingAddSpeaker = true } label: {
+                                Label("Enter IP Manually", systemImage: "keyboard")
                             }
+                            Button { manager.rescan() } label: {
+                                Label("Rescan Network", systemImage: "arrow.clockwise")
+                            }
+
+                            Divider()
+
+                            if SonosAuth.shared.isLoggedIn {
+                                Button(role: .destructive) {
+                                    SonosAuth.shared.logout()
+                                } label: {
+                                    Label("Disconnect Sonos Account", systemImage: "person.crop.circle.badge.minus")
+                                }
+                            } else {
+                                Button {
+                                    isConnectingSonos = true
+                                    Task {
+                                        let window = UIApplication.shared.connectedScenes
+                                            .compactMap { $0 as? UIWindowScene }
+                                            .first?.windows.first
+                                        await SonosAuth.shared.startLogin(from: window)
+                                        if SonosAuth.shared.isLoggedIn {
+                                            await manager.resolveCloudGroupId()
+                                            await manager.refreshState()
+                                        }
+                                        isConnectingSonos = false
+                                    }
+                                } label: {
+                                    Label("Connect Sonos Account", systemImage: "person.crop.circle.badge.plus")
+                                }
+                                .disabled(isConnectingSonos)
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
                         }
                     }
-            }
-            .scrollContentBackground(.hidden)
-
-            if !manager.showFullPlayer {
-                miniPlayerBar
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
+                }
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: manager.showFullPlayer)
+        .scrollContentBackground(.hidden)
     }
 
     private var blurredArtBackground: some View {
@@ -107,88 +99,6 @@ struct PlayerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.8), value: manager.trackInfo?.albumArtURL)
-    }
-
-    // MARK: - Mini Player Bar
-
-    private var miniPlayerBar: some View {
-        Button {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                manager.showFullPlayer = true
-            }
-        } label: {
-            HStack(spacing: 12) {
-                if let image = manager.albumArtImage {
-                    Image(uiImage: image)
-                        .resizable().aspectRatio(contentMode: .fill)
-                        .frame(width: 44, height: 44)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else {
-                    RoundedRectangle(cornerRadius: 8).fill(.quaternary)
-                        .frame(width: 44, height: 44)
-                        .overlay { Image(systemName: "music.note").font(.caption).foregroundStyle(.tertiary) }
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(manager.trackInfo?.title ?? "Not Playing")
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(manager.trackInfo?.artist ?? "—")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                Button {
-                    Task { await manager.togglePlayPause() }
-                } label: {
-                    Image(systemName: manager.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    Task { await manager.nextTrack() }
-                } label: {
-                    Image(systemName: "forward.fill")
-                        .font(.subheadline)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-        }
-        .buttonStyle(.plain)
-        .offset(y: manager.miniPlayerDragOffset)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 10)
-                .onChanged { value in
-                    let dy = value.translation.height
-                    if dy < 0 {
-                        // rubber-band: follow finger but resist at extremes
-                        manager.miniPlayerDragOffset = dy * 0.55
-                    }
-                }
-                .onEnded { value in
-                    let dy = value.translation.height
-                    let vel = value.predictedEndTranslation.height
-                    if dy < -40 || vel < -200 {
-                        manager.miniPlayerDragOffset = 0
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
-                            manager.showFullPlayer = true
-                        }
-                    } else {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            manager.miniPlayerDragOffset = 0
-                        }
-                    }
-                }
-        )
     }
 
     // MARK: - Speakers Home View
@@ -252,7 +162,7 @@ struct PlayerView: View {
                     .padding(.horizontal)
                 }
 
-                Spacer(minLength: manager.showFullPlayer ? 20 : 80)
+                Spacer(minLength: 20)
             }
             .padding(.top, 4)
         }
@@ -268,7 +178,12 @@ struct PlayerView: View {
                     }
                 }
                 .padding(.trailing, 20)
-                .padding(.bottom, manager.showFullPlayer ? 20 : 76)
+                // The mini-player no longer lives inside this view's bounds —
+                // it's attached above the tab bar via safeAreaInset / the
+                // iOS 26 tab accessory, so the ScrollView's overlay already
+                // bottoms out just above the mini-player. A small breathing
+                // margin is all that's needed.
+                .padding(.bottom, 16)
         }
         .onAppear {
             Task { await manager.refreshAllGroupStatuses() }
@@ -1563,6 +1478,214 @@ private struct ThumblessSlider: View {
         if cur != lastHapticInteger {
             lastHapticInteger = cur
             UISelectionFeedbackGenerator().selectionChanged()
+        }
+    }
+}
+
+// MARK: - Mini Player Bar (persistent across tabs)
+
+/// Compact now-playing bar that lives at the bottom of the app and stays
+/// visible on every tab (Home / Search / …) — tapping it opens the full
+/// player; dragging up does the same with an interactive rubber-band.
+///
+/// Use the `.miniPlayerInset(manager:)` modifier on each tab's root view
+/// to mount it above the tab bar with matching content padding.
+struct MiniPlayerBar: View {
+    @Bindable var manager: SonosManager
+    /// When mounted inside iOS 26's `tabViewBottomAccessory` slot the system
+    /// provides its own liquid-glass capsule + horizontal inset, and renders
+    /// the accessory *inline with the selected tab icon* once the user
+    /// scrolls. In that case we must not apply our own material/insets or
+    /// the double chrome looks wrong.
+    var inSystemAccessory: Bool = false
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                manager.showFullPlayer = true
+            }
+        } label: {
+            HStack(spacing: 12) {
+                if let image = manager.albumArtImage {
+                    Image(uiImage: image)
+                        .resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: inSystemAccessory ? 32 : 44,
+                               height: inSystemAccessory ? 32 : 44)
+                        .clipShape(RoundedRectangle(cornerRadius: inSystemAccessory ? 6 : 8))
+                } else {
+                    RoundedRectangle(cornerRadius: inSystemAccessory ? 6 : 8).fill(.quaternary)
+                        .frame(width: inSystemAccessory ? 32 : 44,
+                               height: inSystemAccessory ? 32 : 44)
+                        .overlay { Image(systemName: "music.note").font(.caption).foregroundStyle(.tertiary) }
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(manager.trackInfo?.title ?? "Not Playing")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(manager.trackInfo?.artist ?? "—")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    Task { await manager.togglePlayPause() }
+                } label: {
+                    Image(systemName: manager.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    Task { await manager.nextTrack() }
+                } label: {
+                    Image(systemName: "forward.fill")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, inSystemAccessory ? 12 : 16)
+            .padding(.vertical, inSystemAccessory ? 6 : 10)
+            .modifier(MiniPlayerChromeModifier(useCustomChrome: !inSystemAccessory))
+            // Make the ENTIRE bar hit-testable — without this, SwiftUI only
+            // counts taps on the HStack's concrete subviews (art + text +
+            // controls) and the `Spacer()` gap in the middle silently
+            // swallows touches, so tapping the empty area between title and
+            // the play button does nothing.
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .offset(y: manager.miniPlayerDragOffset)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10)
+                .onChanged { value in
+                    let dy = value.translation.height
+                    if dy < 0 {
+                        // rubber-band: follow finger but resist at extremes
+                        manager.miniPlayerDragOffset = dy * 0.55
+                    }
+                }
+                .onEnded { value in
+                    let dy = value.translation.height
+                    let vel = value.predictedEndTranslation.height
+                    if dy < -40 || vel < -200 {
+                        manager.miniPlayerDragOffset = 0
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+                            manager.showFullPlayer = true
+                        }
+                    } else {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            manager.miniPlayerDragOffset = 0
+                        }
+                    }
+                }
+        )
+    }
+}
+
+/// Chrome wrapper for `MiniPlayerBar`. When used outside iOS 26's
+/// `tabViewBottomAccessory` slot we draw our own rounded material capsule;
+/// inside the system accessory slot we rely on the liquid-glass chrome that
+/// the tab bar provides (and fuses with the selected tab icon on scroll).
+private struct MiniPlayerChromeModifier: ViewModifier {
+    let useCustomChrome: Bool
+
+    func body(content: Content) -> some View {
+        if useCustomChrome {
+            content
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+        } else {
+            content
+        }
+    }
+}
+
+/// Renders `MiniPlayerBar` only when it should be visible — i.e. the user
+/// has a speaker configured, isn't looking at the full player, and isn't
+/// actively typing (soft keyboard up). Keyboard awareness matters because
+/// both the `safeAreaInset` (iOS < 26) and `tabViewBottomAccessory`
+/// (iOS 26+) mount points ride up with the keyboard by default and waste
+/// half of the search-results viewport. Apple Music / Spotify drop their
+/// mini-players the same way during active input.
+private struct KeyboardAwareMiniPlayer: View {
+    @Bindable var manager: SonosManager
+    var inSystemAccessory: Bool = false
+    @State private var isKeyboardVisible = false
+
+    var body: some View {
+        Group {
+            if manager.isConfigured
+                && !manager.showFullPlayer
+                && !isKeyboardVisible {
+                MiniPlayerBar(manager: manager, inSystemAccessory: inSystemAccessory)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillShowNotification)) { _ in
+            isKeyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillHideNotification)) { _ in
+            isKeyboardVisible = false
+        }
+    }
+}
+
+/// ViewModifier that inserts `MiniPlayerBar` into a tab's bottom safe-area
+/// inset. Used only on iOS < 26 — newer OSes get the mini-player through
+/// `tabViewBottomAccessory`.
+private struct MiniPlayerInset: ViewModifier {
+    @Bindable var manager: SonosManager
+
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            KeyboardAwareMiniPlayer(manager: manager)
+        }
+    }
+}
+
+extension View {
+    /// Legacy fallback path for iOS < 26. On iOS 26 this is a no-op because
+    /// `tabViewBottomAccessory` already supplies the shared mini-player.
+    @ViewBuilder
+    func miniPlayerLegacyInsetIfNeeded(manager: SonosManager) -> some View {
+        if #available(iOS 26.0, *) {
+            self
+        } else {
+            modifier(MiniPlayerInset(manager: manager))
+        }
+    }
+
+    /// iOS 26+: attach the mini-player as the tab bar's bottom accessory
+    /// so the OS can collapse the inactive tabs on scroll and render the
+    /// selected-tab icon side-by-side with the mini-player capsule.
+    @ViewBuilder
+    func miniPlayerSystemAccessoryIfAvailable(manager: SonosManager) -> some View {
+        if #available(iOS 26.0, *) {
+            self.tabViewBottomAccessory {
+                KeyboardAwareMiniPlayer(manager: manager, inSystemAccessory: true)
+            }
+        } else {
+            self
+        }
+    }
+
+    /// iOS 26+: minimize the tab bar when the user scrolls content down, so
+    /// the selected-tab icon slides next to the mini-player accessory. Apple's
+    /// default behavior on iOS is `.automatic`, which does *not* enable this
+    /// on iPhone — we have to opt in explicitly.
+    @ViewBuilder
+    func tabBarMinimizeOnScrollIfAvailable() -> some View {
+        if #available(iOS 26.0, *) {
+            self.tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            self
         }
     }
 }

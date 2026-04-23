@@ -38,8 +38,11 @@ struct SearchView: View {
                 }
                 .ignoresSafeArea()
             }
-            .navigationTitle("Search")
-            .navigationBarTitleDisplayMode(.large)
+            // Hide the "Search" navigation title entirely (both the large and
+            // inline forms). The `.searchable` field is already self-
+            // explanatory; a redundant title just costs vertical space.
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -54,8 +57,19 @@ struct SearchView: View {
             .preferredColorScheme(.dark)
             .searchable(text: $searchText, prompt: "Search songs, artists, albums…")
             .onSubmit(of: .search) {
-                selectedServiceTab = nil
+                // Preserve the currently-selected service tab across searches
+                // so the user doesn't get yanked back to "All" every time they
+                // retype a query. The onChange(lastSearchQuery) below takes
+                // care of re-fetching the tab's results for the new query.
                 searchManager.search(query: searchText)
+            }
+            .onChange(of: searchManager.lastSearchQuery) { _, _ in
+                // search() clears serviceDetailResults before fetching; if
+                // a service tab is selected we proactively repopulate it so
+                // switching back doesn't require a second tap.
+                if let sid = selectedServiceTab {
+                    Task { await searchManager.loadServiceDetail(serviceId: sid) }
+                }
             }
             .onAppear {
                 searchManager.configure(speakerIP: manager.selectedSpeaker?.playbackIP)
@@ -118,6 +132,10 @@ struct SearchView: View {
                     }
                     .padding(.top, 40)
                 } else {
+                    if !searchManager.recentlyPlayed.isEmpty {
+                        recentlyPlayedSection
+                    }
+
                     let grouped = searchManager.groupedFavorites
                     if !grouped.isEmpty {
                         Text("Sonos Favorites")
@@ -130,7 +148,7 @@ struct SearchView: View {
                     }
 
                     if !searchManager.playlists.isEmpty {
-                        browseSection(title: "Sonos Playlists", items: searchManager.playlists, horizontal: false)
+                        sonosPlaylistsSection
                     }
 
                     if !searchManager.radio.isEmpty {
@@ -149,11 +167,41 @@ struct SearchView: View {
         }
     }
 
+    // MARK: - Recently Played Section
+
+    @ViewBuilder
+    private var recentlyPlayedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recently Played")
+                .font(.title3.bold())
+                .padding(.horizontal)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 12) {
+                    ForEach(searchManager.recentlyPlayed) { item in
+                        // Categorization uses the item's own metadata (cloudType
+                        // / URI), same logic as favorites — so tapping "Daniel
+                        // Caesar" opens the artist page, tapping an album opens
+                        // its detail page, etc.
+                        browseCard(item, category: item.favoriteCategory)
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+    }
+
     // MARK: - Favorite Grouped Section
 
     @ViewBuilder
     private func favoriteSection(category: BrowseItem.FavoriteCategory, items: [BrowseItem]) -> some View {
-        let previewCount = 5
+        // Songs render as a vertical list (tall-thumbnail + title + artist
+        // row), since a large favorites library tends to produce dozens of
+        // song entries that are awkward in a horizontal scroll. Other
+        // categories (Playlists, Albums, Artists, Stations, Collections)
+        // keep the horizontal card layout.
+        let useListLayout = category == .song
+        let previewCount = useListLayout ? 4 : 5
         let hasMore = items.count > previewCount
         let displayItems = hasMore ? Array(items.prefix(previewCount)) : items
 
@@ -179,13 +227,21 @@ struct SearchView: View {
             }
             .padding(.horizontal)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 12) {
+            if useListLayout {
+                LazyVStack(spacing: 0) {
                     ForEach(displayItems) { item in
-                        browseCard(item, category: category)
+                        browseRow(item)
                     }
                 }
-                .padding(.horizontal)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 12) {
+                        ForEach(displayItems) { item in
+                            browseCard(item, category: category)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
             }
         }
     }
@@ -383,22 +439,30 @@ struct SearchView: View {
     @ViewBuilder
     private func categoryLabel(for item: BrowseItem, category: BrowseItem.FavoriteCategory?) -> some View {
         let cat = category ?? item.favoriteCategory
+        // Keep the subtitle to just the category name ("Album" / "Playlist" /
+        // "Artist" / …) — no artist prefix. Matches Apple Music's home grid
+        // and avoids the redundancy of "Yoga Lin · Album" beneath an album
+        // whose title already carries the artist context (e.g. in Recently
+        // Played). The artist name is still visible on detail pages and in
+        // the vertical track rows where it's actually informational.
         let subtitle: String = {
             switch cat {
-            case .playlist: return item.artist.isEmpty ? "Playlist" : item.artist
-            case .album: return item.artist.isEmpty ? "Album" : "\(item.artist) · Album"
-            case .song: return item.artist.isEmpty ? "Song" : "\(item.artist) · Song"
-            case .station: return "Station"
-            case .artist: return "Artist"
-            case .collection: return item.artist.isEmpty ? "Collection" : item.artist
+            case .playlist:   return "Playlist"
+            case .album:      return "Album"
+            case .song:       return "Song"
+            case .station:    return "Station"
+            case .artist:     return "Artist"
+            case .collection: return "Collection"
             }
         }()
 
         if !subtitle.isEmpty {
             HStack(spacing: 4) {
-                if cat == .station || cat == .playlist || cat == .album || cat == .collection || cat == .song {
+                if cat == .station || cat == .playlist || cat == .album
+                    || cat == .collection || cat == .song || cat == .artist {
                     FavoritesStreamingGlyph(
-                        cloudServiceId: item.serviceId.flatMap { searchManager.cloudServiceId(forLocalSid: $0) },
+                        cloudServiceId: searchManager.cloudServiceId(forFavorite: item),
+                        displayNameHint: searchManager.serviceDisplayHint(forFavorite: item),
                         size: 10
                     )
                 }
@@ -429,67 +493,128 @@ struct SearchView: View {
         return Button {
             playItem(item)
         } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
-                        if let img = phase.image {
-                            img.resizable().aspectRatio(contentMode: .fill)
-                        } else {
-                            Rectangle().fill(.quaternary)
-                                .overlay {
-                                    Image(systemName: item.isContainer ? "music.note.list" : "music.note")
-                                        .font(.caption2).foregroundStyle(.tertiary)
-                                }
-                        }
-                    }
-                    .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                    if isLoading {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(.ultraThinMaterial.opacity(0.85))
-                            .frame(width: 48, height: 48)
-                            .overlay {
-                                ProgressView()
-                                    .tint(.white)
-                                    .controlSize(.small)
-                            }
-                            .transition(.opacity)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title)
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    if !item.artist.isEmpty {
-                        Text(item.artist)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer()
-
-                if isLoading {
-                    ProgressView()
-                        .tint(.secondary)
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .opacity(isDisabled ? 0.4 : 1)
+            browseRowLabel(item, isLoading: isLoading, isDisabled: isDisabled)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .animation(.easeInOut(duration: 0.2), value: playingItemId)
         .contextMenu { itemContextMenu(item) }
+    }
+
+    /// The visual content of a browse row, factored out so it can sit inside
+    /// either a `Button` (tap-to-play: songs) or a `NavigationLink`
+    /// (tap-to-open: Sonos Playlists) without duplicating layout.
+    ///
+    /// Songs (non-containers) render an `ellipsis` menu on the right that
+    /// surfaces Play Next / Add to Queue / Favorite from `itemContextMenu`;
+    /// containers keep the simpler `chevron.right` affordance.
+    @ViewBuilder
+    private func browseRowLabel(_ item: BrowseItem, isLoading: Bool, isDisabled: Bool) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                AsyncImage(url: URL(string: item.albumArtURL ?? "")) { phase in
+                    if let img = phase.image {
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Rectangle().fill(.quaternary)
+                            .overlay {
+                                Image(systemName: item.isContainer ? "music.note.list" : "music.note")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                    }
+                }
+                .frame(width: 48, height: 48)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                if isLoading {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(.ultraThinMaterial.opacity(0.85))
+                        .frame(width: 48, height: 48)
+                        .overlay {
+                            ProgressView()
+                                .tint(.white)
+                                .controlSize(.small)
+                        }
+                        .transition(.opacity)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                if !item.artist.isEmpty {
+                    Text(item.artist)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            if isLoading {
+                ProgressView()
+                    .tint(.secondary)
+                    .controlSize(.small)
+            } else if item.isContainer {
+                Image(systemName: "chevron.right")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Menu {
+                    itemContextMenu(item)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        // Without this, SwiftUI's default hit-test shape for an HStack with
+        // a `Spacer()` skips the empty gap in the middle — so taps landing
+        // between the thumbnail and the trailing chevron/ellipsis fall
+        // through. Forcing a rect makes the whole row selectable the way
+        // List rows behave.
+        .contentShape(Rectangle())
+        .opacity(isDisabled ? 0.4 : 1)
+    }
+
+    // MARK: - Sonos Playlists Section
+
+    /// Sonos system playlists (`SQ:<n>`) are local to the household and have
+    /// no Cloud API representation, so tapping them opens a dedicated UPnP
+    /// detail view instead of going through `PlaylistDetailView` (which is
+    /// cloud-only). Tap-to-play is replaced by tap-to-open-detail so users
+    /// can preview and pick individual tracks, matching the rest of the app.
+    @ViewBuilder
+    private var sonosPlaylistsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Sonos Playlists")
+                .font(.title3.bold())
+                .padding(.horizontal)
+
+            LazyVStack(spacing: 0) {
+                ForEach(searchManager.playlists) { item in
+                    NavigationLink {
+                        SonosLocalPlaylistDetailView(
+                            playlistItem: item,
+                            searchManager: searchManager,
+                            manager: manager
+                        )
+                    } label: {
+                        browseRowLabel(item, isLoading: false, isDisabled: false)
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu { itemContextMenu(item) }
+                }
+            }
+        }
     }
 
     // MARK: - Search Results (Tabbed)
@@ -785,14 +910,21 @@ struct SearchView: View {
                                 .tint(.secondary)
                                 .controlSize(.small)
                         } else {
-                            Button {
-                                // Future: show action sheet
+                            // Tap the ellipsis to open the same action list
+                            // a long-press already shows — Play Next / Add to
+                            // Queue / Add to Sonos Favorites, etc. Wrapped in
+                            // a Menu so tap + long-press both work without
+                            // hijacking the outer Button's tap-to-play.
+                            Menu {
+                                itemContextMenu(item)
                             } label: {
                                 Image(systemName: "ellipsis")
                                     .font(.body)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 32, height: 32)
+                                    .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(.horizontal)
@@ -1212,9 +1344,11 @@ struct FavoriteCategoryDetailView: View {
 
         if !subtitle.isEmpty {
             HStack(spacing: 4) {
-                if category == .station || category == .playlist || category == .album || category == .song {
+                if category == .station || category == .playlist || category == .album
+                    || category == .song || category == .artist || category == .collection {
                     FavoritesStreamingGlyph(
-                        cloudServiceId: item.serviceId.flatMap { searchManager.cloudServiceId(forLocalSid: $0) },
+                        cloudServiceId: searchManager.cloudServiceId(forFavorite: item),
+                        displayNameHint: searchManager.serviceDisplayHint(forFavorite: item),
                         size: 10
                     )
                 }

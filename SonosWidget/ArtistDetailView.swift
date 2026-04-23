@@ -6,6 +6,11 @@ struct ArtistDetailView: View {
     let manager: SonosManager
 
     @State private var response: SonosCloudAPI.ArtistBrowseResponse?
+    /// Discography assembled from search results when `browseArtist` is
+    /// unsupported by the service (e.g. NetEase Cloud Music returns HTTP 500
+    /// for the artists/{id}/browse endpoint). Used as a last-resort fallback
+    /// so the artist page still shows something useful.
+    @State private var fallbackAlbums: [BrowseItem] = []
     @State private var isLoading = true
     @State private var errorText: String?
     @State private var playingItemId: String?
@@ -190,7 +195,59 @@ struct ArtistDetailView: View {
             }
             .padding(.horizontal)
             .padding(.bottom, 32)
+        } else if !fallbackAlbums.isEmpty {
+            // Search-derived discography (used when service doesn't support
+            // dedicated artist browse, e.g. NetEase Cloud Music).
+            fallbackAlbumsSection
+                .padding(.horizontal)
+                .padding(.bottom, 32)
         }
+    }
+
+    private var fallbackAlbumsSection: some View {
+        let columns = [GridItem(.flexible(), spacing: 12),
+                       GridItem(.flexible(), spacing: 12)]
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Albums")
+                .font(.headline)
+                .padding(.top, 8)
+            LazyVGrid(columns: columns, spacing: 16) {
+                ForEach(fallbackAlbums) { album in
+                    fallbackAlbumCard(album)
+                }
+            }
+        }
+    }
+
+    private func fallbackAlbumCard(_ album: BrowseItem) -> some View {
+        NavigationLink {
+            AlbumDetailView(albumItem: album,
+                            searchManager: searchManager,
+                            manager: manager)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                AsyncImage(url: URL(string: album.albumArtURL ?? "")) { phase in
+                    if let img = phase.image {
+                        img.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                            .overlay {
+                                Image(systemName: "opticaldisc")
+                                    .font(.title)
+                                    .foregroundStyle(.tertiary)
+                            }
+                    }
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                Text(album.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func albumSection(_ section: SonosCloudAPI.ArtistSection) -> some View {
@@ -331,24 +388,38 @@ struct ArtistDetailView: View {
             let searchResult = try await SonosCloudAPI.searchService(
                 token: token, householdId: householdId,
                 serviceId: serviceId, accountId: accountId,
-                term: artistItem.title, count: 10)
+                term: artistItem.title, count: 50)
 
             let artistResource = searchResult.allResources
                 .first { $0.type == "ARTIST" && $0.name?.lowercased() == artistItem.title.lowercased() }
                 ?? searchResult.allResources.first { $0.type == "ARTIST" }
 
+            // Collect albums up-front so we can use them as a last-resort
+            // fallback if the second browseArtist call also fails.
+            let albumsByArtist = albumsForArtist(in: searchResult,
+                                                 serviceId: serviceId,
+                                                 accountId: accountId)
+
             guard let correctId = artistResource?.id?.objectId else {
-                errorText = "Artist not found"
-                isLoading = false
+                useDiscographyFallback(albumsByArtist)
                 return
             }
 
             SonosLog.debug(.artistDetail, "Search fallback: found artistId=\(correctId)")
-            response = try await SonosCloudAPI.browseArtist(
-                token: token, householdId: householdId,
-                serviceId: serviceId, accountId: accountId,
-                artistId: correctId)
-            isLoading = false
+            do {
+                response = try await SonosCloudAPI.browseArtist(
+                    token: token, householdId: householdId,
+                    serviceId: serviceId, accountId: accountId,
+                    artistId: correctId)
+                isLoading = false
+            } catch is CancellationError {
+                SonosLog.debug(.artistDetail, "Search fallback cancelled (tab switch)")
+            } catch {
+                // browseArtist still 500s — fall back to a search-derived
+                // discography (mostly happens for NetEase Cloud Music).
+                SonosLog.info(.artistDetail, "browseArtist still failed (\(error)); using search-derived discography")
+                useDiscographyFallback(albumsByArtist)
+            }
         } catch is CancellationError {
             SonosLog.debug(.artistDetail, "Search fallback cancelled (tab switch)")
         } catch {
@@ -358,23 +429,59 @@ struct ArtistDetailView: View {
         }
     }
 
+    /// Filter ALBUM resources from a search result down to those whose
+    /// primary artist name matches `artistItem.title` (case-insensitively).
+    /// Falls back to the full ALBUM list if no name match — better to show
+    /// loosely-related albums than nothing.
+    private func albumsForArtist(in result: SonosCloudAPI.ServiceSearchResponse,
+                                 serviceId: String, accountId: String) -> [BrowseItem] {
+        let lowerName = artistItem.title.lowercased()
+        let allAlbums = result.allResources.filter { $0.type == "ALBUM" }
+        let filtered = allAlbums.filter { res in
+            (res.artists?.first?.name ?? "").lowercased() == lowerName
+        }
+        let chosen = filtered.isEmpty ? allAlbums : filtered
+
+        return chosen.compactMap { res -> BrowseItem? in
+            guard let objectId = res.id?.objectId else { return nil }
+            let artURL = res.images?.first?.url
+                ?? res.container?.images?.first?.url
+            return searchManager.makeAlbumItem(
+                objectId: objectId,
+                title: res.name ?? "",
+                artist: res.artists?.first?.name ?? artistItem.title,
+                artURL: artURL,
+                cloudServiceId: serviceId,
+                accountId: accountId)
+        }
+    }
+
+    private func useDiscographyFallback(_ albums: [BrowseItem]) {
+        if albums.isEmpty {
+            errorText = "No albums found for this artist"
+        } else {
+            fallbackAlbums = albums
+            errorText = nil
+        }
+        isLoading = false
+    }
+
     // MARK: - Playback
 
     private func startStation(_ action: SonosCloudAPI.CustomAction) {
         guard playingItemId == nil else { return }
-        guard let objectId = action.resource?.id?.objectId,
-              let serviceId = action.resource?.id?.serviceId,
-              let accountId = action.resource?.id?.accountId else { return }
-
         playingItemId = "station"
 
-        let item = searchManager.makeStationItem(
-            objectId: objectId, title: "\(artistName) Station",
-            artistName: artistName, artURL: headerImageURL,
-            cloudServiceId: serviceId, accountId: accountId)
+        // Delegate to SearchManager.startStation which resolves the radio:ra.{id}
+        // URI and calls playRadioStation — that path embeds <upnp:albumArtURI>
+        // in the station DIDL so the mini-player / now-playing screen picks up
+        // the cover. Going through `playNow` instead produces the minimal
+        // PROGRAM metadata (no album art) and leaves the mini-player blank.
+        var artistForStation = artistItem
+        if let url = headerImageURL { artistForStation.albumArtURL = url }
 
         Task {
-            await searchManager.playNow(item: item, manager: manager)
+            await searchManager.startStation(item: artistForStation, manager: manager)
             withAnimation(.easeOut(duration: 0.2)) { playingItemId = nil }
         }
     }

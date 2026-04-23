@@ -11,6 +11,18 @@
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<!-- Mirror the main app: widget occasionally resolves album art
+		     URLs from NetEase's HTTP-only image CDN. -->
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>music.126.net</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
 </dict>
 </plist>

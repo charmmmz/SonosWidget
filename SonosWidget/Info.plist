@@ -39,6 +39,20 @@
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<!-- NetEase Cloud Music serves album / artist artwork over plain HTTP
+		     from *.music.126.net CDN hosts. Images only — no credentials or
+		     personal data travel over these requests — so we scope the
+		     exception tightly to the subdomain tree. -->
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>music.126.net</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
 </dict>
 </plist>

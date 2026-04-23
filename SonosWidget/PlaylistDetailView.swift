@@ -151,9 +151,22 @@ struct PlaylistDetailView: View {
                     .lineLimit(3)
 
                 if !subtitleText.isEmpty {
-                    Text(subtitleText)
-                        .font(.subheadline)
-                        .foregroundStyle(themeColor ?? .secondary)
+                    // Subtitle doubles as a short tagline for Apple Music
+                    // ("Curated by Apple Music") and as a full editorial
+                    // paragraph for NetEase Cloud Music. Use ExpandableText
+                    // so long blurbs get a "MORE" toggle that opens a
+                    // fullscreen reader sheet (Apple Music pattern) instead
+                    // of pushing the track list off-screen.
+                    if subtitleText.count > 80 {
+                        ExpandableText(text: subtitleText,
+                                       title: playlistTitle,
+                                       collapsedLineLimit: 3)
+                            .padding(.top, 4)
+                    } else {
+                        Text(subtitleText)
+                            .font(.subheadline)
+                            .foregroundStyle(themeColor ?? .secondary)
+                    }
                 }
 
                 if let total = response?.tracks?.total ?? response?.section?.total {

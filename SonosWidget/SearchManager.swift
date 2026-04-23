@@ -43,16 +43,29 @@ final class SearchManager {
     var serviceDetailResults: [String: ServiceSearchResult] = [:]
     var isLoadingServiceDetail = false
 
+    /// Locally-tracked "Recently Played" list — populated whenever the user
+    /// triggers playback through the app (tapping an item in search results,
+    /// starting a station, etc). Capped to `recentlyPlayedLimit`, persisted
+    /// across launches via UserDefaults so the Browse page shows history
+    /// immediately on cold start.
+    private(set) var recentlyPlayed: [BrowseItem] = []
+    private static let recentlyPlayedLimit = 20
+
     private static let enabledKey = "SearchEnabledServices"
     private static let cachedAccountsKey = "CachedLinkedAccounts"
+    private static let recentlyPlayedKey = "RecentlyPlayedItems"
 
     private var speakerIP: String?
     private var searchTask: Task<Void, Never>?
-    private var lastSearchQuery = ""
+    /// The query string that produced the most recent `searchResults` /
+    /// `serviceDetailResults`. Readable from views so they can react when a
+    /// new search commits (e.g. to re-fetch the selected service tab).
+    private(set) var lastSearchQuery = ""
     private var hasProbed = false
 
     init() {
         restoreCachedAccounts()
+        restoreRecentlyPlayed()
     }
 
     func configure(speakerIP: String?) {
@@ -132,6 +145,41 @@ final class SearchManager {
             serviceEnabled[sid] = saved[sid] ?? true
         }
         SonosLog.debug(.search, "Restored \(accounts.count) cached linked accounts")
+    }
+
+    // MARK: - Recently Played
+
+    /// Record that the user just started playing this item. Moves the item
+    /// to the front of `recentlyPlayed` (deduping), caps the list length,
+    /// and persists it so the Browse page has history on next launch.
+    func pushRecentlyPlayed(_ item: BrowseItem) {
+        // Skip items with no id/title — placeholders / partial containers.
+        guard !item.id.isEmpty, !item.title.isEmpty else { return }
+
+        // Dedupe by id; also by title+artist as a fallback for radio stations
+        // that get freshly constructed ids each playback session.
+        recentlyPlayed.removeAll { existing in
+            existing.id == item.id ||
+            (existing.title == item.title && existing.artist == item.artist)
+        }
+        recentlyPlayed.insert(item, at: 0)
+        if recentlyPlayed.count > Self.recentlyPlayedLimit {
+            recentlyPlayed = Array(recentlyPlayed.prefix(Self.recentlyPlayedLimit))
+        }
+        persistRecentlyPlayed()
+    }
+
+    private func persistRecentlyPlayed() {
+        if let data = try? JSONEncoder().encode(recentlyPlayed) {
+            UserDefaults.standard.set(data, forKey: Self.recentlyPlayedKey)
+        }
+    }
+
+    private func restoreRecentlyPlayed() {
+        guard let data = UserDefaults.standard.data(forKey: Self.recentlyPlayedKey),
+              let items = try? JSONDecoder().decode([BrowseItem].self, from: data),
+              !items.isEmpty else { return }
+        recentlyPlayed = items
     }
 
     func setServiceEnabled(serviceId: String, enabled: Bool) {
@@ -225,6 +273,88 @@ final class SearchManager {
 
     func cloudServiceId(forLocalSid sid: Int) -> String? {
         localToCloudSid[sid]
+    }
+
+    /// Best-effort resolution of which streaming service a favorite belongs to.
+    /// `browseFavorites` does not populate `BrowseItem.serviceId`, and "shortcut"
+    /// favorites (artist / library collection) often ship with an empty `<res>`
+    /// and a `<desc>` that's just the plain service name — none of the full
+    /// `parseCloudIds` paths (which require sid+sn+objectId) succeed on them.
+    ///
+    /// This resolver only needs *which service*, not a playable URI, so it
+    /// tries every light signal in order:
+    ///   1. `BrowseItem.serviceId` (local sid) → cloud
+    ///   2. Full `parseCloudIds` path (sid+sn+objectId)
+    ///   3. Lone `sid=<N>` in uri / resMD / metaXML
+    ///   4. `SA_RINCON<N>_` in any DIDL text
+    ///   5. Any linked account's display name appearing in resMD / metaXML
+    ///      (e.g. `<r:description>Apple Music</r:description>`)
+    func cloudServiceId(forFavorite item: BrowseItem) -> String? {
+        if let local = item.serviceId,
+           let cloud = cloudServiceId(forLocalSid: local) {
+            return cloud
+        }
+        if let cloud = parseCloudIds(from: item)?.cloudServiceId {
+            return cloud
+        }
+        if let sid = sniffLocalServiceId(from: item),
+           let cloud = cloudServiceId(forLocalSid: sid) {
+            return cloud
+        }
+        return sniffCloudServiceIdByAccountName(from: item)
+    }
+
+    /// Display name of the linked account for a favorite's service (e.g.
+    /// "Apple Music · Charm"). Used as `displayNameHint` so YouTube Music
+    /// and Amazon Music — which we recognize by name rather than service-id —
+    /// pick up the right brand glyph.
+    func serviceDisplayHint(forFavorite item: BrowseItem) -> String? {
+        guard let cloudId = cloudServiceId(forFavorite: item) else { return nil }
+        return linkedAccounts.first { $0.serviceId == cloudId }?.displayName
+    }
+
+    /// Look for a local Sonos `sid` in any DIDL-bearing field. Matches both
+    /// the query-string form (`?sid=204&…`) and the SMAPI binding form
+    /// (`SA_RINCON204_…`) seen in shortcut favorites' `<desc>` tag.
+    private func sniffLocalServiceId(from item: BrowseItem) -> Int? {
+        let sources = [item.uri, item.resMD, item.metaXML].compactMap { $0 }
+        for src in sources {
+            if let range = src.range(of: "[?&]sid=(\\d+)", options: .regularExpression) {
+                let token = src[range]
+                if let eq = token.firstIndex(of: "="),
+                   let n = Int(token[token.index(after: eq)...]) {
+                    return n
+                }
+            }
+            if let range = src.range(of: "SA_RINCON(\\d+)_", options: .regularExpression) {
+                let token = src[range].dropFirst("SA_RINCON".count).dropLast("_".count)
+                if let n = Int(token) { return n }
+            }
+        }
+        return nil
+    }
+
+    /// If a linked account's brand/display name (e.g. "Apple Music") appears
+    /// anywhere in the favorite's metadata, treat that as the owning service.
+    /// This is the final fallback for Apple Music artist / collection favorites
+    /// whose DIDL often reduces to `<r:description>Apple Music</r:description>`.
+    private func sniffCloudServiceIdByAccountName(from item: BrowseItem) -> String? {
+        let haystack = [item.resMD, item.metaXML]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+        guard !haystack.isEmpty else { return nil }
+
+        for account in linkedAccounts {
+            guard let cloudId = account.serviceId else { continue }
+            let candidates = [account.name, account.nickname]
+                .compactMap { $0?.lowercased().trimmingCharacters(in: .whitespaces) }
+                .filter { $0.count >= 4 } // avoid ultra-short false positives
+            if candidates.contains(where: haystack.contains) {
+                return cloudId
+            }
+        }
+        return nil
     }
 
     /// **Prefer the typed factory methods** (`makeArtistItem`, `makeAlbumItem`,
@@ -745,7 +875,31 @@ final class SearchManager {
             let accountId = accountIdForLocalSid(sid) ?? "0"
             return buildCloudDIDLMetadata(item: item, localSid: sid, accountId: accountId)
         }
+
+        // UPnP-browsed items (Sonos system playlist children `SQ:<n>`, local
+        // library, queue, etc.) ship their track-level DIDL fragment in
+        // `metaXML` — title / artist / album / service `<desc>` already set
+        // by Sonos. Without a `<DIDL-Lite>` envelope Sonos rejects it and
+        // synthesises a bare stub from the URI, which is why individual
+        // tracks from a Sonos Playlist showed up as "Unknown" on the player.
+        if let metaXML = item.metaXML, !metaXML.isEmpty,
+           metaXML.contains("<item") || metaXML.contains("<container") {
+            return wrapInDIDLLiteIfNeeded(metaXML)
+        }
+
         return SonosAPI.buildDIDLMetadata(item: item)
+    }
+
+    /// Add the DIDL-Lite envelope around a raw `<item>` / `<container>`
+    /// fragment so Sonos will accept it as enqueue metadata.
+    private func wrapInDIDLLiteIfNeeded(_ xml: String) -> String {
+        if xml.contains("<DIDL-Lite") { return xml }
+        return "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
+            "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
+            "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" " +
+            "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">" +
+            xml +
+            "</DIDL-Lite>"
     }
 
     /// Find the Cloud account-id (sn) for a given local service ID.
@@ -929,6 +1083,11 @@ final class SearchManager {
     }
 
     func playNow(item: BrowseItem, manager: SonosManager) async {
+        // Push into Recently Played first (before any await) so even if
+        // playback itself fails we still remember what the user tried —
+        // mirrors Apple Music's behavior of listing attempted plays.
+        pushRecentlyPlayed(item)
+
         if item.isArtist {
             await startStation(item: item, manager: manager)
             return
@@ -1025,6 +1184,11 @@ final class SearchManager {
     /// — the same format the official Sonos app uses for "Start Station".
     func startStation(item: BrowseItem, manager: SonosManager) async {
         SonosLog.debug(.station, "startStation START title=\"\(item.title)\" id=\(item.id)")
+        // Push before network work so the Browse tab shows the entry even
+        // if cloud search below fails. pushRecentlyPlayed dedupes by id, so
+        // duplicating with playNow's push (when routed via item.isArtist)
+        // is a no-op.
+        pushRecentlyPlayed(item)
 
         guard let ip = manager.selectedSpeaker?.playbackIP else {
             SonosLog.error(.station, "ABORT: no speaker IP")
