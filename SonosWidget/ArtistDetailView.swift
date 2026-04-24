@@ -114,6 +114,13 @@ struct ArtistDetailView: View {
             Text(artistName)
                 .font(.title2.bold())
                 .multilineTextAlignment(.center)
+                // Without an explicit full-width frame the Text's frame is
+                // only as wide as the text itself, so the outer VStack's
+                // implicit centering aligns it against the widest sibling
+                // (the 200pt avatar). Force the label to span the whole
+                // width and centre within it — feels more balanced under
+                // the circular avatar, especially on wider devices.
+                .frame(maxWidth: .infinity, alignment: .center)
 
             // Unified streaming-service chip — same component the
             // now-playing view and widget use — instead of a plain
@@ -128,9 +135,11 @@ struct ArtistDetailView: View {
                     Text(provider)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
             }
         }
+        .frame(maxWidth: .infinity)
         .padding(.top, 24)
         .padding(.horizontal)
     }
@@ -241,7 +250,8 @@ struct ArtistDetailView: View {
                 Text(album.title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.primary)
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
         .buttonStyle(.plain)
@@ -270,7 +280,8 @@ struct ArtistDetailView: View {
 
                 Text(item.title ?? "")
                     .font(.caption.weight(.medium))
-                    .lineLimit(2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
                 if let subtitle = item.subtitle, !subtitle.isEmpty {
                     Text(subtitle)

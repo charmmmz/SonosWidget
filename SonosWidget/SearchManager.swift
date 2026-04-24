@@ -1637,57 +1637,99 @@ final class SearchManager {
         findFavorite(matching: item) != nil
     }
 
-    /// Best-effort canonical service hint for a favorite or browse item.
-    /// Returns a stable string per streaming service so favorites from
-    /// different services don't collide on name. Tries, in order:
-    ///   1. Explicit `serviceId` (set by `makeCloudItem` for factory items).
-    ///   2. `sid=X` extracted from the item's URI query string (works for
-    ///      anything with a playable `x-rincon-cpcontainer:` URI).
-    ///   3. `SA_RINCON<N>` token from `resMD` / `metaXML` (the service
-    ///      UDN Sonos embeds in favorite descriptors — covers shortcut
-    ///      artist favorites whose outer `<res>` is empty).
-    ///   4. Numeric prefix of the inner `<item id="10052064artist%3A…">`
-    ///      attribute (Apple Music = 10052064, Spotify has its own, etc.).
-    /// Returns `nil` only when we genuinely can't tell — in that case the
-    /// caller should fall back to name/URI matching without service
-    /// scoping, mirroring the old behavior for legacy entries.
-    private static func serviceSignature(_ item: BrowseItem) -> String? {
+    /// Best-effort canonical service hint for a favorite or browse item,
+    /// always returned in `"sid:<localSid>"` form when we can figure it out.
+    ///
+    /// Factory items (built via `makeArtistItem` / `makeAlbumItem` / …) carry
+    /// the local sid directly. Sonos-parsed favorites lose that field and
+    /// instead have one of:
+    ///   * `sid=<N>` in their URI query — for instantPlay shapes (tracks,
+    ///     albums, playlists). Already a local sid.
+    ///   * `SA_RINCON<N>_<user>` token in `<desc>` — shortcut shape. `N`
+    ///     is either a **cloud service-id** (matches `cloudToLocalSid`) or
+    ///     a **SMAPI service type** (matches `musicServices[*].serviceType`).
+    ///     We look up both and canonicalize to the local sid so both sides
+    ///     of an equality check resolve to the same signature even when
+    ///     the factory item used a cloud id and the stored favorite used
+    ///     the service type.
+    ///   * `id="10052064…"` hex prefix on the inner `<item>` — the middle
+    ///     bytes encode the SMAPI service type (Apple Music = 52064, etc.).
+    ///     Used as a last-resort fallback for shortcut favs whose `<desc>`
+    ///     didn't survive the round-trip.
+    ///
+    /// Returns `nil` when we genuinely can't tell; callers then fall back
+    /// to plain name/URI matching.
+    private func serviceSignature(_ item: BrowseItem) -> String? {
         if let sid = item.serviceId { return "sid:\(sid)" }
+
         if let uri = item.uri, let q = uri.split(separator: "?").last {
             for param in q.split(separator: "&") {
                 let kv = param.split(separator: "=", maxSplits: 1)
-                if kv.count == 2, kv[0] == "sid" { return "sid:\(kv[1])" }
+                if kv.count == 2, kv[0] == "sid", let n = Int(kv[1]) {
+                    return "sid:\(n)"
+                }
             }
         }
+
         for blob in [item.resMD, item.metaXML].compactMap({ $0 }) {
             if let range = blob.range(of: "SA_RINCON") {
-                let digits = blob[range.upperBound...].prefix { $0.isNumber }
-                if !digits.isEmpty { return "rincon:\(digits)" }
+                let digits = String(blob[range.upperBound...].prefix { $0.isNumber })
+                if digits.isEmpty { continue }
+                if let canonical = canonicalLocalSid(forCloudOrServiceTypeDigits: digits) {
+                    return "sid:\(canonical)"
+                }
+                // Unknown service — keep a stable fallback signature so
+                // two favorites from the same unknown service still match.
+                return "rincon:\(digits)"
             }
         }
+
         if let resMD = item.resMD, let idRange = resMD.range(of: "id=\"") {
-            let digits = resMD[idRange.upperBound...].prefix { $0.isNumber }
-            if digits.count >= 6 { return "prefix:\(digits)" }
+            let digits = String(resMD[idRange.upperBound...].prefix { $0.isNumber })
+            if digits.count >= 6 {
+                // Prefix format appears to be `100<hex>` where the trailing
+                // portion matches a SMAPI service-type. Try multiple
+                // reasonable slices to recover a known service.
+                let suffixes = [digits.dropFirst(2), digits.dropFirst(3), digits.dropFirst(4)]
+                for sfx in suffixes {
+                    if let canonical = canonicalLocalSid(forCloudOrServiceTypeDigits: String(sfx)) {
+                        return "sid:\(canonical)"
+                    }
+                }
+                return "prefix:\(digits)"
+            }
+        }
+        return nil
+    }
+
+    /// Accepts a numeric token that might be either a Sonos *cloud service id*
+    /// (key of `cloudToLocalSid`) or a SMAPI *service type* (matches
+    /// `musicServices[*].serviceType`) and returns the corresponding local
+    /// sid when either mapping knows about it.
+    private func canonicalLocalSid(forCloudOrServiceTypeDigits digits: String) -> Int? {
+        if let localSid = cloudToLocalSid[digits] { return localSid }
+        if let match = musicServices.first(where: { $0.serviceType == digits }) {
+            return match.id
         }
         return nil
     }
 
     private func findFavorite(matching item: BrowseItem) -> BrowseItem? {
-        let itemSig = Self.serviceSignature(item)
+        let itemSig = serviceSignature(item)
         // Service-aware predicate: if we have signatures for both sides,
         // reject mismatches outright so "Taylor Swift on Apple Music"
         // doesn't look favorited because "Taylor Swift on Spotify" is.
         // If either side lacks a signature (legacy UPnP-sourced items,
         // unknown service), don't veto — name/URI match still applies.
-        let sigOK: (BrowseItem) -> Bool = { fav in
-            guard let a = itemSig, let b = Self.serviceSignature(fav) else { return true }
+        let sigOK: (BrowseItem) -> Bool = { [self] fav in
+            guard let a = itemSig, let b = serviceSignature(fav) else { return true }
             return a == b
         }
 
-        if let uri = item.uri {
+        if let uri = item.uri, !uri.isEmpty {
             let normalizedURI = uri.split(separator: "?").first.map(String.init) ?? uri
             if let match = favorites.first(where: { fav in
-                guard sigOK(fav), let favURI = fav.uri else { return false }
+                guard sigOK(fav), let favURI = fav.uri, !favURI.isEmpty else { return false }
                 let normalizedFav = favURI.split(separator: "?").first.map(String.init) ?? favURI
                 return normalizedFav == normalizedURI
             }) { return match }

@@ -396,7 +396,11 @@ struct SearchView: View {
 
             Text(item.title)
                 .font(.caption.weight(.medium))
-                .lineLimit(2)
+                // Single-line with trailing ellipsis keeps the card heights
+                // uniform across the horizontal scroll — two-line wrapping
+                // looked ragged when some titles fit and others didn't.
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .foregroundStyle(.primary)
 
             categoryLabel(for: item, category: category)
@@ -1045,7 +1049,8 @@ struct SearchView: View {
 
             Text(item.title)
                 .font(.caption.weight(.medium))
-                .lineLimit(2)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             if !item.artist.isEmpty {
                 Text(item.artist)
@@ -1282,7 +1287,8 @@ struct FavoriteCategoryDetailView: View {
 
             Text(item.title)
                 .font(.caption.weight(.medium))
-                .lineLimit(2)
+                .lineLimit(1)
+                .truncationMode(.tail)
                 .foregroundStyle(.primary)
 
             subtitleLabel(for: item)

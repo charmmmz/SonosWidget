@@ -779,6 +779,13 @@ struct NowPlayingOverlay: View {
     @State private var dragDownOffset: CGFloat = 0
     @State private var nowPlayingInfo: SonosCloudAPI.NowPlayingResponse?
     @State private var lastFetchedTrackURI: String?
+    /// Handle on the in-flight NowPlaying fetch so we can cancel it when
+    /// the track changes again before the previous lookup resolves. Without
+    /// this, a slow fetch for track A could land after track B's fetch and
+    /// stomp the newer artist/album data, or — worse — the user could tap
+    /// the album/artist link while stale `nowPlayingInfo` still holds the
+    /// previous song, sending them to the wrong detail page.
+    @State private var nowPlayingFetchTask: Task<Void, Never>?
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
@@ -806,7 +813,15 @@ struct NowPlayingOverlay: View {
         .onChange(of: manager.trackInfo?.trackURI) { _, newURI in
             guard let uri = newURI, uri != lastFetchedTrackURI else { return }
             lastFetchedTrackURI = uri
-            Task {
+            // Immediately blank the stale artist/album payload so the
+            // header's NavigationLinks fall back to plain Text until the
+            // new track's response lands. If we skip this, tapping the
+            // album or artist right after an external control point
+            // (official Sonos app, voice assistant, etc.) changes the
+            // song would still push the *previous* song's detail view.
+            nowPlayingInfo = nil
+            nowPlayingFetchTask?.cancel()
+            nowPlayingFetchTask = Task {
                 // Keep SearchManager's speaker IP in sync before probing —
                 // if the selected speaker just became available, this lets
                 // `ensureMusicServicesPopulated` reach the speaker.
@@ -817,6 +832,7 @@ struct NowPlayingOverlay: View {
                 // artist / album text renders as plain Text (non-tappable)
                 // until the user visits the Browse tab.
                 await searchManager.probeLinkedServices()
+                guard !Task.isCancelled else { return }
                 await fetchNowPlaying(trackURI: uri)
             }
         }
@@ -1190,10 +1206,16 @@ struct NowPlayingOverlay: View {
                 token: token, householdId: householdId,
                 serviceId: cloudSid, accountId: accountId,
                 trackObjectId: objectId)
+            // Drop the result if the current track has moved on during the
+            // request — we don't want an older lookup overwriting a newer
+            // song's info when two track-changes happen back-to-back.
+            guard manager.trackInfo?.trackURI == trackURI else { return }
             nowPlayingInfo = response
         } catch {
             SonosLog.error(.nowPlaying, "Fetch failed: \(error)")
-            nowPlayingInfo = nil
+            if manager.trackInfo?.trackURI == trackURI {
+                nowPlayingInfo = nil
+            }
         }
     }
 
