@@ -1766,18 +1766,45 @@ final class SonosManager {
             // No existing activity — create one (always, even during TRANSITIONING).
             let state = makeActivityState()
             let attrs = SonosActivityAttributes(speakerName: speaker.name)
+            let content = ActivityContent(state: state, staleDate: nil)
+
+            // First try the user's preferred mode. If that's `.token` (relay
+            // looks reachable) but the app doesn't actually have an
+            // `aps-environment` entitlement — i.e. no Apple Developer account
+            // / push capability is set up yet — `Activity.request` will throw.
+            // Fall back to local-update mode unconditionally so the Lock
+            // Screen still shows *something*. The user gets a working Live
+            // Activity right now, and once they enrol + sign with the right
+            // entitlement the same code path automatically upgrades to push.
+            if useRelay {
+                do {
+                    let activity = try Activity.request(
+                        attributes: attrs,
+                        content: content,
+                        pushType: .token
+                    )
+                    currentActivity = activity
+                    currentActivityUsesRelay = true
+                    spawnPushTokenObserver(activity: activity, speakerName: speaker.name)
+                    return
+                } catch {
+                    SonosLog.info(.station,
+                        "Activity.request(.token) failed (\(error.localizedDescription)). " +
+                        "Falling back to local-update Live Activity.")
+                }
+            }
+
             do {
                 let activity = try Activity.request(
                     attributes: attrs,
-                    content: .init(state: state, staleDate: nil),
-                    pushType: useRelay ? .token : nil
+                    content: content,
+                    pushType: nil
                 )
                 currentActivity = activity
-                currentActivityUsesRelay = useRelay
-                if useRelay {
-                    spawnPushTokenObserver(activity: activity, speakerName: speaker.name)
-                }
+                currentActivityUsesRelay = false
             } catch {
+                SonosLog.error(.station,
+                    "Activity.request failed: \(error.localizedDescription)")
                 currentActivityUsesRelay = false
             }
             return
