@@ -8,6 +8,7 @@ enum SonosAPI {
     private nonisolated static let groupRenderingControl = "/MediaRenderer/GroupRenderingControl/Control"
     private nonisolated static let zoneGroupTopology = "/ZoneGroupTopology/Control"
     private nonisolated static let contentDirectory = "/MediaServer/ContentDirectory/Control"
+    private nonisolated static let deviceProperties = "/DeviceProperties/Control"
 
     // MARK: - Playback Controls
 
@@ -80,6 +81,25 @@ enum SonosAPI {
         return extractTag("CurrentURI", from: xml) ?? ""
     }
 
+    /// Soundbar audio-input format, exposed through `DeviceProperties.GetZoneInfo`'s
+    /// `HTAudioIn` field. The returned integer is a Sonos-internal code that
+    /// `TVAudioFormat.from(htAudioInCode:)` translates into a friendly label
+    /// ("Dolby Atmos (TrueHD)", "Dolby 5.1", "PCM 2.0", "No input"…).
+    ///
+    /// `HTAudioIn` is present on every Sonos device but only meaningful on
+    /// soundbars (Beam, Arc, Arc Ultra, Playbar). For non-HT speakers it stays
+    /// at `0` ("No input connected"). Callers should gate this behind a
+    /// soundbar check (e.g. when `TrackURI` is `x-sonos-htastream:`).
+    nonisolated static func getHTAudioIn(ip: String) async throws -> Int {
+        let xml = try await soap(ip: ip, endpoint: deviceProperties,
+                                 service: "DeviceProperties",
+                                 action: "GetZoneInfo", body: "")
+        guard let raw = extractTag("HTAudioIn", from: xml), let code = Int(raw) else {
+            return 0
+        }
+        return code
+    }
+
     /// Returns the raw SOAP XML from GetPositionInfo (for diagnostic use).
     nonisolated static func getRawPositionInfo(ip: String) async throws -> String {
         try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",
@@ -102,6 +122,30 @@ enum SonosAPI {
 
         let decodedURI = decodeXMLEntities(trackURI)
         let source = PlaybackSource.from(trackURI: decodedURI)
+        var tvFormat: TVAudioFormat?
+
+        // Soundbar TV input — HDMI eARC / optical / coax. Sonos doesn't expose
+        // any of the audio-format info through `GetPositionInfo` /
+        // `GetMediaInfo` (both return `NOT_IMPLEMENTED` placeholders), it lives
+        // on `DeviceProperties.GetZoneInfo`'s `HTAudioIn` integer code. Fetch
+        // it in parallel with the rest so we can stamp the codec / channel
+        // layout into the returned TrackInfo.
+        if source == .tv {
+            if let code = try? await getHTAudioIn(ip: ip) {
+                tvFormat = TVAudioFormat.from(htAudioInCode: code)
+                #if DEBUG
+                SonosLog.debug(.tv, "HTAudioIn=\(code) → \(tvFormat?.label ?? "nil")")
+                #endif
+            }
+        }
+
+        // Discovery dump kept around for debugging unfamiliar firmwares — only
+        // logs at most once per cool-down window.
+        #if DEBUG
+        if decodedURI.hasPrefix("x-sonos-htastream:") {
+            await runTVDiagnostics(ip: ip, uri: decodedURI, positionInfoXML: xml)
+        }
+        #endif
 
         if let raw = extractTag("TrackMetaData", from: xml) {
             let meta = decodeXMLEntities(raw)
@@ -147,10 +191,23 @@ enum SonosAPI {
             audioQuality = parseAudioQuality(from: meta, source: source)
         }
 
+        // For TV input the speaker doesn't ship track metadata at all — the
+        // earlier parse leaves title/artist/album as the literal "Unknown"
+        // sentinel. Replace title with "TV" and use the artist subtitle slot
+        // for a state label (`Live audio` vs `No signal`). The actual format
+        // goes in the dedicated pill below the LIVE bar so this row stays
+        // generic across hardware (Sonos doesn't expose HDMI vs Optical).
+        if source == .tv {
+            title = "TV"
+            artist = tvFormat?.statusLabel ?? "Live audio"
+            album = ""
+        }
+
         return TrackInfo(title: title, artist: artist, album: album,
                          albumArtURL: albumArtURL, duration: duration, position: position,
                          source: source, audioQuality: audioQuality,
-                         trackURI: decodeXMLEntities(trackURI))
+                         trackURI: decodeXMLEntities(trackURI),
+                         tvFormat: tvFormat)
     }
 
     // MARK: - Volume
@@ -795,6 +852,80 @@ enum SonosAPI {
             guard !smapiURI.isEmpty else { return nil }
             return MusicService(id: id, name: name, smapiURI: smapiURI, capabilitiesMask: caps, authType: auth)
         }
+    }
+
+    // MARK: - TV / HTA Stream Diagnostics
+
+    /// Lock-protected timestamp gate so the diagnostic dump only fires once
+    /// per cool-down window even though `getPositionInfo` is polled ~1×/s.
+    /// `nonisolated` on the lock + var lets us mutate without crossing actor
+    /// boundaries — the `NSLock` provides the only synchronization needed.
+    private final class TVDiagnosticsThrottle {
+        private nonisolated static let lock = NSLock()
+        nonisolated(unsafe) private static var lastRun: Date?
+        private nonisolated static let cooldown: TimeInterval = 30
+
+        nonisolated static func shouldRun() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            let now = Date()
+            if let last = lastRun, now.timeIntervalSince(last) < cooldown {
+                return false
+            }
+            lastRun = now
+            return true
+        }
+    }
+
+    /// Probe Sonos endpoints for the soundbar's audio-format signal and dump
+    /// to the `[TV]` log channel. Debug-only.
+    ///
+    /// History: `GetPositionInfo` and `GetMediaInfo` were ruled out
+    /// (`TrackMetaData` is `NOT_IMPLEMENTED`, `CurrentURIMetaData` is a
+    /// placeholder `homeTheater` DIDL). The format info actually lives on
+    /// `DeviceProperties.GetZoneInfo`'s `HTAudioIn` integer field — same
+    /// source soco / Home Assistant's `sensor.<speaker>_audio_input_format`
+    /// use. This dump confirms that on the user's specific firmware.
+    private nonisolated static func runTVDiagnostics(ip: String, uri: String,
+                                                      positionInfoXML: String) async {
+        #if DEBUG
+        // `getPositionInfo` is polled ~1×/s. Without throttling we'd fire
+        // multiple SOAP probes every second and bury the Xcode console.
+        guard TVDiagnosticsThrottle.shouldRun() else { return }
+        SonosLog.debug(.tv, "──── TV stream diagnostics ────")
+        SonosLog.debug(.tv, "TrackURI: \(uri)")
+
+        // The actual data source — `HTAudioIn` is an integer code that
+        // `TVAudioFormat.from(htAudioInCode:)` translates into a label.
+        do {
+            let zone = try await soap(ip: ip, endpoint: deviceProperties,
+                                      service: "DeviceProperties",
+                                      action: "GetZoneInfo", body: "")
+            SonosLog.debug(.tv, "── DeviceProperties.GetZoneInfo ──\n\(zone)")
+            if let raw = extractTag("HTAudioIn", from: zone), let code = Int(raw) {
+                let format = TVAudioFormat.from(htAudioInCode: code)
+                SonosLog.debug(.tv,
+                    "Decoded HTAudioIn=\(code) → \"\(format.label)\" "
+                    + "(codec=\(format.codec), layout=\(format.channelLayout ?? "—"), "
+                    + "atmos=\(format.isAtmos))")
+            }
+        } catch {
+            SonosLog.debug(.tv, "── GetZoneInfo FAILED: \(error.localizedDescription)")
+        }
+
+        // Kept around as breadcrumbs so the dump is self-contained when
+        // grepping logs — both confirmed to NOT contain useful format data.
+        SonosLog.debug(.tv, "── GetPositionInfo (raw) ──\n\(positionInfoXML)")
+        do {
+            let media = try await soap(ip: ip, endpoint: avTransport,
+                                       service: "AVTransport", action: "GetMediaInfo",
+                                       body: "<InstanceID>0</InstanceID>")
+            SonosLog.debug(.tv, "── GetMediaInfo ──\n\(media)")
+        } catch {
+            SonosLog.debug(.tv, "── GetMediaInfo FAILED: \(error.localizedDescription)")
+        }
+
+        SonosLog.debug(.tv, "──── end diagnostics ────")
+        #endif
     }
 
     // MARK: - Audio Quality Parsing

@@ -51,6 +51,18 @@ final class SonosManager {
     private var lastCloudQualityAttempt: Date = .distantPast
     private var consecutiveFailures = 0
     private var currentActivity: Activity<SonosActivityAttributes>?
+    /// Mirrors the `pushType` we asked for when creating `currentActivity`.
+    /// Used to detect a relay-availability flip and rebuild the activity in
+    /// the new mode (token push vs local update) without leaking the old.
+    private var currentActivityUsesRelay: Bool = false
+    /// Long-lived task draining `Activity.pushTokenUpdates` for the relay.
+    /// Cancelled on activity end / mode switch so we don't double-register
+    /// stale tokens with the NAS.
+    private var pushTokenTask: Task<Void, Never>?
+    /// Most recent Live Activity push token we successfully POSTed to the
+    /// relay. We keep this around so `stopLiveActivity` can fire a DELETE
+    /// even after the underlying activity is gone.
+    private var lastRegisteredPushToken: String?
     private var albumArtTask: Task<Void, Never>?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var backgroundKeepaliveTask: Task<Void, Never>?
@@ -1741,15 +1753,33 @@ final class SonosManager {
             currentActivity = Activity<SonosActivityAttributes>.activities.first
         }
 
+        let useRelay = RelayManager.shared.isAvailable
+
+        // If the relay just came online (or just went away) but we already
+        // own a Live Activity created in the *other* mode, end it. The
+        // create-path below will then build a fresh one in the right mode.
+        if let _ = currentActivity, currentActivityUsesRelay != useRelay {
+            stopLiveActivity()
+        }
+
         if currentActivity == nil {
             // No existing activity — create one (always, even during TRANSITIONING).
             let state = makeActivityState()
             let attrs = SonosActivityAttributes(speakerName: speaker.name)
-            currentActivity = try? Activity.request(
-                attributes: attrs,
-                content: .init(state: state, staleDate: nil),
-                pushType: nil
-            )
+            do {
+                let activity = try Activity.request(
+                    attributes: attrs,
+                    content: .init(state: state, staleDate: nil),
+                    pushType: useRelay ? .token : nil
+                )
+                currentActivity = activity
+                currentActivityUsesRelay = useRelay
+                if useRelay {
+                    spawnPushTokenObserver(activity: activity, speakerName: speaker.name)
+                }
+            } catch {
+                currentActivityUsesRelay = false
+            }
             return
         }
 
@@ -1765,12 +1795,55 @@ final class SonosManager {
         Task { await currentActivity?.update(.init(state: state, staleDate: nil)) }
     }
 
+    /// Drains `Activity.pushTokenUpdates` and POSTs each rotation to the
+    /// relay so the NAS knows where to deliver Live Activity pushes for the
+    /// current Sonos coordinator. Tokens roll over occasionally; we resend
+    /// every time the sequence yields rather than caching aggressively.
+    private func spawnPushTokenObserver(activity: Activity<SonosActivityAttributes>,
+                                        speakerName: String) {
+        pushTokenTask?.cancel()
+        let groupId = liveActivityGroupId() ?? speakerName
+        pushTokenTask = Task { [weak self] in
+            for await tokenData in activity.pushTokenUpdates {
+                guard !Task.isCancelled else { return }
+                let hex = tokenData.map { String(format: "%02x", $0) }.joined()
+                guard let url = await RelayManager.shared.url else { continue }
+                do {
+                    try await RelayClient.registerActivity(
+                        baseURL: url,
+                        groupId: groupId,
+                        token: hex,
+                        speakerName: speakerName
+                    )
+                    await MainActor.run { self?.lastRegisteredPushToken = hex }
+                } catch {
+                    SonosLog.info(.station, "relay register failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Stable cross-process identifier for "this group of speakers". Matches
+    /// what the relay's `SonosBridge` keys snapshots on (`device.Host`), so
+    /// the relay can find the right token list when an event lands.
+    private func liveActivityGroupId() -> String? {
+        selectedSpeaker?.playbackIP
+    }
+
     func stopLiveActivity() {
         // Only end activities when we actually have a reference — this prevents
         // accidentally killing a valid activity on app launch before state is fetched.
         guard let activity = currentActivity else { return }
         currentActivity = nil
+        currentActivityUsesRelay = false
+        pushTokenTask?.cancel()
+        pushTokenTask = nil
+        let tokenToUnregister = lastRegisteredPushToken
+        lastRegisteredPushToken = nil
         Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        if let token = tokenToUnregister, let url = RelayManager.shared.url {
+            Task { try? await RelayClient.unregisterActivity(baseURL: url, token: token) }
+        }
     }
 
     /// End ALL Live Activities regardless of in-memory reference.
@@ -1778,8 +1851,16 @@ final class SonosManager {
     /// that survived a force-quit (where willTerminate is not guaranteed).
     func endAllActivities() {
         currentActivity = nil
+        currentActivityUsesRelay = false
+        pushTokenTask?.cancel()
+        pushTokenTask = nil
+        let tokenToUnregister = lastRegisteredPushToken
+        lastRegisteredPushToken = nil
         for activity in Activity<SonosActivityAttributes>.activities {
             Task { await activity.end(nil, dismissalPolicy: .immediate) }
+        }
+        if let token = tokenToUnregister, let url = RelayManager.shared.url {
+            Task { try? await RelayClient.unregisterActivity(baseURL: url, token: token) }
         }
     }
 

@@ -20,6 +20,7 @@ enum PlaybackSource: String, Codable, Sendable {
     case airplay
     case radio
     case lineIn
+    case tv          // HDMI eARC / optical / coax on a Sonos soundbar
     case library
     case unknown
 
@@ -34,6 +35,7 @@ enum PlaybackSource: String, Codable, Sendable {
         case .airplay:       return "AirPlay"
         case .radio:         return "Radio"
         case .lineIn:        return "Line-In"
+        case .tv:            return "TV"
         case .library:       return "Library"
         case .unknown:       return ""
         }
@@ -44,6 +46,7 @@ enum PlaybackSource: String, Codable, Sendable {
         case .airplay:  return "airplayaudio"
         case .radio:    return "radio"
         case .lineIn:   return "cable.connector"
+        case .tv:       return "tv"
         case .library:  return "externaldrive"
         default:        return "music.note"
         }
@@ -72,6 +75,7 @@ enum PlaybackSource: String, Codable, Sendable {
         case .airplay:       return Color(.sRGB, red: 0.0, green: 0.48, blue: 1.0, opacity: 1)
         case .radio:         return Color(.sRGB, red: 1.0, green: 0.58, blue: 0.0, opacity: 1)
         case .lineIn:        return .gray
+        case .tv:            return Color(.sRGB, red: 0.30, green: 0.32, blue: 0.36, opacity: 1)
         case .library:       return .purple
         case .unknown:       return .clear
         }
@@ -101,6 +105,7 @@ enum PlaybackSource: String, Codable, Sendable {
         return .unknown
     }
 
+
     nonisolated static func from(trackURI: String) -> PlaybackSource {
         let uri = trackURI.lowercased()
 
@@ -118,6 +123,9 @@ enum PlaybackSource: String, Codable, Sendable {
         }
         if uri.contains("sid=284") {
             return .youtubeMusic
+        }
+        if uri.hasPrefix("x-sonos-htastream:") {
+            return .tv
         }
         if uri.hasPrefix("x-sonos-vli:") || uri.hasPrefix("x-rincon-stream:") {
             return .airplay
@@ -194,9 +202,123 @@ struct TrackInfo: Codable, Equatable, Sendable {
     var audioQuality: AudioQuality?
     /// Raw Sonos transport URI (for debugging/comparison).
     var trackURI: String?
+    /// Decoded TV audio-input format from `DeviceProperties.GetZoneInfo`'s
+    /// `HTAudioIn` field. Populated only when `source == .tv`.
+    var tvFormat: TVAudioFormat?
 
     var durationSeconds: TimeInterval { SonosTime.parse(duration ?? "") }
     var positionSeconds: TimeInterval { SonosTime.parse(position ?? "") }
+}
+
+// MARK: - TV Audio Format
+
+/// Decoded soundbar audio-input format. Sourced from
+/// `DeviceProperties.GetZoneInfo`'s `HTAudioIn` integer code; the lookup table
+/// matches soco's `AUDIO_INPUT_FORMATS` (the same one Home Assistant exposes
+/// as `sensor.<speaker>_audio_input_format`).
+struct TVAudioFormat: Codable, Equatable, Sendable {
+    /// Raw `HTAudioIn` code Sonos returned. Kept around for the geek view —
+    /// unmapped codes still render as "Unknown (code: <n>)" instead of being
+    /// silently dropped.
+    var rawCode: Int
+    /// Human-readable label from the Sonos format table, e.g.
+    /// "Dolby Atmos (TrueHD)" / "Dolby 5.1" / "PCM 2.0" / "No input".
+    var label: String
+
+    /// Whether the soundbar is currently receiving any audio at all.
+    /// "No input", "No input connected", and "No audio" all map to false.
+    nonisolated var hasSignal: Bool {
+        let lower = label.lowercased()
+        return !(lower.contains("no input") || lower.contains("no audio"))
+    }
+
+    /// True when the bitstream is carrying Dolby Atmos object audio
+    /// (over TrueHD, DD+, or MAT 2.0).
+    nonisolated var isAtmos: Bool {
+        label.lowercased().contains("atmos")
+    }
+
+    /// "5.1" / "7.1" / "2.0" — extracted from the label so we can render it
+    /// as a separate pill in the UI. Returns nil when the label has no
+    /// channel suffix (e.g. "No input").
+    nonisolated var channelLayout: String? {
+        for layout in ["7.1", "5.1", "2.0"] where label.contains(layout) {
+            return layout
+        }
+        return nil
+    }
+
+    /// Codec family without the channel suffix —"Dolby Atmos · TrueHD",
+    /// "Dolby Digital+", "PCM" — so the UI can render codec and channel
+    /// layout in separate visual slots.
+    nonisolated var codec: String {
+        let l = label
+        if l.contains("Atmos (TrueHD)")     { return "Dolby Atmos · TrueHD" }
+        if l.contains("Atmos (DD+)")        { return "Dolby Atmos · DD+" }
+        if l.contains("Atmos (MAT 2.0)")    { return "Dolby Atmos · MAT" }
+        if l.contains("Dolby TrueHD")       { return "Dolby TrueHD" }
+        if l.contains("Dolby Digital Plus") { return "Dolby Digital+" }
+        if l.contains("Dolby Multichannel PCM") { return "Multichannel PCM" }
+        if l.contains("Multichannel PCM")   { return "Multichannel PCM" }
+        if l.contains("Dolby")              { return "Dolby Digital" }
+        if l.contains("DTS")                { return "DTS" }
+        if l.hasPrefix("PCM")               { return "PCM" }
+        if l == "Stereo"                    { return "Stereo PCM" }
+        return l   // fall back to raw label (covers "No input", "No audio")
+    }
+
+    /// Subtitle slot text — "Live audio" when the soundbar is receiving a
+    /// stream, "No signal" when it isn't. Hardware-agnostic on purpose: we
+    /// can't reliably tell HDMI vs Optical (Sonos's URI is `:spdif` for
+    /// both), so we describe the *state* of the input rather than the
+    /// physical port.
+    nonisolated var statusLabel: String {
+        hasSignal ? "Live audio" : "No signal"
+    }
+
+    /// One-line geek summary used inline ("Dolby Atmos · TrueHD · 7.1").
+    nonisolated var geekLabel: String {
+        var parts = [codec]
+        if let layout = channelLayout, !codec.contains(layout) {
+            parts.append(layout)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Map of Sonos `HTAudioIn` codes → friendly labels. Kept verbatim from
+    /// soco's `AUDIO_INPUT_FORMATS` table so we benefit from the community's
+    /// reverse-engineering (the bitfield encoding isn't documented by Sonos;
+    /// these codes come from observation across firmware versions).
+    private nonisolated static let knownFormats: [Int: String] = [
+        0: "No input connected",
+        2: "Stereo",
+        7: "Dolby 2.0",
+        18: "Dolby 5.1",
+        21: "No input",
+        22: "No audio",
+        59: "Dolby Atmos (DD+)",
+        61: "Dolby Atmos (TrueHD)",
+        63: "Dolby Atmos (MAT 2.0)",
+        33554434: "PCM 2.0",
+        33554454: "PCM 2.0 no audio",
+        33554488: "Dolby 2.0",
+        33554490: "Dolby Digital Plus 2.0",
+        33554492: "Dolby TrueHD 2.0",
+        33554494: "Dolby Multichannel PCM 2.0",
+        84934658: "Multichannel PCM 5.1",
+        84934713: "Dolby 5.1",
+        84934714: "Dolby Digital Plus 5.1",
+        84934716: "Dolby TrueHD 5.1",
+        84934718: "Dolby Multichannel PCM 5.1",
+        84934721: "DTS 5.1",
+        118489090: "Multichannel PCM 7.1",
+        118489146: "Dolby Digital Plus 7.1",
+    ]
+
+    nonisolated static func from(htAudioInCode code: Int) -> TVAudioFormat {
+        let label = knownFormats[code] ?? "Unknown (code: \(code))"
+        return TVAudioFormat(rawCode: code, label: label)
+    }
 }
 
 // MARK: - Audio Quality

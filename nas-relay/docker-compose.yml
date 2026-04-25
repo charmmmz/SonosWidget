@@ -1,0 +1,46 @@
+# Sonos Live Activity Relay — for QNAP Container Station via Portainer Stacks.
+#
+# Why network_mode: host?
+#   Sonos UPnP eventing (GENA) requires the relay to expose a callback URL
+#   that each Sonos device can POST events back to. In Docker bridge mode
+#   we'd have to manually advertise the host's LAN IP + a NATed port; host
+#   mode lets the lib auto-detect the interface and avoids that whole class
+#   of "events stop firing after a while" headaches. SSDP multicast for
+#   discovery also Just Works in host mode.
+#
+# To bring up:
+#   1. cp .env.example .env  (then fill in the values)
+#   2. docker compose up -d --build
+#   (or paste this file into Portainer → Stacks → New stack, attach the
+#    .env content under "Environment variables".)
+
+services:
+  relay:
+    build: .
+    image: sonos-live-activity-relay:latest
+    container_name: sonos-live-activity-relay
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RELAY_PORT: ${RELAY_PORT:-8787}
+
+      # Sonos — provide a single speaker IP and the lib enumerates the rest
+      # via ZoneGroupTopology. Pick any always-on speaker on your network.
+      SONOS_SEED_IP: ${SONOS_SEED_IP}
+
+      # APNs — leave blank during initial setup; the relay runs in dry-run
+      # mode and just logs the payloads it *would* have sent. Fill these in
+      # once you have your Apple Developer .p8 key.
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.charm.SonosWidget}
+      APNS_KEY_PATH: ${APNS_KEY_PATH:-/app/data/apns.p8}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      # Use the sandbox APNs endpoint for development builds (Xcode-signed),
+      # flip to "true" only after you ship a TestFlight / App Store build.
+      APNS_PRODUCTION: ${APNS_PRODUCTION:-false}
+
+    volumes:
+      # tokens.json (registered Live Activity push tokens) + apns.p8 live here.
+      # Don't bake either into the image.
+      - ./data:/app/data

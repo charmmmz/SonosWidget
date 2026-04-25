@@ -32,6 +32,7 @@ enum SonosLog {
         case nowPlaying     = "NowPlaying"
         case parseCloudIds  = "parseCloudIds"
         case navItem        = "NavItem"
+        case tv             = "TV"
     }
 
     /// Always logged. Use sparingly for unexpected failures worth reporting.

@@ -48,8 +48,17 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .onAppear { manager.startAutoRefresh() }
-        .onDisappear { manager.stopAutoRefresh() }
+        .onAppear {
+            manager.startAutoRefresh()
+            // Kick the relay watchdog so the Live Activity path can flip to
+            // APNs mode the moment the NAS is reachable, without making the
+            // user open Settings first.
+            RelayManager.shared.startPeriodicProbe()
+        }
+        .onDisappear {
+            manager.stopAutoRefresh()
+            RelayManager.shared.stopPeriodicProbe()
+        }
     }
 }
 

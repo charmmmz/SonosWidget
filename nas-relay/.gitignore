@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+data/tokens.json
+data/apns.p8
+data/*.p8
+*.log
+.DS_Store

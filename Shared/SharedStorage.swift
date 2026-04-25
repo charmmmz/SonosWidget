@@ -154,6 +154,16 @@ enum SharedStorage {
         }
     }
 
+    // MARK: - Live Activity Relay
+
+    /// User-configured base URL of the optional NAS relay (e.g.
+    /// `http://192.168.50.10:8787`). Empty / nil = relay disabled, fall
+    /// back to local Activity updates.
+    nonisolated static var relayURLString: String? {
+        get { defaults.string(forKey: "relayURL") }
+        set { defaults.set(newValue, forKey: "relayURL") }
+    }
+
     // MARK: - Saved Speakers
 
     nonisolated static var savedSpeakers: [SonosPlayer] {

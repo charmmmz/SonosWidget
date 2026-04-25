@@ -487,7 +487,16 @@ private struct SpeakerGroupCardView: View {
                             .font(.subheadline.weight(.semibold))
                             .lineLimit(1)
 
-                        if let track = group.trackInfo, track.title != "Unknown" {
+                        if let track = group.trackInfo, track.source == .tv {
+                            // Match the music row's "title — subtitle" pattern
+                            // and styling exactly (.caption + .secondary). Use
+                            // the format label as the subtitle so the row
+                            // reads e.g. "TV — Multichannel PCM 5.1".
+                            Text("\(track.title) — \(track.tvFormat?.label ?? track.artist)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        } else if let track = group.trackInfo, track.title != "Unknown" {
                             Text("\(track.title) — \(track.artist)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -910,11 +919,17 @@ struct NowPlayingOverlay: View {
             progressView
                 .padding(.top, 18 * s)
 
-            playbackControls
-                .padding(.top, 22 * s)
+            // TV input has no transport actions worth surfacing
+            // (`GetCurrentTransportActions` returns just `Set, Play` and the
+            // soundbar can't seek or skip a live stream). Hide the row
+            // entirely and pull volume up so the screen doesn't feel empty.
+            if manager.trackInfo?.source != .tv {
+                playbackControls
+                    .padding(.top, 22 * s)
+            }
 
             volumeControl
-                .padding(.top, 22 * s)
+                .padding(.top, manager.trackInfo?.source == .tv ? 28 * s : 22 * s)
 
             bottomActions(showQueue: true)
                 .padding(.top, 16 * s)
@@ -973,8 +988,10 @@ struct NowPlayingOverlay: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 14)
 
-                playbackControls.padding(.top, 10)
-                volumeControl.padding(.top, 6)
+                if manager.trackInfo?.source != .tv {
+                    playbackControls.padding(.top, 10)
+                }
+                volumeControl.padding(.top, manager.trackInfo?.source == .tv ? 14 : 6)
                 bottomActions(showQueue: false).padding(.top, 6)
 
                 Spacer(minLength: 0)
@@ -1079,13 +1096,19 @@ struct NowPlayingOverlay: View {
 
     @ViewBuilder
     private func albumArtView(size: CGFloat) -> some View {
-        ZStack {
+        let isTV = manager.trackInfo?.source == .tv
+        return ZStack {
             RoundedRectangle(cornerRadius: 16).fill(.quaternary)
                 .overlay {
-                    Image(systemName: "music.note").font(.system(size: 60)).foregroundStyle(.tertiary)
+                    // For TV input there's no album art — swap the music-note
+                    // placeholder for a TV glyph so the now-playing screen
+                    // immediately reads as "watching" instead of "buffering".
+                    Image(systemName: isTV ? "tv" : "music.note")
+                        .font(.system(size: isTV ? 96 : 60, weight: isTV ? .light : .regular))
+                        .foregroundStyle(.tertiary)
                 }
 
-            if let image = manager.albumArtImage {
+            if !isTV, let image = manager.albumArtImage {
                 Image(uiImage: image)
                     .resizable().aspectRatio(1, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -1222,7 +1245,85 @@ struct NowPlayingOverlay: View {
     // MARK: - Progress
 
     /// Inner progress content — no outer padding, usable in both portrait and landscape info column.
+    @ViewBuilder
     private var progressContent: some View {
+        if manager.trackInfo?.source == .tv {
+            tvFormatPanel
+        } else {
+            musicProgressContent
+        }
+    }
+
+    /// TV input has no scrubbable timeline (live stream, no duration). We
+    /// keep the same vertical slot the music slider lives in — a static
+    /// "LIVE" bar on top and the format badge in the same row the audio-
+    /// quality capsule normally occupies — so the layout stays consistent
+    /// with everything else.
+    @ViewBuilder
+    private var tvFormatPanel: some View {
+        let format = manager.trackInfo?.tvFormat
+        let hasSignal = format?.hasSignal ?? true
+        VStack(spacing: 4) {
+            // Standin for the slider: a thin track with a centered LIVE / IDLE
+            // pill. Same vertical footprint as `ThumblessSlider`, no
+            // interactive affordance because there's nothing to scrub.
+            ZStack {
+                Capsule()
+                    .fill(.white.opacity(0.12))
+                    .frame(height: 4)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(hasSignal ? Color.red : Color.white.opacity(0.4))
+                        .frame(width: 6, height: 6)
+                    Text(hasSignal ? "LIVE" : "IDLE")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.5), in: Capsule())
+                .overlay(
+                    Capsule().stroke(
+                        hasSignal ? Color.red.opacity(0.6) : Color.white.opacity(0.25),
+                        lineWidth: 1)
+                )
+                .foregroundStyle(hasSignal ? .white : .white.opacity(0.6))
+            }
+            .frame(height: 16)
+
+            // Format pill — only when the soundbar is actually receiving a
+            // stream. When it isn't, the "No signal" subtitle above already
+            // tells the story; showing "No input · 0" here would be noise.
+            if let format, format.hasSignal {
+                HStack(spacing: 4) {
+                    if format.isAtmos {
+                        Image("BadgeDolbyAtmos")
+                            .resizable()
+                            .renderingMode(.template)
+                            .scaledToFit()
+                            .frame(height: 11)
+                            .accessibilityLabel("Dolby Atmos")
+                    }
+                    Text(format.codec)
+                        .font(.system(size: 9, weight: .semibold))
+                    if let layout = format.channelLayout {
+                        Text("·")
+                            .font(.system(size: 9))
+                        Text(layout)
+                            .font(.system(size: 9, weight: .medium).monospaced())
+                    }
+                }
+                .foregroundStyle(.white.opacity(0.5))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(.white.opacity(0.08), in: Capsule())
+                .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    /// Standard music timeline + audio-quality badge. Extracted so the TV-mode
+    /// branch can swap in its own panel without touching the slider.
+    private var musicProgressContent: some View {
         VStack(spacing: 4) {
             ThumblessSlider(
                 value: Binding(

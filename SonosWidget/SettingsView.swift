@@ -8,6 +8,14 @@ struct SettingsView: View {
     @Bindable var searchManager: SearchManager
 
     @State private var isConnectingSonos = false
+    /// Bound to the Live Activity Relay TextField. We only push edits into
+    /// `RelayManager` on submit / blur — typing per-character would otherwise
+    /// fire a probe with every keystroke.
+    @State private var relayURLDraft: String = RelayManager.shared.urlString
+
+    /// Re-read the singleton through @Bindable so SwiftUI subscribes to its
+    /// observable changes and re-renders the status row.
+    @Bindable private var relay = RelayManager.shared
 
     var body: some View {
         NavigationStack {
@@ -15,6 +23,7 @@ struct SettingsView: View {
                 sonosAccountSection
                 speakersSection
                 musicServicesSection
+                relaySection
                 aboutSection
             }
             .navigationTitle("Settings")
@@ -24,6 +33,10 @@ struct SettingsView: View {
                 backgroundLayer.ignoresSafeArea()
             }
             .preferredColorScheme(.dark)
+            .onAppear {
+                relayURLDraft = relay.urlString
+                Task { await relay.probeNow() }
+            }
         }
     }
 
@@ -275,6 +288,103 @@ struct SettingsView: View {
                 set: { searchManager.setServiceEnabled(serviceId: sid, enabled: $0) }
             ))
             .labelsHidden()
+        }
+    }
+
+    // MARK: - Live Activity Relay
+
+    @ViewBuilder
+    private var relaySection: some View {
+        Section {
+            TextField("http://192.168.50.10:8787",
+                      text: $relayURLDraft,
+                      axis: .vertical)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .submitLabel(.done)
+                .onSubmit {
+                    relay.setURL(relayURLDraft)
+                }
+
+            relayStatusRow
+
+            Button {
+                // Commit any pending edits (in case the user typed but didn't
+                // press return) and force an immediate probe.
+                if relay.urlString != relayURLDraft {
+                    relay.setURL(relayURLDraft)
+                } else {
+                    Task { await relay.probeNow() }
+                }
+            } label: {
+                Label("Test Connection", systemImage: "antenna.radiowaves.left.and.right")
+            }
+            .disabled(relayURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } header: {
+            Text("Live Activity Relay")
+        } footer: {
+            Text("""
+                 Optional. When a NAS service from `nas-relay/` is reachable, \
+                 the Lock Screen Live Activity stays fresh even while this \
+                 app is fully suspended (push notifications). Leave blank to \
+                 use the on-device update path that runs while the app is alive.
+                 """)
+        }
+    }
+
+    @ViewBuilder
+    private var relayStatusRow: some View {
+        HStack(spacing: 12) {
+            statusIndicator
+            VStack(alignment: .leading, spacing: 2) {
+                Text(statusTitle)
+                    .font(.subheadline.weight(.semibold))
+                if let detail = statusDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var statusIndicator: some View {
+        let color: Color
+        switch relay.status {
+        case .connected: color = .green
+        case .probing:   color = .yellow
+        case .disabled:  color = .secondary
+        case .unreachable: color = .red
+        }
+        return Circle()
+            .fill(color)
+            .frame(width: 10, height: 10)
+            .overlay {
+                if case .probing = relay.status {
+                    Circle().stroke(Color.yellow, lineWidth: 1).scaleEffect(1.5)
+                        .opacity(0.5)
+                }
+            }
+    }
+
+    private var statusTitle: String {
+        switch relay.status {
+        case .disabled:                       return "Disabled"
+        case .probing:                        return "Probing…"
+        case .connected(let n) where n == 1:  return "Connected · 1 group"
+        case .connected(let n):               return "Connected · \(n) groups"
+        case .unreachable:                    return "Unreachable"
+        }
+    }
+
+    private var statusDetail: String? {
+        switch relay.status {
+        case .disabled:                return "Enter a URL to enable APNs-driven Live Activity updates."
+        case .probing:                 return nil
+        case .connected:               return "Live Activity will update via the relay even when the app is suspended."
+        case .unreachable(let reason): return reason
         }
     }
 
