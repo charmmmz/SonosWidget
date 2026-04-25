@@ -35,6 +35,18 @@ final class SonosManager {
     var queue: [QueueItem] = []
     var connectionState: ConnectionState = .disconnected
 
+    /// Soundbar TV-mode EQ flags. Sonos exposes these as `RenderingControl`
+    /// `EQType` toggles; we only fetch them when the active source is `.tv`
+    /// so we don't waste SOAP calls on music sessions where they're hidden.
+    var nightMode: Bool = false
+    /// Sonos calls this "Speech Enhancement" in the consumer app; the UPnP
+    /// flag is `DialogLevel`.
+    var speechEnhancement: Bool = false
+    /// Short window after a user toggle during which we ignore polled values
+    /// — keeps the UI from flickering back to the old state if a poll lands
+    /// before the speaker reflects the SetEQ.
+    private var soundbarEQLockUntil: Date = .distantPast
+
     let discovery = SonosDiscovery()
 
     /// Main polling loop (transport state, track info, volume). Kept as an
@@ -340,6 +352,56 @@ final class SonosManager {
         } catch {
             repeatMode = prev
             playModeLockUntil = .distantPast
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Soundbar TV-mode toggles
+
+    /// Pull the current Night Sound + Speech Enhancement state from the
+    /// soundbar. We only call this when the active speaker is in TV input —
+    /// the panel that exposes the toggles is hidden otherwise, so polling
+    /// during music playback would just be wasted SOAP traffic.
+    ///
+    /// Honours `soundbarEQLockUntil` so a stale poll landing right after a
+    /// user toggle can't stomp the optimistic UI value.
+    func refreshSoundbarEQ() async {
+        guard let ip = selectedSpeaker?.ipAddress else { return }
+        guard Date() >= soundbarEQLockUntil else { return }
+        do {
+            let (night, speech) = try await SonosAPI.getSoundbarEQ(ip: ip)
+            nightMode = night
+            speechEnhancement = speech
+        } catch {
+            // Soft-fail: non-soundbars return errors here, and we don't want
+            // to surface that — the UI just won't show the panel.
+        }
+    }
+
+    func toggleNightMode() async {
+        guard let ip = selectedSpeaker?.ipAddress else { return }
+        let prev = nightMode
+        nightMode = !prev
+        soundbarEQLockUntil = Date().addingTimeInterval(2)
+        do {
+            try await SonosAPI.setEQ(ip: ip, eqType: "NightMode", enabled: nightMode)
+        } catch {
+            nightMode = prev
+            soundbarEQLockUntil = .distantPast
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func toggleSpeechEnhancement() async {
+        guard let ip = selectedSpeaker?.ipAddress else { return }
+        let prev = speechEnhancement
+        speechEnhancement = !prev
+        soundbarEQLockUntil = Date().addingTimeInterval(2)
+        do {
+            try await SonosAPI.setEQ(ip: ip, eqType: "DialogLevel", enabled: speechEnhancement)
+        } catch {
+            speechEnhancement = prev
+            soundbarEQLockUntil = .distantPast
             errorMessage = error.localizedDescription
         }
     }
@@ -1156,6 +1218,12 @@ final class SonosManager {
             // longer need a manual second pass here.
             trackInfo = try await p
             volume = try await v
+            // Soundbar TV-mode toggles only show up in the player UI when
+            // source == .tv — fetching them off the music path would just
+            // be wasted SOAP calls (and most non-soundbars 402 on it).
+            if trackInfo?.source == .tv {
+                await refreshSoundbarEQ()
+            }
             let mode = try await m
             isPlayingFromQueue = (try? await mediaURI)?.hasPrefix("x-rincon-queue:") ?? true
             if Date() > playModeLockUntil {

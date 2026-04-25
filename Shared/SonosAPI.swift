@@ -100,6 +100,46 @@ enum SonosAPI {
         return code
     }
 
+    // MARK: - Soundbar EQ Toggles (NightMode / DialogLevel / etc.)
+
+    /// Read a soundbar EQ flag via `RenderingControl.GetEQ`. Sonos overloads
+    /// the same SOAP action for several speaker-tuning toggles, distinguished
+    /// by `EQType`. Returns `false` for non-soundbars (the speaker just
+    /// reports `0`).
+    ///
+    /// - `NightMode`: 夜间模式 — softens loud peaks (explosions, music
+    ///   stings) so dialogue stays at a comfortable level.
+    /// - `DialogLevel`: 人声增强 — boosts the center channel / vocal band.
+    /// - `SurroundEnable` / `SubEnable` / others — surround speakers + sub
+    ///   wired to the same action.
+    nonisolated static func getEQ(ip: String, eqType: String) async throws -> Bool {
+        let xml = try await soap(ip: ip, endpoint: renderingControl,
+                                 service: "RenderingControl", action: "GetEQ",
+                                 body: "<InstanceID>0</InstanceID>" +
+                                       "<EQType>\(eqType)</EQType>")
+        guard let raw = extractTag("CurrentValue", from: xml) else { return false }
+        return raw == "1"
+    }
+
+    /// Counterpart to `getEQ` — flip a soundbar EQ toggle.
+    nonisolated static func setEQ(ip: String, eqType: String, enabled: Bool) async throws {
+        _ = try await soap(ip: ip, endpoint: renderingControl,
+                           service: "RenderingControl", action: "SetEQ",
+                           body: "<InstanceID>0</InstanceID>" +
+                                 "<EQType>\(eqType)</EQType>" +
+                                 "<DesiredValue>\(enabled ? 1 : 0)</DesiredValue>")
+    }
+
+    /// Convenience wrapper — fetch the two TV-mode toggles in parallel.
+    /// Returns `(nightMode, speechEnhancement)`. Used by `SonosManager` when
+    /// the speaker switches into TV input so the UI can render both cards
+    /// in the correct state without two sequential round-trips.
+    nonisolated static func getSoundbarEQ(ip: String) async throws -> (night: Bool, speech: Bool) {
+        async let night = getEQ(ip: ip, eqType: "NightMode")
+        async let speech = getEQ(ip: ip, eqType: "DialogLevel")
+        return try await (night, speech)
+    }
+
     /// Returns the raw SOAP XML from GetPositionInfo (for diagnostic use).
     nonisolated static func getRawPositionInfo(ip: String) async throws -> String {
         try await soap(ip: ip, endpoint: avTransport, service: "AVTransport",

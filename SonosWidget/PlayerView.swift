@@ -921,15 +921,19 @@ struct NowPlayingOverlay: View {
 
             // TV input has no transport actions worth surfacing
             // (`GetCurrentTransportActions` returns just `Set, Play` and the
-            // soundbar can't seek or skip a live stream). Hide the row
-            // entirely and pull volume up so the screen doesn't feel empty.
-            if manager.trackInfo?.source != .tv {
+            // soundbar can't seek or skip a live stream). Swap the row for
+            // the soundbar EQ toggles so the slot doesn't feel empty.
+            if manager.trackInfo?.source == .tv {
+                soundbarEQPanel
+                    .padding(.top, 18 * s)
+                    .padding(.horizontal, 32)
+            } else {
                 playbackControls
                     .padding(.top, 22 * s)
             }
 
             volumeControl
-                .padding(.top, manager.trackInfo?.source == .tv ? 28 * s : 22 * s)
+                .padding(.top, manager.trackInfo?.source == .tv ? 18 * s : 22 * s)
 
             bottomActions(showQueue: true)
                 .padding(.top, 16 * s)
@@ -988,10 +992,14 @@ struct NowPlayingOverlay: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 14)
 
-                if manager.trackInfo?.source != .tv {
+                if manager.trackInfo?.source == .tv {
+                    soundbarEQPanel
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+                } else {
                     playbackControls.padding(.top, 10)
                 }
-                volumeControl.padding(.top, manager.trackInfo?.source == .tv ? 14 : 6)
+                volumeControl.padding(.top, 6)
                 bottomActions(showQueue: false).padding(.top, 6)
 
                 Spacer(minLength: 0)
@@ -1293,6 +1301,14 @@ struct NowPlayingOverlay: View {
             // Format pill — only when the soundbar is actually receiving a
             // stream. When it isn't, the "No signal" subtitle above already
             // tells the story; showing "No input · 0" here would be noise.
+            //
+            // For Atmos: render only `[badge] <variant>` (e.g. `[●] TrueHD`)
+            // and skip channel layout entirely — Atmos is object-based so
+            // fixed channel counts are meaningless, plus the "2.0" inside
+            // "MAT 2.0" is a protocol version, not a layout.
+            //
+            // For non-Atmos: codec name + channel layout as a separate slot
+            // (e.g. `Multichannel PCM · 5.1`).
             if let format, format.hasSignal {
                 HStack(spacing: 4) {
                     if format.isAtmos {
@@ -1302,14 +1318,19 @@ struct NowPlayingOverlay: View {
                             .scaledToFit()
                             .frame(height: 11)
                             .accessibilityLabel("Dolby Atmos")
-                    }
-                    Text(format.codec)
-                        .font(.system(size: 9, weight: .semibold))
-                    if let layout = format.channelLayout {
-                        Text("·")
-                            .font(.system(size: 9))
-                        Text(layout)
-                            .font(.system(size: 9, weight: .medium).monospaced())
+                        if let variant = format.atmosVariant {
+                            Text(variant)
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                    } else {
+                        Text(format.codec)
+                            .font(.system(size: 9, weight: .semibold))
+                        if let layout = format.channelLayout {
+                            Text("·")
+                                .font(.system(size: 9))
+                            Text(layout)
+                                .font(.system(size: 9, weight: .medium).monospaced())
+                        }
                     }
                 }
                 .foregroundStyle(.white.opacity(0.5))
@@ -1319,6 +1340,83 @@ struct NowPlayingOverlay: View {
                 .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    /// Two side-by-side toggle cards exposing the soundbar's TV-mode EQ
+    /// flags — Night Sound (`NightMode`) and Speech Enhancement
+    /// (`DialogLevel`). Mirrors the official Sonos app's TV controls but
+    /// keeps our visual language: capsule rows, white-on-translucent fills,
+    /// and a tinted halo + brighter background when active.
+    private var soundbarEQPanel: some View {
+        HStack(spacing: 10) {
+            soundbarEQCard(
+                title: "Night Sound",
+                systemIcon: "moon.fill",
+                isOn: manager.nightMode,
+                accent: Color(red: 0.55, green: 0.70, blue: 1.0)
+            ) {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                Task { await manager.toggleNightMode() }
+            }
+            soundbarEQCard(
+                title: "Speech Enhancement",
+                systemIcon: "waveform.badge.mic",
+                isOn: manager.speechEnhancement,
+                accent: Color(red: 1.0, green: 0.78, blue: 0.45)
+            ) {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                Task { await manager.toggleSpeechEnhancement() }
+            }
+        }
+    }
+
+    private func soundbarEQCard(
+        title: String,
+        systemIcon: String,
+        isOn: Bool,
+        accent: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: systemIcon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isOn ? accent : .white.opacity(0.55))
+                    Spacer(minLength: 0)
+                    Text(isOn ? "On" : "Off")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(isOn ? accent : .white.opacity(0.45))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            (isOn ? accent.opacity(0.18) : Color.white.opacity(0.08)),
+                            in: Capsule()
+                        )
+                }
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(isOn ? 0.9 : 0.65))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.white.opacity(isOn ? 0.14 : 0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(isOn ? accent.opacity(0.45) : Color.white.opacity(0.08), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? "On" : "Off")
+        .accessibilityAddTraits(.isButton)
     }
 
     /// Standard music timeline + audio-quality badge. Extracted so the TV-mode

@@ -240,11 +240,27 @@ struct TVAudioFormat: Codable, Equatable, Sendable {
 
     /// "5.1" / "7.1" / "2.0" — extracted from the label so we can render it
     /// as a separate pill in the UI. Returns nil when the label has no
-    /// channel suffix (e.g. "No input").
+    /// channel suffix (e.g. "No input"), AND for object-based Atmos streams
+    /// where the "2.0" inside "MAT 2.0" is the *protocol version*, not a
+    /// channel layout — Atmos is object-based so a fixed channel count is
+    /// meaningless anyway.
     nonisolated var channelLayout: String? {
+        if isAtmos { return nil }
         for layout in ["7.1", "5.1", "2.0"] where label.contains(layout) {
             return layout
         }
+        return nil
+    }
+
+    /// Underlying Atmos transport (`TrueHD` / `DD+` / `MAT`) when this is an
+    /// Atmos stream. Used for compact UI where the Dolby Atmos logo is
+    /// already rendered as a badge and we don't need to repeat the words
+    /// "Dolby Atmos" in text. Nil for non-Atmos formats.
+    nonisolated var atmosVariant: String? {
+        guard isAtmos else { return nil }
+        if label.contains("TrueHD") { return "TrueHD" }
+        if label.contains("DD+")    { return "DD+" }
+        if label.contains("MAT")    { return "MAT" }
         return nil
     }
 
