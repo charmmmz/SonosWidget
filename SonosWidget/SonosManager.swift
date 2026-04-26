@@ -133,6 +133,22 @@ final class SonosManager {
     var isConfigured: Bool { selectedSpeaker != nil }
     var currentCloudGroupId: String? { cloudGroupId }
 
+    /// Apply a freshly-read transport state, suppressing the brief
+    /// `TRANSITIONING` window Sonos returns immediately after a
+    /// Play/Pause command. Without this guard the play/pause button
+    /// flickers through "playing → transitioning → playing" because
+    /// `isPlaying` flips false during the ~300-800 ms transition.
+    /// Falls through to a normal write whenever the prior state isn't
+    /// already a stable playing/paused, so we still make progress on
+    /// first refresh after launch (when prior is `.stopped`/`.unknown`).
+    private func applyIncomingTransportState(_ incoming: TransportState) {
+        if incoming == .transitioning,
+           transportState == .playing || transportState == .paused {
+            return
+        }
+        transportState = incoming
+    }
+
     /// True when the app is controlling the speaker via the Sonos Cloud
     /// Control API (user is off-LAN). Views use this to render the "Remote"
     /// pill and to pre-emptively hide LAN-only affordances (queue mutations,
@@ -497,7 +513,8 @@ final class SonosManager {
     func togglePlayPauseForGroup(groupID: String, coordinatorIP: String, currentState: TransportState) async {
         guard let idx = groupStatuses.firstIndex(where: { $0.id == groupID }) else { return }
         let prev = groupStatuses[idx].transportState
-        groupStatuses[idx].transportState = (prev == .playing) ? .paused : .playing
+        let optimistic: TransportState = (prev == .playing) ? .paused : .playing
+        groupStatuses[idx].transportState = optimistic
         do {
             if prev == .playing {
                 try await SonosAPI.pause(ip: coordinatorIP)
@@ -505,10 +522,13 @@ final class SonosManager {
                 try await SonosAPI.play(ip: coordinatorIP)
             }
             try? await Task.sleep(for: .milliseconds(400))
-            if let state = try? await SonosAPI.getTransportInfo(ip: coordinatorIP) {
-                if let i = groupStatuses.firstIndex(where: { $0.id == groupID }) {
-                    groupStatuses[i].transportState = state
-                }
+            // Skip the brief TRANSITIONING window Sonos returns mid-toggle —
+            // otherwise the card icon bounces playing → transitioning → playing.
+            // Same policy as `applyIncomingTransportState`.
+            if let state = try? await SonosAPI.getTransportInfo(ip: coordinatorIP),
+               state != .transitioning,
+               let i = groupStatuses.firstIndex(where: { $0.id == groupID }) {
+                groupStatuses[i].transportState = state
             }
         } catch {
             if let i = groupStatuses.firstIndex(where: { $0.id == groupID }) {
@@ -1251,7 +1271,7 @@ final class SonosManager {
             async let v = SonosAPI.getVolume(ip: vIP)
             async let m = SonosAPI.getPlayMode(ip: pIP)
             async let mediaURI = SonosAPI.getMediaInfo(ip: pIP)
-            transportState = try await t
+            applyIncomingTransportState(try await t)
             // `getPositionInfo` already ran `PlaybackSource.from(trackURI:)`
             // which consults SharedStorage's sid → name map for services
             // whose local sid varies per install (NetEase etc.), so we no
@@ -1340,7 +1360,8 @@ final class SonosManager {
             let status = try await statusCall
             let meta = try await metaCall
 
-            transportState = Self.transportState(fromCloudPlaybackState: status.playbackState)
+            applyIncomingTransportState(
+                Self.transportState(fromCloudPlaybackState: status.playbackState))
 
             if Date() > playModeLockUntil,
                let modes = status.playModes {

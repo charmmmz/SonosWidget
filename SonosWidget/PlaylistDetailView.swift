@@ -15,12 +15,7 @@ struct PlaylistDetailView: View {
     @State private var isFavorited = false
     @State private var coverImage: UIImage?
     @State private var themeColor: Color?
-    /// Sticky "known working" page size for this browse session. We start
-    /// at 100; if the service rejects it (NetEase's "我喜欢的音乐" 2000+
-    /// track dynamic playlist returns 500 for large pages), `fetchPage`
-    /// halves and records the successful size here so subsequent pagination
-    /// calls skip the doomed larger attempts.
-    @State private var effectivePageSize: Int = 100
+    private static let playlistFetchLimit = 1000
 
     private var playlistTitle: String { response?.title ?? playlistItem.title }
     private var subtitleText: String { response?.subtitle ?? playlistItem.artist }
@@ -347,7 +342,11 @@ struct PlaylistDetailView: View {
     private func containerRow(_ item: SonosCloudAPI.AlbumTrackItem, isLast: Bool) -> some View {
         let navItem = browseItemFromContainer(item)
         return NavigationLink {
-            PlaylistDetailView(playlistItem: navItem, searchManager: searchManager, manager: manager)
+            if navItem.cloudType == "ALBUM" {
+                AlbumDetailView(albumItem: navItem, searchManager: searchManager, manager: manager)
+            } else {
+                PlaylistDetailView(playlistItem: navItem, searchManager: searchManager, manager: manager)
+            }
         } label: {
             HStack(spacing: 12) {
                 AsyncImage(url: URL(string: item.images?.tile1x1 ?? "")) { phase in
@@ -538,11 +537,18 @@ struct PlaylistDetailView: View {
             return
         }
 
+        if !searchManager.hasFinishedProbing {
+            await searchManager.probeLinkedServices()
+        }
+
+        let parsedFavoriteIds = searchManager.parseCloudIds(from: playlistItem)
         let serviceIdStr: String? = {
             if let sid = playlistItem.serviceId {
                 return searchManager.cloudServiceId(forLocalSid: sid)
             }
-            return searchManager.activeServiceIds.first
+            return parsedFavoriteIds?.cloudServiceId
+                ?? searchManager.cloudServiceId(forFavorite: playlistItem)
+                ?? searchManager.activeServiceIds.first
         }()
 
         guard let serviceId = serviceIdStr else {
@@ -551,22 +557,24 @@ struct PlaylistDetailView: View {
             return
         }
 
-        let accountId = searchManager.linkedAccounts
-            .first { $0.serviceId == serviceId }?.accountId ?? "2"
+        let accountId = accountIdFromURI(playlistItem.uri)
+            ?? parsedFavoriteIds?.accountId
+            ?? searchManager.linkedAccounts.first { $0.serviceId == serviceId }?.accountId
+            ?? "2"
 
-        let pageSize = 100
         do {
             response = try await fetchPage(
-                offset: 0, pageSize: pageSize, token: token,
+                offset: 0, count: Self.playlistFetchLimit, token: token,
                 householdId: householdId, serviceId: serviceId, accountId: accountId)
             isLoading = false
 
             let total = response?.tracks?.total ?? response?.section?.total ?? 0
             let fetched = response?.tracks?.items?.count ?? response?.section?.items?.count ?? 0
             if fetched < total {
+                allPagesLoaded = false
                 await loadRemainingPages(token: token, householdId: householdId,
                                          serviceId: serviceId, accountId: accountId,
-                                         fetched: fetched, total: total, pageSize: pageSize)
+                                         fetched: fetched, total: total)
             }
             allPagesLoaded = true
         } catch is CancellationError {
@@ -578,16 +586,10 @@ struct PlaylistDetailView: View {
         }
     }
 
-    /// Fetch a single browse page for the current `playlistItem`. Tries the
-    /// endpoint most likely to work given `cloudType`, and transparently
-    /// falls back to `browseContainer` + smaller page sizes when the
-    /// primary call errors out — NetEase Cloud Music's "我喜欢的音乐"
-    /// (2000+ track dynamic "liked songs" playlist) returns HTTP 500 on
-    /// `/playlists/{id}/browse?count=100`; halving the page size lets the
-    /// SMAPI adapter enumerate items within its internal budget. We also
-    /// fall back from `/playlists/` to `/containers/` because some dynamic
-    /// playlists are modeled as containers on the service side.
-    private func fetchPage(offset: Int, pageSize: Int,
+    /// Fetch a Cloud playlist page. We request a large count first; providers
+    /// may still cap the response (often to 100), so the caller continues by
+    /// offset until the reported total is loaded.
+    private func fetchPage(offset: Int, count: Int,
                            token: String, householdId: String,
                            serviceId: String, accountId: String) async throws -> SonosCloudAPI.AlbumBrowseResponse {
         let id = playlistItem.id
@@ -595,12 +597,13 @@ struct PlaylistDetailView: View {
         case "COLLECTION":
             return try await browseWithFallback(
                 token: token, householdId: householdId, serviceId: serviceId,
-                accountId: accountId, offset: offset, initialCount: pageSize,
-                primary: { count in
+                accountId: accountId, offset: offset, initialCount: count,
+                primary: { count, useExtendedMetadata in
                     try await SonosCloudAPI.browseContainer(
                         token: token, householdId: householdId,
                         serviceId: serviceId, accountId: accountId,
-                        containerId: id, count: count, offset: offset)
+                        containerId: id, count: count, offset: offset,
+                        useExtendedMetadata: useExtendedMetadata)
                 },
                 secondary: nil)
         case "ALBUM":
@@ -611,41 +614,49 @@ struct PlaylistDetailView: View {
         default:
             return try await browseWithFallback(
                 token: token, householdId: householdId, serviceId: serviceId,
-                accountId: accountId, offset: offset, initialCount: pageSize,
-                primary: { count in
+                accountId: accountId, offset: offset, initialCount: count,
+                primary: { count, useExtendedMetadata in
                     try await SonosCloudAPI.browsePlaylist(
                         token: token, householdId: householdId,
                         serviceId: serviceId, accountId: accountId,
-                        playlistId: id, count: count, offset: offset)
+                        playlistId: id, count: count, offset: offset,
+                        useExtendedMetadata: useExtendedMetadata)
                 },
-                secondary: { count in
+                secondary: { count, useExtendedMetadata in
                     try await SonosCloudAPI.browseContainer(
                         token: token, householdId: householdId,
                         serviceId: serviceId, accountId: accountId,
-                        containerId: id, count: count, offset: offset)
+                        containerId: id, count: count, offset: offset,
+                        useExtendedMetadata: useExtendedMetadata)
                 })
         }
     }
 
-    /// Try `primary` at the initial page size. On 5xx, try `secondary` (if
-    /// provided). If either still 5xxs, halve the page size and retry.
-    /// Gives up after shrinking below 10, at which point the service is
-    /// genuinely unable to serve the container and we propagate the error.
+    private func accountIdFromURI(_ uri: String?) -> String? {
+        guard let queryPart = uri?.split(separator: "?").last else { return nil }
+        for param in queryPart.split(separator: "&") {
+            let kv = param.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == "sn" {
+                return String(kv[1])
+            }
+        }
+        return nil
+    }
+
+    /// Try the requested count. On 5xx, try `secondary` (if provided), then
+    /// retry both without `muse2=true`. If all variants fail, halve the count
+    /// and repeat before giving up.
     private func browseWithFallback(
         token: String, householdId: String, serviceId: String, accountId: String,
         offset: Int, initialCount: Int,
-        primary: (Int) async throws -> SonosCloudAPI.AlbumBrowseResponse,
-        secondary: ((Int) async throws -> SonosCloudAPI.AlbumBrowseResponse)?
+        primary: (Int, Bool) async throws -> SonosCloudAPI.AlbumBrowseResponse,
+        secondary: ((Int, Bool) async throws -> SonosCloudAPI.AlbumBrowseResponse)?
     ) async throws -> SonosCloudAPI.AlbumBrowseResponse {
-        // Start from `effectivePageSize` (sticky) rather than `initialCount`
-        // so that once we've learned NetEase can only serve 25-per-page for
-        // this playlist, we don't re-try 100 on every subsequent page.
-        var count = min(effectivePageSize, initialCount)
+        var count = initialCount
         var lastError: Error?
-        while count >= 10 {
+        while count >= 1 {
             do {
-                let result = try await primary(count)
-                if effectivePageSize != count { effectivePageSize = count }
+                let result = try await primary(count, true)
                 return result
             } catch SonosCloudError.httpError(let code) where (500...599).contains(code) {
                 SonosLog.info(.playlistDetail,
@@ -656,8 +667,7 @@ struct PlaylistDetailView: View {
             }
             if let secondary {
                 do {
-                    let result = try await secondary(count)
-                    if effectivePageSize != count { effectivePageSize = count }
+                    let result = try await secondary(count, true)
                     return result
                 } catch SonosCloudError.httpError(let code) where (500...599).contains(code) {
                     SonosLog.info(.playlistDetail,
@@ -667,20 +677,43 @@ struct PlaylistDetailView: View {
                     throw error
                 }
             }
-            count /= 2  // halve and retry — 100 → 50 → 25 → 12 → stop
+            do {
+                let result = try await primary(count, false)
+                return result
+            } catch SonosCloudError.httpError(let code) where (500...599).contains(code) {
+                SonosLog.info(.playlistDetail,
+                    "primary basic browse \(code) at count=\(count) for '\(playlistItem.title)'")
+                lastError = SonosCloudError.httpError(code)
+            } catch {
+                throw error
+            }
+            if let secondary {
+                do {
+                    let result = try await secondary(count, false)
+                    return result
+                } catch SonosCloudError.httpError(let code) where (500...599).contains(code) {
+                    SonosLog.info(.playlistDetail,
+                        "secondary basic browse \(code) at count=\(count) for '\(playlistItem.title)'")
+                    lastError = SonosCloudError.httpError(code)
+                } catch {
+                    throw error
+                }
+            }
+
+            count /= 2  // halve and retry — 1000 → 500 → 250 → ...
         }
         throw lastError ?? SonosCloudError.httpError(500)
     }
 
     private func loadRemainingPages(token: String, householdId: String,
-                                     serviceId: String, accountId: String,
-                                     fetched: Int, total: Int, pageSize: Int) async {
+                                    serviceId: String, accountId: String,
+                                    fetched: Int, total: Int) async {
         var offset = fetched
         while offset < total {
             do {
                 try Task.checkCancellation()
                 let page = try await fetchPage(
-                    offset: offset, pageSize: pageSize, token: token,
+                    offset: offset, count: Self.playlistFetchLimit, token: token,
                     householdId: householdId, serviceId: serviceId, accountId: accountId)
                 let newItems = page.tracks?.items ?? page.section?.items ?? []
                 if newItems.isEmpty { break }

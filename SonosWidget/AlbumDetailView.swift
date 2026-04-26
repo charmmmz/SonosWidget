@@ -12,6 +12,7 @@ struct AlbumDetailView: View {
     @State private var toastMessage: String?
     @State private var isFavorited = false
     @State private var coverImage: UIImage?
+    @State private var resolvedAlbumCoverURL: String?
     @State private var themeColor: Color?
 
     private var albumTitle: String { response?.title ?? albumItem.title }
@@ -23,6 +24,7 @@ struct AlbumDetailView: View {
     private var coverURL: String? {
         let candidates: [String?] = [
             response?.images?.tile1x1,
+            resolvedAlbumCoverURL,
             albumItem.albumArtURL,
             response?.tracks?.items?.first?.images?.tile1x1
         ]
@@ -471,14 +473,17 @@ struct AlbumDetailView: View {
             return
         }
 
-        let accountId = searchManager.linkedAccounts
+        let accountId = accountIdFromURI(albumItem.uri) ?? searchManager.linkedAccounts
             .first { $0.serviceId == serviceId }?.accountId ?? "2"
 
         do {
+            let albumId = try await initialAlbumId(
+                token: token, householdId: householdId,
+                serviceId: serviceId, accountId: accountId)
             response = try await SonosCloudAPI.browseAlbum(
                 token: token, householdId: householdId,
                 serviceId: serviceId, accountId: accountId,
-                albumId: albumItem.id)
+                albumId: albumId)
             isLoading = false
         } catch is CancellationError {
             SonosLog.debug(.albumDetail, "Load cancelled (tab switch)")
@@ -487,6 +492,101 @@ struct AlbumDetailView: View {
             errorText = error.localizedDescription
             isLoading = false
         }
+    }
+
+    private func initialAlbumId(token: String, householdId: String,
+                                serviceId: String, accountId: String) async throws -> String {
+        guard shouldResolveCatalogAlbum(serviceId: serviceId) else {
+            return browseAlbumId(from: albumItem.id)
+        }
+
+        do {
+            let searchResult = try await SonosCloudAPI.searchService(
+                token: token, householdId: householdId,
+                serviceId: serviceId, accountId: accountId,
+                term: albumItem.title, count: 50)
+            guard let albumResource = preferredAlbumResource(in: searchResult),
+                  let rawResolvedId = albumResource.id?.objectId,
+                  !rawResolvedId.isEmpty else { return browseAlbumId(from: albumItem.id) }
+
+            let resolvedId = browseAlbumId(from: rawResolvedId)
+            resolvedAlbumCoverURL = albumResource.images?.first?.url
+                ?? albumResource.container?.images?.first?.url
+
+            if resolvedId != albumItem.id {
+                SonosLog.debug(.albumDetail, "Resolved Apple Music album id \(albumItem.id) → \(resolvedId)")
+            }
+            return resolvedId
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            SonosLog.debug(.albumDetail, "Album id resolution failed: \(error)")
+            return browseAlbumId(from: albumItem.id)
+        }
+    }
+
+    private func shouldResolveCatalogAlbum(serviceId: String) -> Bool {
+        if let account = searchManager.linkedAccounts.first(where: { $0.serviceId == serviceId }),
+           PlaybackSource.from(serviceName: account.displayName) == .appleMusic {
+            return true
+        }
+        if let localSid = albumItem.serviceId,
+           PlaybackSource.from(serviceName: SharedStorage.serviceNamesByLocalSid[String(localSid)]) == .appleMusic {
+            return true
+        }
+        return false
+    }
+
+    private func accountIdFromURI(_ uri: String?) -> String? {
+        guard let queryPart = uri?.split(separator: "?").last else { return nil }
+        for param in queryPart.split(separator: "&") {
+            let kv = param.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == "sn" {
+                return String(kv[1])
+            }
+        }
+        return nil
+    }
+
+    private func preferredAlbumResource(in result: SonosCloudAPI.ServiceSearchResponse) -> SonosCloudAPI.CloudResource? {
+        let albums = result.allResources.filter { $0.type == "ALBUM" }
+        let targetTitle = normalizedCatalogText(albumItem.title)
+        let targetArtist = normalizedCatalogText(albumItem.artist)
+        let titleMatches = albums.filter { normalizedCatalogText($0.name ?? "") == targetTitle }
+
+        if !targetArtist.isEmpty {
+            let titleAndArtistMatches = titleMatches.filter {
+                normalizedCatalogText($0.artists?.first?.name ?? "") == targetArtist
+            }
+            if let match = titleAndArtistMatches.first(where: { !isLibraryScopedId($0.id?.objectId) }) {
+                return match
+            }
+            if let match = titleAndArtistMatches.first {
+                return match
+            }
+        }
+
+        return titleMatches.first { !isLibraryScopedId($0.id?.objectId) }
+            ?? titleMatches.first
+            ?? albums.first { !isLibraryScopedId($0.id?.objectId) }
+            ?? albums.first
+    }
+
+    private func normalizedCatalogText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private func isLibraryScopedId(_ id: String?) -> Bool {
+        id?.lowercased().contains("library") == true
+    }
+
+    private func browseAlbumId(from rawId: String) -> String {
+        let base = rawId.firstIndex(of: "#").map { String(rawId[..<$0]) } ?? rawId
+        let parts = base.components(separatedBy: ":")
+        guard let albumIndex = parts.firstIndex(where: { $0.caseInsensitiveCompare("album") == .orderedSame }),
+              albumIndex < parts.index(before: parts.endIndex) else { return base }
+        return parts[albumIndex...].joined(separator: ":")
     }
 
     // MARK: - Playback

@@ -17,11 +17,47 @@ struct ArtistDetailView: View {
     @State private var toastMessage: String?
     @State private var isFavorited = false
     @State private var headerImage: UIImage?
+    @State private var resolvedArtistImageURL: String?
     @State private var themeColor: Color?
 
     private var artistName: String { response?.title ?? artistItem.title }
     private var headerImageURL: String? {
-        response?.images?.tile1x1 ?? artistItem.albumArtURL
+        response?.images?.tile1x1 ?? resolvedArtistImageURL ?? artistItem.albumArtURL
+    }
+    private var streamingProviderName: String? {
+        if let provider = response?.providerInfo?.name, !provider.isEmpty {
+            return provider
+        }
+        if let hint = searchManager.serviceDisplayHint(forFavorite: artistItem) {
+            return hint
+        }
+        if let cloudId = searchManager.cloudServiceId(forFavorite: artistItem),
+           let account = searchManager.linkedAccounts.first(where: { $0.serviceId == cloudId }) {
+            return account.displayName
+        }
+        if let localSid = artistItem.serviceId {
+            if let service = searchManager.musicServices.first(where: { $0.id == localSid }) {
+                return service.name
+            }
+            if let cached = SharedStorage.serviceNamesByLocalSid[String(localSid)] {
+                return cached
+            }
+            if let cloudId = searchManager.cloudServiceId(forLocalSid: localSid),
+               let account = searchManager.linkedAccounts.first(where: { $0.serviceId == cloudId }) {
+                return account.displayName
+            }
+        }
+        if let uri = artistItem.uri {
+            let source = PlaybackSource.from(trackURI: uri)
+            if source != .unknown { return source.displayName }
+        }
+        return nil
+    }
+    private var shouldShowStationBadge: Bool {
+        let hasStationAction = response?.customActions?
+            .contains { $0.action == "ACTION_PLAY_STATION" } == true
+        let isAppleMusicArtist = PlaybackSource.from(serviceName: streamingProviderName) == .appleMusic
+        return hasStationAction || isAppleMusicArtist
     }
 
     var body: some View {
@@ -101,8 +137,8 @@ struct ArtistDetailView: View {
                     .clipShape(Circle())
                     .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
 
-                if let stationAction = response?.customActions?.first(where: { $0.action == "ACTION_PLAY_STATION" }) {
-                    stationBadge(stationAction)
+                if shouldShowStationBadge {
+                    stationBadge()
                         .offset(x: 6, y: 6)
                 }
             }
@@ -118,12 +154,9 @@ struct ArtistDetailView: View {
                 // the circular avatar, especially on wider devices.
                 .frame(maxWidth: .infinity, alignment: .center)
 
-            // Unified streaming-service chip — same component the
-            // now-playing view and widget use — instead of a plain
-            // "Apple Music" / "Spotify" / "网易云音乐" text line. Falls
-            // back silently to nothing if we can't map the provider
-            // name to a known source.
-            if let provider = response?.providerInfo?.name {
+            // Some artist browse responses omit providerInfo, so fall back to
+            // the service id carried by the tapped search/favorite item.
+            if let provider = streamingProviderName {
                 let source = PlaybackSource.from(serviceName: provider)
                 if source != .unknown {
                     SourceBadgeView(source: source, tintColor: nil)
@@ -165,11 +198,11 @@ struct ArtistDetailView: View {
         }
     }
 
-    private func stationBadge(_ action: SonosCloudAPI.CustomAction) -> some View {
+    private func stationBadge() -> some View {
         let isActive = playingItemId == "station"
 
         return Button {
-            startStation(action)
+            startStation()
         } label: {
             ZStack {
                 Circle()
@@ -396,9 +429,11 @@ struct ArtistDetailView: View {
                 token: token, householdId: householdId,
                 serviceId: serviceId, accountId: accountId,
                 term: artistItem.title, count: 20)
-            guard let rawResolvedId = preferredArtistResource(in: searchResult)?.id?.objectId,
+            guard let artistResource = preferredArtistResource(in: searchResult),
+                  let rawResolvedId = artistResource.id?.objectId,
                   !rawResolvedId.isEmpty else { return browseArtistId(from: artistItem.id) }
             let resolvedId = browseArtistId(from: rawResolvedId)
+            resolvedArtistImageURL = artistResource.images?.first?.url
 
             if resolvedId != artistItem.id {
                 SonosLog.debug(.artistDetail, "Resolved Apple Music artist id \(artistItem.id) → \(resolvedId)")
@@ -456,12 +491,12 @@ struct ArtistDetailView: View {
     }
 
     private func browseArtistId(from rawId: String) -> String {
-        let base = rawId.firstIndex(of: "#").map { String(rawId[..<$0]) } ?? rawId
+        let decodedId = rawId.removingPercentEncoding ?? rawId
+        let base = decodedId.firstIndex(of: "#").map { String(decodedId[..<$0]) } ?? decodedId
         let parts = base.components(separatedBy: ":")
-        guard parts.dropLast().contains(where: { $0.caseInsensitiveCompare("artist") == .orderedSame }),
-              let objectId = parts.last,
-              !objectId.isEmpty else { return rawId }
-        return objectId
+        guard let artistIndex = parts.firstIndex(where: { $0.caseInsensitiveCompare("artist") == .orderedSame }),
+              artistIndex < parts.index(before: parts.endIndex) else { return base }
+        return parts[artistIndex...].joined(separator: ":")
     }
 
     private func searchFallback(token: String, householdId: String,
@@ -480,11 +515,13 @@ struct ArtistDetailView: View {
                                                  serviceId: serviceId,
                                                  accountId: accountId)
 
-            guard let rawCorrectId = artistResource?.id?.objectId else {
+            guard let artistResource,
+                  let rawCorrectId = artistResource.id?.objectId else {
                 useDiscographyFallback(albumsByArtist)
                 return
             }
             let correctId = browseArtistId(from: rawCorrectId)
+            resolvedArtistImageURL = artistResource.images?.first?.url
 
             SonosLog.debug(.artistDetail, "Search fallback: found artistId=\(correctId)")
             do {
@@ -549,7 +586,7 @@ struct ArtistDetailView: View {
 
     // MARK: - Playback
 
-    private func startStation(_ action: SonosCloudAPI.CustomAction) {
+    private func startStation() {
         guard playingItemId == nil else { return }
         playingItemId = "station"
 

@@ -464,11 +464,13 @@ enum SonosCloudAPI {
     static func browsePlaylist(token: String, householdId: String,
                                serviceId: String, accountId: String,
                                playlistId: String, count: Int = 100,
-                               offset: Int = 0) async throws -> AlbumBrowseResponse {
+                               offset: Int = 0,
+                               useExtendedMetadata: Bool = true) async throws -> AlbumBrowseResponse {
         let encodedPlaylist = playlistId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? playlistId
+        let museParam = useExtendedMetadata ? "muse2=true&" : ""
         var urlStr = "\(playBaseURL.replacingOccurrences(of: "/v1", with: "/v2"))" +
             "/households/\(householdId)/services/\(serviceId)" +
-            "/accounts/\(accountId)/playlists/\(encodedPlaylist)/browse?muse2=true&count=\(count)"
+            "/accounts/\(accountId)/playlists/\(encodedPlaylist)/browse?\(museParam)count=\(count)"
         if offset > 0 { urlStr += "&offset=\(offset)" }
 
         return try await getJSON(label: "browsePlaylist", urlString: urlStr,
@@ -480,11 +482,13 @@ enum SonosCloudAPI {
     static func browseContainer(token: String, householdId: String,
                                 serviceId: String, accountId: String,
                                 containerId: String, count: Int = 100,
-                                offset: Int = 0) async throws -> AlbumBrowseResponse {
+                                offset: Int = 0,
+                                useExtendedMetadata: Bool = true) async throws -> AlbumBrowseResponse {
         let encodedContainer = containerId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? containerId
+        let museParam = useExtendedMetadata ? "muse2=true&" : ""
         var urlStr = "\(playBaseURL.replacingOccurrences(of: "/v1", with: "/v2"))" +
             "/households/\(householdId)/services/\(serviceId)" +
-            "/accounts/\(accountId)/containers/\(encodedContainer)/browse?muse2=true&count=\(count)"
+            "/accounts/\(accountId)/containers/\(encodedContainer)/browse?\(museParam)count=\(count)"
         if offset > 0 { urlStr += "&offset=\(offset)" }
 
         return try await getJSON(label: "browseContainer", urlString: urlStr,

@@ -552,7 +552,7 @@ enum SonosAPI {
 
     private nonisolated static func browseContainer(ip: String, objectID: String, start: Int = 0,
                                                      count: Int = 100) async throws -> [BrowseItem] {
-        let body = "<ObjectID>\(objectID)</ObjectID>" +
+        let body = "<ObjectID>\(escapeXML(objectID))</ObjectID>" +
             "<BrowseFlag>BrowseDirectChildren</BrowseFlag>" +
             "<Filter>*</Filter>" +
             "<StartingIndex>\(start)</StartingIndex>" +
@@ -625,6 +625,34 @@ enum SonosAPI {
         let (data, _) = try await URLSession.shared.data(for: request)
         let xml = String(data: data, encoding: .utf8) ?? ""
         return parseSMAPIResults(xml, serviceId: serviceId)
+    }
+
+    nonisolated static func getMusicServiceMetadata(smapiURI: String, sessionId: String,
+                                                     serviceId: Int, itemId: String,
+                                                     index: Int = 0,
+                                                     count: Int = 100) async throws -> [BrowseItem] {
+        guard let url = URL(string: smapiURI) else { throw URLError(.badURL) }
+        let escapedId = escapeXML(itemId)
+        let soapBody = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" \
+            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+            <s:Body><getMetadata xmlns="http://www.sonos.com/Services/1.1">\
+            <id>\(escapedId)</id><index>\(index)</index><count>\(count)</count>\
+            </getMetadata></s:Body></s:Envelope>
+            """
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("text/xml; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue("\"http://www.sonos.com/Services/1.1#getMetadata\"", forHTTPHeaderField: "SOAPACTION")
+        if !sessionId.isEmpty {
+            request.setValue(sessionId, forHTTPHeaderField: "X-Sonos-Session-Id")
+        }
+        request.httpBody = soapBody.data(using: .utf8)
+
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let xml = String(data: data, encoding: .utf8) ?? ""
+        return parseSMAPIResults(decodeXMLEntities(xml), serviceId: serviceId)
     }
 
     /// Build DIDL-Lite metadata for a streaming service track so Sonos knows
