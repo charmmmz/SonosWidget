@@ -62,6 +62,17 @@ final class SonosManager {
     private var lastWidgetTrackTitle: String?
     private var lastEnrichedTrackKey: String?
     private var lastCloudQualityAttempt: Date = .distantPast
+    /// Cloud audio-quality enrichment is best-effort and round-trips a
+    /// real HTTP call. Keep it gated to ~once every 15 s so a burst of
+    /// `refreshState` ticks (e.g. user scrubbing) doesn't fan out to a
+    /// burst of `nowplaying` requests.
+    private static let cloudQualityRefreshCooldown: TimeInterval = 15
+
+    /// Number of back-to-back `refreshState` failures before we drop the
+    /// LAN connection, surface a "pull to refresh" banner, and re-probe
+    /// the backend (lets us auto-fall-over to Cloud when the user walks
+    /// off Wi-Fi).
+    private static let maxConsecutiveRefreshFailures = 3
     private var consecutiveFailures = 0
     private var currentActivity: Activity<SonosActivityAttributes>?
     /// Mirrors the `pushType` we asked for when creating `currentActivity`.
@@ -999,15 +1010,6 @@ final class SonosManager {
                     ipAddress: "", isCoordinator: true,
                     groupId: cloudGroup.id)
 
-                // Diagnostic: when the Home card's speaker name goes
-                // mysteriously blank, this log tells us (a) what cloud
-                // named the group, (b) which player ids it claims to
-                // contain, (c) which of those we actually resolved to
-                // non-invisible members for rendering.
-                let visibleCount = members.filter { !$0.isInvisible }.count
-                SonosLog.debug(.sonosCloud,
-                    "group '\(cloudGroup.name)' (\(cloudGroup.id.suffix(8))) → \(members.count) members (\(visibleCount) visible): \(members.map { "\($0.name)\($0.isInvisible ? "[hidden]" : "")" }.joined(separator: ", "))")
-
                 let isSelected = cloudGroup.id == cloudGroupId
                 let entry = perGroup[cloudGroup.id] ?? (meta: nil, status: nil, volume: nil)
 
@@ -1032,11 +1034,8 @@ final class SonosManager {
                     if isSelected { return trackInfo }
                     guard let meta = entry.meta,
                           let cloudTrack = meta.currentItem?.track else { return nil }
-                    // Same LAN-URL filter as `refreshStateCloud`: Sonos
-                    // Cloud often returns a speaker-local `getaa` URL
-                    // for `track.imageUrl`, which is useless over
-                    // cellular. Walk the fallbacks and keep only the
-                    // first publicly-reachable one.
+                    // Same LAN-URL filter as `refreshStateCloud` — drop
+                    // speaker-local `getaa` URLs that don't work off-LAN.
                     let artURL = Self.pickPublicArtURL(
                         cloudTrack.imageUrl,
                         cloudTrack.album?.imageUrl,
@@ -1048,14 +1047,6 @@ final class SonosManager {
                         TimeInterval($0) / 1000.0
                     } ?? 0
                     let sourceName = cloudTrack.service?.name ?? meta.container?.name
-                    // Diagnostic: if cards keep showing the placeholder
-                    // disc icon, this line exposes which of the three
-                    // candidate art fields Sonos actually populates for
-                    // the track — the cloud API's schema varies across
-                    // services, so the JSON body we're parsing is the
-                    // ground truth.
-                    SonosLog.debug(.sonosCloud,
-                        "art for \(cloudGroup.id.suffix(8)) '\(cloudTrack.name ?? "?")': track=\(cloudTrack.imageUrl ?? "nil") album=\(cloudTrack.album?.imageUrl ?? "nil") container=\(meta.container?.imageUrl ?? "nil")")
                     return TrackInfo(
                         title: cloudTrack.name ?? "",
                         artist: cloudTrack.artist?.name ?? "",
@@ -1319,7 +1310,7 @@ final class SonosManager {
             manageLiveActivity()
         } catch {
             consecutiveFailures += 1
-            if consecutiveFailures >= 3 {
+            if consecutiveFailures >= Self.maxConsecutiveRefreshFailures {
                 connectionState = .disconnected
                 errorMessage = "Connection lost — pull to refresh."
                 // Mid-session LAN loss — maybe the user walked off the Wi-Fi.
@@ -1409,7 +1400,7 @@ final class SonosManager {
             _ = await SonosAuth.shared.refreshAccessToken()
         } catch {
             consecutiveFailures += 1
-            if consecutiveFailures >= 3 {
+            if consecutiveFailures >= Self.maxConsecutiveRefreshFailures {
                 connectionState = .disconnected
                 errorMessage = "Remote control unavailable — check your connection."
             } else {
@@ -1588,14 +1579,12 @@ final class SonosManager {
     func resolveCloudGroupId() async {
         guard let speaker = selectedSpeaker,
               let token = await SonosAuth.shared.validAccessToken() else {
-            SonosLog.debug(.sonosCloud, "resolveCloudGroupId skipped — speaker: \(selectedSpeaker?.name ?? "nil"), loggedIn: \(SonosAuth.shared.isLoggedIn)")
             return
         }
 
         do {
             if SonosAuth.shared.householdId == nil {
                 let households = try await SonosCloudAPI.getHouseholds(token: token)
-                SonosLog.debug(.sonosCloud, "households: \(households.map { "\($0.id) (\($0.name ?? "?")" })")
                 SonosAuth.shared.householdId = households.first?.id
             }
             guard let householdId = SonosAuth.shared.householdId else {
@@ -1605,9 +1594,6 @@ final class SonosManager {
 
             let response = try await SonosCloudAPI.getGroups(token: token, householdId: householdId)
             let rincon = speaker.id
-            SonosLog.debug(.sonosCloud, "speaker id: \(rincon), name: \(speaker.name)")
-            SonosLog.debug(.sonosCloud, "groups: \(response.groups.map { "\($0.id) playerIds=\($0.playerIds)" })")
-            SonosLog.debug(.sonosCloud, "players: \(response.players.map { "\($0.id) name=\($0.name)" })")
 
             cloudGroupId = response.groups.first(where: { group in
                 group.playerIds.contains(where: { $0.contains(rincon) || rincon.contains($0) })
@@ -1620,15 +1606,13 @@ final class SonosManager {
                 })?.id
             }
 
-            // Pick a matching cloud player id (RINCON id is usually a substring
-            // of the cloud player id). Needed for per-player volume via Cloud
-            // Control API when the user is off-LAN.
+            // RINCON id is a substring of the cloud player id — needed
+            // for per-player volume over the Cloud Control API.
             cloudPlayerId = response.players.first { p in
                 p.id.contains(rincon) || rincon.contains(p.id) || p.name == speaker.name
             }?.id
 
             if let gid = cloudGroupId {
-                SonosLog.info(.sonosCloud, "resolved cloudGroupId: \(gid) player: \(cloudPlayerId ?? "?")")
                 SharedStorage.cloudGroupId = gid
             } else {
                 SonosLog.error(.sonosCloud, "Could not match speaker \(speaker.name) (id: \(rincon)) to any cloud group")
@@ -1684,7 +1668,7 @@ final class SonosManager {
 
         // New track → fetch immediately; same track → respect cooldown
         if trackKey == lastEnrichedTrackKey {
-            guard Date().timeIntervalSince(lastCloudQualityAttempt) > 15 else { return }
+            guard Date().timeIntervalSince(lastCloudQualityAttempt) > Self.cloudQualityRefreshCooldown else { return }
         }
 
         isEnrichingQuality = true

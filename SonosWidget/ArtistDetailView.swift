@@ -42,11 +42,7 @@ struct ArtistDetailView: View {
         .task { await loadArtist() }
         .task(id: headerImageURL) { await loadHeaderImage() }
         .onAppear { isFavorited = searchManager.isFavorited(artistItem) }
-        .overlay(alignment: .bottom) {
-            if let msg = toastMessage {
-                toast(msg)
-            }
-        }
+        .toast($toastMessage)
     }
 
     // MARK: - Blurred Background
@@ -338,24 +334,8 @@ struct ArtistDetailView: View {
 
     // MARK: - Toast
 
-    private func toast(_ message: String) -> some View {
-        Text(message)
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule())
-            .shadow(radius: 4)
-            .padding(.bottom, 80)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-            .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    withAnimation { toastMessage = nil }
-                }
-            }
-    }
-
     private func showToast(_ message: String) {
-        withAnimation(.easeInOut(duration: 0.25)) { toastMessage = message }
+        withAnimation(ToastModifier.fadeAnimation) { toastMessage = message }
     }
 
     // MARK: - Data Loading
@@ -382,16 +362,19 @@ struct ArtistDetailView: View {
             return
         }
 
-        let accountId = searchManager.linkedAccounts
+        let accountId = accountIdFromURI(artistItem.uri) ?? searchManager.linkedAccounts
             .first { $0.serviceId == serviceId }?.accountId ?? "2"
 
         SonosLog.debug(.artistDetail, "Loading artist: id=\(artistItem.id), serviceId=\(serviceId), accountId=\(accountId)")
 
         do {
+            let artistId = try await initialArtistId(
+                token: token, householdId: householdId,
+                serviceId: serviceId, accountId: accountId)
             response = try await SonosCloudAPI.browseArtist(
                 token: token, householdId: householdId,
                 serviceId: serviceId, accountId: accountId,
-                artistId: artistItem.id)
+                artistId: artistId)
             isLoading = false
         } catch is CancellationError {
             SonosLog.debug(.artistDetail, "Load cancelled (tab switch)")
@@ -402,6 +385,85 @@ struct ArtistDetailView: View {
         }
     }
 
+    private func initialArtistId(token: String, householdId: String,
+                                 serviceId: String, accountId: String) async throws -> String {
+        guard shouldResolveCatalogArtist(serviceId: serviceId) else {
+            return browseArtistId(from: artistItem.id)
+        }
+
+        do {
+            let searchResult = try await SonosCloudAPI.searchService(
+                token: token, householdId: householdId,
+                serviceId: serviceId, accountId: accountId,
+                term: artistItem.title, count: 20)
+            guard let rawResolvedId = preferredArtistResource(in: searchResult)?.id?.objectId,
+                  !rawResolvedId.isEmpty else { return browseArtistId(from: artistItem.id) }
+            let resolvedId = browseArtistId(from: rawResolvedId)
+
+            if resolvedId != artistItem.id {
+                SonosLog.debug(.artistDetail, "Resolved Apple Music artist id \(artistItem.id) → \(resolvedId)")
+            }
+            return resolvedId
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            SonosLog.debug(.artistDetail, "Artist id resolution failed: \(error)")
+            return browseArtistId(from: artistItem.id)
+        }
+    }
+
+    private func shouldResolveCatalogArtist(serviceId: String) -> Bool {
+        if let account = searchManager.linkedAccounts.first(where: { $0.serviceId == serviceId }),
+           PlaybackSource.from(serviceName: account.displayName) == .appleMusic {
+            return true
+        }
+        if let localSid = artistItem.serviceId,
+           PlaybackSource.from(serviceName: SharedStorage.serviceNamesByLocalSid[String(localSid)]) == .appleMusic {
+            return true
+        }
+        return false
+    }
+
+    private func accountIdFromURI(_ uri: String?) -> String? {
+        guard let queryPart = uri?.split(separator: "?").last else { return nil }
+        for param in queryPart.split(separator: "&") {
+            let kv = param.split(separator: "=", maxSplits: 1)
+            if kv.count == 2, kv[0] == "sn" {
+                return String(kv[1])
+            }
+        }
+        return nil
+    }
+
+    private func preferredArtistResource(in result: SonosCloudAPI.ServiceSearchResponse) -> SonosCloudAPI.CloudResource? {
+        let artists = result.allResources.filter { $0.type == "ARTIST" }
+        let targetName = normalizedArtistName(artistItem.title)
+        let exactMatches = artists.filter { normalizedArtistName($0.name ?? "") == targetName }
+
+        return exactMatches.first { !isLibraryScopedArtistId($0.id?.objectId) }
+            ?? exactMatches.first
+            ?? artists.first { !isLibraryScopedArtistId($0.id?.objectId) }
+            ?? artists.first
+    }
+
+    private func normalizedArtistName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private func isLibraryScopedArtistId(_ id: String?) -> Bool {
+        id?.lowercased().contains("library") == true
+    }
+
+    private func browseArtistId(from rawId: String) -> String {
+        let base = rawId.firstIndex(of: "#").map { String(rawId[..<$0]) } ?? rawId
+        let parts = base.components(separatedBy: ":")
+        guard parts.dropLast().contains(where: { $0.caseInsensitiveCompare("artist") == .orderedSame }),
+              let objectId = parts.last,
+              !objectId.isEmpty else { return rawId }
+        return objectId
+    }
+
     private func searchFallback(token: String, householdId: String,
                                 serviceId: String, accountId: String) async {
         do {
@@ -410,9 +472,7 @@ struct ArtistDetailView: View {
                 serviceId: serviceId, accountId: accountId,
                 term: artistItem.title, count: 50)
 
-            let artistResource = searchResult.allResources
-                .first { $0.type == "ARTIST" && $0.name?.lowercased() == artistItem.title.lowercased() }
-                ?? searchResult.allResources.first { $0.type == "ARTIST" }
+            let artistResource = preferredArtistResource(in: searchResult)
 
             // Collect albums up-front so we can use them as a last-resort
             // fallback if the second browseArtist call also fails.
@@ -420,10 +480,11 @@ struct ArtistDetailView: View {
                                                  serviceId: serviceId,
                                                  accountId: accountId)
 
-            guard let correctId = artistResource?.id?.objectId else {
+            guard let rawCorrectId = artistResource?.id?.objectId else {
                 useDiscographyFallback(albumsByArtist)
                 return
             }
+            let correctId = browseArtistId(from: rawCorrectId)
 
             SonosLog.debug(.artistDetail, "Search fallback: found artistId=\(correctId)")
             do {

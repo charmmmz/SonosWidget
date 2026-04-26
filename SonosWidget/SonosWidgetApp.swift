@@ -21,7 +21,15 @@ struct SonosWidgetApp: App {
         UITabBar.appearance().scrollEdgeAppearance = tabAppearance
 
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.bgRefreshID, using: nil) { task in
-            Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+            // The system always hands us a `BGAppRefreshTask` for the
+            // identifier we registered with — the cast is theoretically
+            // infallible but `as?` lets us bail cleanly if Apple ever
+            // changes that contract, instead of crashing at launch.
+            guard let refresh = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            Self.handleBackgroundRefresh(task: refresh)
         }
 
         // iOS does NOT reliably fire willTerminateNotification on force-quit,

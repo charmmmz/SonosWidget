@@ -515,13 +515,10 @@ enum SonosAPI {
             innerElements +
             "</item></DIDL-Lite>"
 
-        SonosLog.debug(.favorites, "OUTER didl=\(didl)")
-
-        let result = try await soap(ip: ip, endpoint: contentDirectory, service: "ContentDirectory",
+        _ = try await soap(ip: ip, endpoint: contentDirectory, service: "ContentDirectory",
                            action: "CreateObject",
                            body: "<ContainerID>FV:2</ContainerID>" +
                            "<Elements>\(escapeXML(didl))</Elements>")
-        SonosLog.debug(.favorites, "SOAP response: \(result.prefix(500))")
     }
 
     nonisolated static func removeFromFavorites(ip: String, objectId: String) async throws {

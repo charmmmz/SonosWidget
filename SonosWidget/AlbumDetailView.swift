@@ -56,11 +56,7 @@ struct AlbumDetailView: View {
         .task { await loadAlbum() }
         .task(id: coverURL) { await loadCoverImage() }
         .onAppear { isFavorited = searchManager.isFavorited(albumItem) }
-        .overlay(alignment: .bottom) {
-            if let msg = toastMessage {
-                toast(msg)
-            }
-        }
+        .toast($toastMessage)
     }
 
     // MARK: - Blurred Background
@@ -417,24 +413,8 @@ struct AlbumDetailView: View {
 
     // MARK: - Toast
 
-    private func toast(_ message: String) -> some View {
-        Text(message)
-            .font(.subheadline.weight(.medium))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.ultraThinMaterial, in: Capsule())
-            .shadow(radius: 4)
-            .padding(.bottom, 80)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-            .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    withAnimation { toastMessage = nil }
-                }
-            }
-    }
-
     private func showToast(_ message: String) {
-        withAnimation(.easeInOut(duration: 0.25)) { toastMessage = message }
+        withAnimation(ToastModifier.fadeAnimation) { toastMessage = message }
     }
 
     // MARK: - Helpers

@@ -1,6 +1,29 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Sonos UPnP magic numbers
+
+/// `flags=8300` is the Sonos-internal "third-party streaming radio /
+/// container" flag set used by the official Sonos app on radio:ra.* and
+/// cpcontainer URIs. Anything else (e.g. `flags=0`) makes the speaker
+/// reject the URI with SOAP fault 800/801. Verified by capturing the
+/// official iOS app's traffic.
+let SonosRinconRadioFlags: Int = 8300
+
+/// Time we sleep after `setAVTransportURI` before issuing `Play`.
+/// 800 ms is the empirical sweet spot — shorter and the speaker still
+/// sometimes returns "transition pending" on Play.
+let stationSetURISettleMs: Int = 800
+/// Time we wait after Play before reading transport state to decide
+/// if we need to retry. Stations resolve via the cloud and can take
+/// 2-3 s before the transport leaves STOPPED.
+let stationPlayConfirmMs: Int = 2500
+/// Pause between retries when the first Play left us in STOPPED.
+let stationRetryDelayMs: Int = 2000
+/// After playNow, how long to wait before refreshing UI state so the
+/// freshly-set track has propagated to the position-info endpoint.
+let playbackSettleDelayMs: Int = 1500
+
 @Observable
 final class SearchManager {
     var favorites: [BrowseItem] = []
@@ -854,7 +877,6 @@ final class SearchManager {
                 return
             }
 
-            SonosLog.debug(.search, "Searching \(serviceIds.count) services for: \(query)")
             lastSearchQuery = query
             serviceDetailResults = [:]
 
@@ -882,9 +904,11 @@ final class SearchManager {
                         let sid = serviceResult.serviceId ?? UUID().uuidString
                         results.append(ServiceSearchResult(
                             id: sid, serviceName: serviceName, items: items))
-                        SonosLog.debug(.search, "\(serviceName) → \(items.count) results")
                     }
                 }
+
+                let total = results.reduce(0) { $0 + $1.items.count }
+                SonosLog.debug(.search, "search '\(query)' across \(serviceIds.count) services → \(total) results in \(results.count) groups")
 
                 guard !Task.isCancelled else { return }
                 searchResults = results
@@ -920,15 +944,11 @@ final class SearchManager {
                 serviceId: serviceId, accountId: aid, term: lastSearchQuery)
 
             let allResources = response.allResources
-            let typeCounts = Dictionary(grouping: allResources, by: { $0.type ?? "nil" })
-                .mapValues { $0.count }
-            SonosLog.debug(.search, "Detail \(serviceId) types: \(typeCounts)")
-
             let serviceName = allResources.first?.id?.serviceName ?? account.displayName
             let items = allResources.compactMap { resource -> BrowseItem? in
                 convertToBrowseItem(resource, serviceId: serviceId, accountId: aid)
             }
-            SonosLog.debug(.search, "Detail \(serviceName) → \(items.count) results")
+            SonosLog.debug(.search, "detail \(serviceName) → \(items.count) results")
 
             serviceDetailResults[serviceId] = ServiceSearchResult(
                 id: serviceId, serviceName: serviceName, items: items)
@@ -1097,7 +1117,6 @@ final class SearchManager {
         let cloudSid = localToCloudSid[localSid] ?? String(localSid)
         let username = cloudServiceUsername[cloudSid] ?? "X_#Svc\(cloudSid)-0-Token"
         let desc = "SA_RINCON\(cloudSid)_\(username)"
-        SonosLog.debug(.playback, "desc=\(desc) cloudType=\(item.cloudType ?? "nil")")
 
         let encodedObjId = item.id.replacingOccurrences(of: ":", with: "%3a")
         let cloudType = item.cloudType ?? "TRACK"
@@ -1235,26 +1254,24 @@ final class SearchManager {
     private func constructFavoriteURI(resMD: String) -> String? {
         guard let itemId = extractItemId(from: resMD) else { return nil }
 
-        var flags = 8300
+        var flags = SonosRinconRadioFlags
         if itemId.count >= 8 {
             let flagsHex = String(itemId[itemId.index(itemId.startIndex, offsetBy: 4)..<itemId.index(itemId.startIndex, offsetBy: 8)])
-            flags = Int(flagsHex, radix: 16) ?? 8300
+            flags = Int(flagsHex, radix: 16) ?? SonosRinconRadioFlags
         }
 
         guard let params = extractServiceParams() else {
-            SonosLog.debug(.playback, "Could not find service params from existing favorites")
+            // Fallback: bare cpcontainer URI without sid/sn — works for
+            // some local sources but not third-party services.
             return "x-rincon-cpcontainer:\(itemId)"
         }
 
-        let uri = "x-rincon-cpcontainer:\(itemId)?sid=\(params.sid)&flags=\(flags)&sn=\(params.sn)"
-        SonosLog.debug(.playback, "Constructed full URI: \(uri)")
-        return uri
+        return "x-rincon-cpcontainer:\(itemId)?sid=\(params.sid)&flags=\(flags)&sn=\(params.sn)"
     }
 
     func playNow(item: BrowseItem, manager: SonosManager) async {
-        // Push into Recently Played first (before any await) so even if
-        // playback itself fails we still remember what the user tried —
-        // mirrors Apple Music's behavior of listing attempted plays.
+        // Push to recents before any await so a failed play still records
+        // intent (mirrors Apple Music's "attempted plays" behaviour).
         pushRecentlyPlayed(item)
 
         // Remote mode: if the item is a cloud-sourced favorite, use the
@@ -1291,10 +1308,8 @@ final class SearchManager {
             return
         }
 
-        SonosLog.debug(.playback, "playNow START title=\(item.title) isContainer=\(item.isContainer) id=\(item.id)")
-
         guard let ip = manager.selectedSpeaker?.playbackIP else {
-            SonosLog.error(.playback, "ABORT: no speaker IP")
+            SonosLog.error(.playback, "playNow: no speaker IP")
             return
         }
 
@@ -1312,16 +1327,13 @@ final class SearchManager {
         }
 
         guard let uri = playURI, !uri.isEmpty else {
-            SonosLog.error(.playback, "ABORT: no URI. metaXML=\(item.metaXML ?? "nil")")
+            SonosLog.error(.playback, "playNow: no URI for '\(item.title)'")
             return
         }
 
-        SonosLog.debug(.playback, "uri=\(uri)")
-        SonosLog.debug(.playback, "metadata=\(playMeta.prefix(300))")
-
         do {
             guard let uuid = manager.selectedSpeaker?.id else {
-                SonosLog.error(.playback, "ABORT: no speaker UUID")
+                SonosLog.error(.playback, "playNow: no speaker UUID")
                 return
             }
 
@@ -1330,45 +1342,27 @@ final class SearchManager {
                 || uri.contains("x-sonosapi-hls:")
 
             if isRadio {
-                SonosLog.debug(.playback, "→ Direct transport (radio/stream, queue preserved)")
                 try await SonosAPI.setAVTransportURI(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.play(ip: ip)
-                SonosLog.info(.playback, "Radio playback started")
-            } else if item.isContainer || uri.contains("x-rincon-cpcontainer:") {
-                SonosLog.debug(.playback, "→ Queue approach (container)")
-                try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
-                let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
-                try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
-                try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
-                try await SonosAPI.play(ip: ip)
-                SonosLog.info(.playback, "Queue playback started at track \(trackNr)")
+                SonosLog.info(.playback, "playNow radio '\(item.title)'")
             } else {
-                SonosLog.debug(.playback, "→ Queue approach (single track)")
+                // Both container and single-track paths take the same shape
+                // — only the source URI differs. Fold them to keep the log
+                // story simple ("playNow queue → track N").
                 try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
                 let trackNr = try await SonosAPI.addURIToQueue(ip: ip, uri: uri, metadata: playMeta)
                 try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: uuid)
                 try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
                 try await SonosAPI.play(ip: ip)
-                SonosLog.info(.playback, "Queue playback started at track \(trackNr)")
+                SonosLog.info(.playback, "playNow queue '\(item.title)' → track \(trackNr)")
             }
 
-            try? await Task.sleep(for: .milliseconds(1500))
-
-            #if DEBUG
-            if let rawXML = try? await SonosAPI.getRawPositionInfo(ip: ip) {
-                let curURI = SonosAPI.extractTag("TrackURI", from: rawXML) ?? "nil"
-                let curMeta = SonosAPI.extractTag("TrackMetaData", from: rawXML) ?? "nil"
-                SonosLog.debug(.playback, "DIAGNOSTIC currentURI=\(SonosAPI.decodeXMLEntities(curURI))")
-                SonosLog.debug(.playback, "DIAGNOSTIC currentMeta=\(SonosAPI.decodeXMLEntities(curMeta))")
-            }
-            #endif
-
+            try? await Task.sleep(for: .milliseconds(playbackSettleDelayMs))
             await manager.refreshState()
         } catch {
-            SonosLog.error(.playback, "FAILED: \(error)")
+            SonosLog.error(.playback, "playNow failed: \(error)")
             errorMessage = error.localizedDescription
         }
-        SonosLog.debug(.playback, "playNow END")
     }
 
 
@@ -1389,21 +1383,18 @@ final class SearchManager {
     /// Searches Cloud API for the artist's Apple Music ID, then constructs radio:ra.{id}
     /// — the same format the official Sonos app uses for "Start Station".
     func startStation(item: BrowseItem, manager: SonosManager) async {
-        SonosLog.debug(.station, "startStation START title=\"\(item.title)\" id=\(item.id)")
-        // Push before network work so the Browse tab shows the entry even
-        // if cloud search below fails. pushRecentlyPlayed dedupes by id, so
-        // duplicating with playNow's push (when routed via item.isArtist)
-        // is a no-op.
+        // Push to recents before network work so Browse shows the entry
+        // even if cloud search below fails. Dedupes by id — safe to repeat.
         pushRecentlyPlayed(item)
 
         guard let ip = manager.selectedSpeaker?.playbackIP else {
-            SonosLog.error(.station, "ABORT: no speaker IP")
+            SonosLog.error(.station, "startStation: no speaker IP")
             return
         }
 
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
-            SonosLog.error(.station, "ABORT: no Cloud auth")
+            SonosLog.error(.station, "startStation: no Cloud auth")
             errorMessage = "Not logged in to Sonos Cloud"
             return
         }
@@ -1411,7 +1402,7 @@ final class SearchManager {
         if !hasProbed { await probeLinkedServices() }
         let serviceIds = activeServiceIds
         guard !serviceIds.isEmpty else {
-            SonosLog.error(.station, "ABORT: no active services")
+            SonosLog.error(.station, "startStation: no active services")
             errorMessage = "No music services linked"
             return
         }
@@ -1439,7 +1430,6 @@ final class SearchManager {
                         cloudServiceId = svc.serviceId
                         cloudAccountId = svc.accountId
                         artistArtURL = resource.images?.first?.url ?? item.albumArtURL
-                        SonosLog.debug(.station, "Matched artist: \(name), id=\(objId)")
                         break
                     }
                 }
@@ -1456,7 +1446,6 @@ final class SearchManager {
                             cloudServiceId = svc.serviceId
                             cloudAccountId = svc.accountId
                             artistArtURL = resource.images?.first?.url ?? item.albumArtURL
-                            SonosLog.debug(.station, "Fallback artist: \(resource.name ?? "?"), id=\(objId)")
                             break
                         }
                     }
@@ -1473,7 +1462,6 @@ final class SearchManager {
             // Construct radio:ra.{artist_id} — this is the "Start Station" format
             let radioId = "radio:ra.\(amArtistId)"
             let stationName = "\(item.title) Radio"
-            SonosLog.debug(.station, "Constructed radioId=\(radioId) name=\"\(stationName)\"")
 
             await playRadioStation(
                 ip: ip, radioId: radioId, stationName: stationName,
@@ -1481,10 +1469,9 @@ final class SearchManager {
                 artURL: artistArtURL, resMD: item.resMD, manager: manager)
 
         } catch {
-            SonosLog.error(.station, "Failed: \(error)")
+            SonosLog.error(.station, "startStation failed: \(error)")
             errorMessage = error.localizedDescription
         }
-        SonosLog.debug(.station, "startStation END")
     }
 
     /// Play a selected radio station option (from station picker).
@@ -1507,8 +1494,7 @@ final class SearchManager {
         let sn = accountId ?? params?.sn ?? "0"
 
         let encodedId = radioId.replacingOccurrences(of: ":", with: "%3a")
-        let radioURI = "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=8300&sn=\(sn)"
-        SonosLog.debug(.station, "radioURI=\(radioURI)")
+        let radioURI = "x-sonosapi-radio:\(encodedId)?sid=\(sid)&flags=\(SonosRinconRadioFlags)&sn=\(sn)"
 
         let descTag: String
         if let fromMD = extractDescTag(from: resMD ?? "") {
@@ -1518,7 +1504,6 @@ final class SearchManager {
         } else {
             descTag = "SA_RINCON\(sid)_X_#Svc\(sid)-\(sn)-Token"
         }
-        SonosLog.debug(.station, "descTag=\(descTag)")
         let artTag = artURL.map { "<upnp:albumArtURI>\(SonosAPI.escapeXML($0))</upnp:albumArtURI>" } ?? ""
         let radioMeta = "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
             "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" " +
@@ -1533,30 +1518,27 @@ final class SearchManager {
             "\(descTag)</desc></item></DIDL-Lite>"
 
         do {
-            SonosLog.debug(.station, "→ SetAVTransportURI...")
             try await SonosAPI.setAVTransportURI(ip: ip, uri: radioURI, metadata: radioMeta)
-            try? await Task.sleep(for: .milliseconds(800))
-            SonosLog.debug(.station, "→ Play...")
+            try? await Task.sleep(for: .milliseconds(stationSetURISettleMs))
             try await SonosAPI.play(ip: ip)
 
-            try? await Task.sleep(for: .milliseconds(2500))
+            try? await Task.sleep(for: .milliseconds(stationPlayConfirmMs))
             let state = try? await SonosAPI.getTransportInfo(ip: ip)
-            let newInfo = try? await SonosAPI.getPositionInfo(ip: ip)
-            SonosLog.debug(.station, "after: transport=\(state?.rawValue ?? "nil") title=\"\(newInfo?.title ?? "nil")\"")
 
             if state == .stopped {
-                SonosLog.info(.station, "Still STOPPED — retrying Play after extra delay...")
-                try? await Task.sleep(for: .milliseconds(2000))
+                // Some stations need a second nudge — first Play is acked
+                // but Sonos sits in STOPPED until the cloud finishes resolving
+                // the actual stream URL.
+                SonosLog.info(.station, "still STOPPED, retrying play")
+                try? await Task.sleep(for: .milliseconds(stationRetryDelayMs))
                 try await SonosAPI.play(ip: ip)
-                try? await Task.sleep(for: .milliseconds(2000))
-                let retryState = try? await SonosAPI.getTransportInfo(ip: ip)
-                let retryInfo = try? await SonosAPI.getPositionInfo(ip: ip)
-                SonosLog.debug(.station, "retry: transport=\(retryState?.rawValue ?? "nil") title=\"\(retryInfo?.title ?? "nil")\"")
+                try? await Task.sleep(for: .milliseconds(stationRetryDelayMs))
             }
 
+            SonosLog.info(.station, "playRadioStation '\(stationName)'")
             await manager.refreshState()
         } catch {
-            SonosLog.error(.station, "UPnP playback FAILED: \(error)")
+            SonosLog.error(.station, "playRadioStation failed: \(error)")
             errorMessage = error.localizedDescription
         }
     }
@@ -1667,8 +1649,6 @@ final class SearchManager {
             ? resolved.title
             : (serviceDisplayName(for: resolved) ?? "Apple Music")
 
-        SonosLog.debug(.favorites, "Adding '\(resolved.title)' (type=\(resolved.cloudType ?? "nil"), rType=\(rType)) — uri=\(uri)")
-        SonosLog.debug(.favorites, "metadata=\(meta)")
         do {
             try await SonosAPI.addToFavorites(
                 ip: ip, title: resolved.title, uri: uri, metadata: meta,

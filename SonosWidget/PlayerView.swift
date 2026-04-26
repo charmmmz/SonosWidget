@@ -1189,10 +1189,7 @@ struct NowPlayingOverlay: View {
             }
         }
         .frame(width: size, height: size)
-        // For TV input we reuse the bottom-leading slot that normally
-        // holds the streaming-source badge — surfacing the LIVE/IDLE
-        // signal status right where the user's eye is already trained
-        // to look for "what's playing this".
+        // For TV input, reuse the streaming-source badge slot to show LIVE/IDLE.
         .overlay(alignment: .bottomLeading) {
             if isTV && verticalSizeClass != .compact {
                 tvSignalBadge(hasSignal: tvHasSignal)
