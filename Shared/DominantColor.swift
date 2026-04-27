@@ -14,6 +14,58 @@ extension UIImage {
                       Int(r * 255), Int(g * 255), Int(b * 255))
     }
 
+    /// Average RGB of the bottom strip of the cover (default ~bottom 12%).
+    /// Used by the player background so the gradient starts from the colour
+    /// the cover *actually* ends with — without this, an album with a white-
+    /// snow bottom over a brown-dominant scene leaves a visible hard edge
+    /// where the sharp cover meets the dominant-colour backdrop.
+    /// Unlike `dominantColor()`, this returns the raw averaged colour with
+    /// no saturation / lightness boost.
+    func bottomEdgeColor(stripFraction: CGFloat = 0.12) -> Color? {
+        guard let (r, g, b) = averageRGB(stripFraction: stripFraction) else { return nil }
+        return Color(.sRGB, red: r, green: g, blue: b, opacity: 1)
+    }
+
+    private func averageRGB(stripFraction: CGFloat) -> (Double, Double, Double)? {
+        guard let cgImage else { return nil }
+        let imgW = cgImage.width
+        let imgH = cgImage.height
+        guard imgW > 0, imgH > 0 else { return nil }
+
+        // Down-sample to a thin strip (W=16, H≈2) to keep cost trivial.
+        let stripPixels = max(1, Int(CGFloat(imgH) * stripFraction))
+        let dstW = 16
+        let dstH = max(1, dstW * stripPixels / max(imgW, 1))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var raw = [UInt8](repeating: 0, count: dstW * dstH * 4)
+
+        guard let ctx = CGContext(
+            data: &raw, width: dstW, height: dstH,
+            bitsPerComponent: 8, bytesPerRow: dstW * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Draw only the bottom strip of the source into the destination.
+        let srcY = imgH - stripPixels
+        let drawRect = CGRect(x: 0, y: -CGFloat(srcY) * (CGFloat(dstH) / CGFloat(stripPixels)),
+                              width: CGFloat(dstW),
+                              height: CGFloat(imgH) * (CGFloat(dstH) / CGFloat(stripPixels)))
+        ctx.clip(to: CGRect(x: 0, y: 0, width: dstW, height: dstH))
+        ctx.draw(cgImage, in: drawRect)
+
+        var rSum: Double = 0, gSum: Double = 0, bSum: Double = 0
+        var count: Double = 0
+        for i in stride(from: 0, to: raw.count, by: 4) {
+            rSum += Double(raw[i]) / 255.0
+            gSum += Double(raw[i + 1]) / 255.0
+            bSum += Double(raw[i + 2]) / 255.0
+            count += 1
+        }
+        guard count > 0 else { return nil }
+        return (rSum / count, gSum / count, bSum / count)
+    }
+
     /// Samples the image, picks the most saturated representative color,
     /// then boosts lightness and saturation so it reads clearly on dark backgrounds.
     private func extractVibrantRGB() -> (Double, Double, Double)? {

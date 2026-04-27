@@ -17,6 +17,11 @@ final class SonosManager {
     var errorMessage: String?
     var albumArtImage: UIImage?
     var albumArtDominantColor: Color?
+    /// Average colour of the cover's bottom ~12% strip. Drives the player
+    /// background so the gradient starts from whatever the cover actually
+    /// ends with (e.g. white snow on a Christmas tree cover) instead of the
+    /// dominant tint, which would otherwise leave a hard edge at the seam.
+    var albumArtBottomEdgeColor: Color?
     var showingAddSpeaker = false
     var showingQueue = false
     var isPlayingFromQueue = true
@@ -2146,12 +2151,14 @@ final class SonosManager {
             // Fast path: image already in memory cache.
             if let cached = self.queueArtCache.object(forKey: urlStr as NSString) {
                 let color = self.dominantColorCache[urlStr] ?? cached.dominantColor()
+                let bottomEdge = cached.bottomEdgeColor()
                 // Keep disk entry warm so LRU eviction doesn't drop the current song's art.
                 QueueArtDiskCache.shared.touch(urlStr)
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.8)) {
                         self.albumArtImage = cached
                         self.albumArtDominantColor = color
+                        self.albumArtBottomEdgeColor = bottomEdge
                         self.dominantColorCache[urlStr] = color
                         if let gid = self.selectedSpeaker?.groupId ?? self.selectedSpeaker?.id {
                             self.groupAlbumColors[gid] = color
@@ -2169,12 +2176,14 @@ final class SonosManager {
             // L2: check disk cache before hitting the network.
             if let cached = QueueArtDiskCache.shared.image(for: urlStr) {
                 let color = self.dominantColorCache[urlStr] ?? cached.dominantColor()
+                let bottomEdge = cached.bottomEdgeColor()
                 self.queueArtCache.setObject(cached, forKey: urlStr as NSString,
                                              cost: Int(cached.size.width * cached.size.height * 4))
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.8)) {
                         self.albumArtImage = cached
                         self.albumArtDominantColor = color
+                        self.albumArtBottomEdgeColor = bottomEdge
                         self.dominantColorCache[urlStr] = color
                         if let gid = self.selectedSpeaker?.groupId ?? self.selectedSpeaker?.id {
                             self.groupAlbumColors[gid] = color
@@ -2195,11 +2204,13 @@ final class SonosManager {
                 guard !Task.isCancelled, lastAlbumArtURL == capturedURL else { return }
                 let image = UIImage(data: data)
                 let dominantColor = self.dominantColorCache[urlStr] ?? image?.dominantColor()
+                let bottomEdge = image?.bottomEdgeColor()
                 if let image { QueueArtDiskCache.shared.store(data, for: urlStr) }
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.8)) {
                         self.albumArtImage = image
                         self.albumArtDominantColor = dominantColor
+                        self.albumArtBottomEdgeColor = bottomEdge
                         if let color = dominantColor { self.dominantColorCache[urlStr] = color }
                         if let gid = self.selectedSpeaker?.groupId ?? self.selectedSpeaker?.id {
                             if let color = dominantColor { self.groupAlbumColors[gid] = color }
@@ -2215,6 +2226,7 @@ final class SonosManager {
                     withAnimation(.easeInOut(duration: 0.5)) {
                         self.albumArtImage = nil
                         self.albumArtDominantColor = nil
+                        self.albumArtBottomEdgeColor = nil
                     }
                 }
             }

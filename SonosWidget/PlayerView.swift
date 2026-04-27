@@ -911,20 +911,13 @@ struct NowPlayingOverlay: View {
 
     private func portraitLayout(geo: GeometryProxy) -> some View {
         let h = geo.size.height
-        // Clamp to a safe positive size — during the player's open/close
-        // animation `geo.size` can briefly report 0 or values smaller than
-        // our 64pt horizontal inset, producing a negative `artSz` that
-        // SwiftUI complains about ("Invalid frame dimension"). The lower
-        // bound never renders in practice; it just keeps the frame valid.
-        let artSz = max(1, min(geo.size.width - 32, h * 0.55))
+        // Full-bleed square cover. Cap at h * 0.55 as a safety on small
+        // devices (e.g. SE) where a width-sized square would crowd out the
+        // transport row below; on every modern iPhone width wins this min.
+        let artSz = max(1, min(geo.size.width, h * 0.55))
         let s = max(0.5, h / 760)
 
         return VStack(spacing: 0) {
-            dragHandle
-                .padding(.top, 4)
-
-            Spacer(minLength: 0)
-
             albumArtView(size: artSz)
 
             trackInfoView
@@ -961,6 +954,13 @@ struct NowPlayingOverlay: View {
             errorBanner
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Drag handle floats above the cover so the artwork can take the
+        // full top of the screen without losing the pull-to-dismiss
+        // affordance.
+        .overlay(alignment: .top) {
+            dragHandle
+                .padding(.top, 8)
+        }
         .contentShape(Rectangle())
         .simultaneousGesture(dismissDragGesture)
     }
@@ -1100,40 +1100,53 @@ struct NowPlayingOverlay: View {
 
     @ViewBuilder
     private var artBackground: some View {
-        // Apple Music-style immersive backdrop: a dominant-color vertical
-        // gradient that fades to black at the bottom, optionally tinted by a
-        // very-soft blurred copy of the album art for organic texture.
-        let dominant = manager.albumArtDominantColor ?? Color(white: 0.12)
-        ZStack {
-            LinearGradient(
-                colors: [
-                    dominant,
-                    dominant.opacity(0.55),
-                    Color.black
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+        // Apple Music-style "water reflection" backdrop: a vertically
+        // flipped, heavily blurred copy of the cover lives below the
+        // sharp cover. Because the flipped image's top edge IS the
+        // original cover's bottom edge, the seam at the cover's lower
+        // boundary is automatically continuous in colour — no need for
+        // a hand-tuned gradient anchor.
+        let dominant = manager.albumArtDominantColor ?? Color(white: 0.10)
+        GeometryReader { geo in
+            let coverHeight = min(geo.size.width, geo.size.height * 0.55)
+            let coverBottomY = geo.safeAreaInsets.top + coverHeight
+            let totalH = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+            let coverBottomFrac = max(0.30, min(0.7, coverBottomY / max(totalH, 1)))
+            ZStack {
+                // Fallback while album art is loading.
+                dominant
 
-            if let image = manager.albumArtImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .blur(radius: 120)
-                    .scaleEffect(1.6)
-                    .clipped()
-                    .opacity(0.55)
-                    .blendMode(.softLight)
-                    .id(manager.trackInfo?.albumArtURL)
-                    .transition(.opacity)
+                if let image = manager.albumArtImage {
+                    VStack(spacing: 0) {
+                        // Reserve the area the sharp cover will occupy so the
+                        // flipped reflection only fills below it.
+                        Color.clear.frame(height: coverBottomY)
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                            .blur(radius: 60)
+                            .scaleEffect(x: 1, y: -1)
+                            .id(manager.trackInfo?.albumArtURL)
+                            .transition(.opacity)
+                    }
+                }
+
+                // Subtle dark vignette so transport text / buttons remain
+                // legible even when the reflected art is bright. Stays
+                // clear at the seam so the mirror effect reads cleanly.
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .clear, location: min(0.95, coverBottomFrac + 0.06)),
+                        .init(color: .black.opacity(0.35), location: min(0.97, coverBottomFrac + 0.22)),
+                        .init(color: .black.opacity(0.6), location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
             }
-
-            // Light vignette so transport text/icons stay readable on bright art.
-            LinearGradient(
-                colors: [.black.opacity(0.05), .black.opacity(0.35)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
         }
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 0.8), value: manager.trackInfo?.albumArtURL)
@@ -1154,7 +1167,10 @@ struct NowPlayingOverlay: View {
             ? Color(red: 0.36, green: 0.55, blue: 1.0)
             : .white
         return ZStack {
-            RoundedRectangle(cornerRadius: 16).fill(.quaternary)
+            // Edge-to-edge placeholder; no rounding now that the cover
+            // pins to the screen edges. The TV-mode breathing halo and
+            // glyph render on top of this backdrop unchanged.
+            Rectangle().fill(.quaternary)
                 .overlay {
                     // Subtle "audio is flowing" breathing halo behind the
                     // TV glyph — only when the bar reports a live stream.
@@ -1191,31 +1207,51 @@ struct NowPlayingOverlay: View {
 
             if !isTV, let image = manager.albumArtImage {
                 ZStack(alignment: .bottomLeading) {
+                    // Sharp version: opaque through the upper 80%,
+                    // cross-fading to clear over the bottom 20%. Keeping
+                    // the sharp zone deep preserves more cover detail
+                    // (pier rails, signs, text on the artwork) before the
+                    // blur takes over.
                     Image(uiImage: image)
                         .resizable().aspectRatio(1, contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 18))
-                        // Soft fade into the page background — only the
-                        // bottom ~12% blends, so the cover stays fully
-                        // legible while losing its hard rectangular edge.
                         .mask(
                             LinearGradient(
                                 stops: [
                                     .init(color: .black, location: 0.0),
-                                    .init(color: .black, location: 0.88),
+                                    .init(color: .black, location: 0.80),
                                     .init(color: .clear, location: 1.0)
                                 ],
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
                         )
-                        .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
 
-                    // Source badge sits on top of the masked image so it
-                    // doesn't fade out with the bottom edge.
+                    // Blurred version: cross-fades in over the same
+                    // bottom 20% region the sharp version is fading out.
+                    // By the cover's bottom edge only the blurred copy
+                    // is visible — and the artBackground's mirrored
+                    // reflection (also blurred at radius 60) starts at
+                    // that exact edge, so the transition reads as
+                    // "blur → blur" with no sharp/blurred boundary line.
+                    Image(uiImage: image)
+                        .resizable().aspectRatio(1, contentMode: .fit)
+                        .blur(radius: 50)
+                        .mask(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .clear, location: 0.78),
+                                    .init(color: .black, location: 1.0)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+
                     if verticalSizeClass != .compact,
                        let source = manager.trackInfo?.source, source != .unknown {
                         SourceBadgeView(source: source, tintColor: manager.albumArtDominantColor)
-                            .padding(10)
+                            .padding(.horizontal, 18)
+                            .padding(.bottom, 14)
                     }
                 }
                 .id(manager.trackInfo?.albumArtURL)
@@ -1264,6 +1300,10 @@ struct NowPlayingOverlay: View {
         return VStack(spacing: 4) {
             Text(manager.trackInfo?.title ?? "Not Playing")
                 .font(.title3.bold()).foregroundStyle(.white).lineLimit(1)
+                // Safety-net shadow: keeps the title legible even if the
+                // page tint underneath happens to be near-white (covers
+                // with bright bottom edges).
+                .shadow(color: .black.opacity(0.45), radius: 6, y: 1)
 
             // For TV input the codec ("Dolby Atmos · MAT") is already
             // shown by the format badge in `tvFormatPanel` below, so
@@ -1277,11 +1317,13 @@ struct NowPlayingOverlay: View {
                     } label: {
                         Text(manager.trackInfo?.artist ?? "—")
                             .font(.body).foregroundStyle(manager.albumArtDominantColor ?? .white.opacity(0.7)).lineLimit(1)
+                            .shadow(color: .black.opacity(0.4), radius: 5, y: 1)
                     }
                     .buttonStyle(.plain)
                 } else {
                     Text(manager.trackInfo?.artist ?? "—")
                         .font(.body).foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+                        .shadow(color: .black.opacity(0.4), radius: 5, y: 1)
                 }
 
                 if let albumNav = albumBrowseItem {
@@ -1290,11 +1332,13 @@ struct NowPlayingOverlay: View {
                     } label: {
                         Text(manager.trackInfo?.album ?? "")
                             .font(.subheadline).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                            .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
                     }
                     .buttonStyle(.plain)
                 } else {
                     Text(manager.trackInfo?.album ?? "")
                         .font(.subheadline).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
+                        .shadow(color: .black.opacity(0.35), radius: 4, y: 1)
                 }
             }
         }
@@ -1303,26 +1347,85 @@ struct NowPlayingOverlay: View {
     // MARK: - Now Playing Navigation
 
     private var artistBrowseItem: BrowseItem? {
-        guard let artist = nowPlayingInfo?.item?.artists?.first,
-              let objectId = artist.objectId,
-              let serviceId = nowPlayingInfo?.item?.resource?.id?.serviceId,
-              let accountId = nowPlayingInfo?.item?.resource?.id?.accountId else { return nil }
-        return searchManager.makeArtistItem(
-            objectId: objectId, name: artist.name ?? "",
-            cloudServiceId: serviceId, accountId: accountId)
+        if let artist = nowPlayingInfo?.item?.artists?.first,
+           let objectId = artist.objectId,
+           let serviceId = nowPlayingInfo?.item?.resource?.id?.serviceId,
+           let accountId = nowPlayingInfo?.item?.resource?.id?.accountId {
+            return searchManager.makeArtistItem(
+                objectId: objectId, name: artist.name ?? "",
+                cloudServiceId: serviceId, accountId: accountId)
+        }
+        // Fallback for live radio: nowPlaying lookup failed (track id is the
+        // radio station URI, not a song id) but we still have the artist
+        // name from the broadcast metadata. Build a search-by-name artist
+        // item so tapping navigates into ArtistDetailView, which already
+        // resolves Apple Music artists by name via `searchService`.
+        return liveStreamArtistBrowseItem
     }
 
     private var albumBrowseItem: BrowseItem? {
-        guard let item = nowPlayingInfo?.item,
-              let albumId = item.albumId,
-              let serviceId = item.resource?.id?.serviceId,
-              let accountId = item.resource?.id?.accountId else { return nil }
+        if let item = nowPlayingInfo?.item,
+           let albumId = item.albumId,
+           let serviceId = item.resource?.id?.serviceId,
+           let accountId = item.resource?.id?.accountId {
+            return searchManager.makeAlbumItem(
+                objectId: albumId,
+                title: item.albumName ?? manager.trackInfo?.album ?? "",
+                artist: manager.trackInfo?.artist ?? "",
+                artURL: nowPlayingInfo?.images?.tile1x1,
+                cloudServiceId: serviceId, accountId: accountId)
+        }
+        // Same fallback as `artistBrowseItem`: in a live broadcast we have
+        // the album name from broadcast metadata even if the per-track
+        // nowPlaying lookup couldn't run, so feed it to AlbumDetailView and
+        // let its existing search-by-name path resolve the real album id.
+        return liveStreamAlbumBrowseItem
+    }
+
+    /// Build an artist `BrowseItem` for Apple Music live broadcasts where we
+    /// only have the artist *name* (no per-track id). The detail view's
+    /// `searchService` flow resolves the real artist id from the name. We
+    /// pull `sid` / `sn` from whatever URI the speaker is currently on
+    /// (e.g. `x-sonosapi-radio:radio:rsa.LiveRadio1?sid=204&sn=2`).
+    private var liveStreamArtistBrowseItem: BrowseItem? {
+        guard let artistName = manager.trackInfo?.artist, !artistName.isEmpty,
+              let ids = liveStreamCloudIds else { return nil }
+        return searchManager.makeArtistItem(
+            objectId: artistName,
+            name: artistName,
+            cloudServiceId: ids.cloudSid,
+            accountId: ids.accountId)
+    }
+
+    private var liveStreamAlbumBrowseItem: BrowseItem? {
+        guard let albumName = manager.trackInfo?.album, !albumName.isEmpty,
+              let artistName = manager.trackInfo?.artist, !artistName.isEmpty,
+              let ids = liveStreamCloudIds else { return nil }
         return searchManager.makeAlbumItem(
-            objectId: albumId,
-            title: item.albumName ?? manager.trackInfo?.album ?? "",
-            artist: manager.trackInfo?.artist ?? "",
-            artURL: nowPlayingInfo?.images?.tile1x1,
-            cloudServiceId: serviceId, accountId: accountId)
+            objectId: albumName,
+            title: albumName,
+            artist: artistName,
+            artURL: manager.trackInfo?.albumArtURL,
+            cloudServiceId: ids.cloudSid,
+            accountId: ids.accountId)
+    }
+
+    private var liveStreamCloudIds: (cloudSid: String, accountId: String)? {
+        guard let trackURI = manager.trackInfo?.trackURI else { return nil }
+        var localSid: Int?
+        var sn: String?
+        if let queryPart = trackURI.split(separator: "?").last {
+            for param in queryPart.split(separator: "&") {
+                let kv = param.split(separator: "=", maxSplits: 1)
+                guard kv.count == 2 else { continue }
+                if kv[0] == "sid" { localSid = Int(kv[1]) }
+                if kv[0] == "sn" { sn = String(kv[1]) }
+            }
+        }
+        guard let sid = localSid,
+              let cloudSid = searchManager.cloudServiceId(forLocalSid: sid),
+              let accountId = sn else { return nil }
+        return (cloudSid, accountId)
     }
 
     private func fetchNowPlaying(trackURI: String) async {

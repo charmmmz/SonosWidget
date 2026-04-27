@@ -674,6 +674,24 @@ struct BrowseItem: Identifiable, Codable, Sendable {
         if classStr.contains("audioBroadcast") || classStr.contains("audioItem") && !classStr.contains("musicTrack") { return .station }
         if classStr.contains("musicAlbum") { return .album }
         if classStr.contains("playlistContainer") || classStr.contains("sameArtist") { return .playlist }
+        // Generic `object.container` with no specific subtype is how Sonos
+        // surfaces Apple Music "On the Air …" curated shows, third-party
+        // service collections, and library folders. Without this catch-all
+        // they fall through to `.song` because their `<res>` is empty and
+        // they're parsed as `<item>` (so `isContainer == false`). Place
+        // this AFTER the specific subclass checks so it doesn't intercept
+        // album / playlist / artist classes that all start with
+        // `object.container.…`.
+        if classStr.contains("object.container") { return .collection }
+        // Treat shortcut-type favorites with empty `<res>` as collections
+        // for the same reason — Sonos uses `<r:type>shortcut</r:type>` to
+        // mark navigation-only favorites (artists, collections, library
+        // folders) and only artists carry a `musicArtist` upnp:class. The
+        // residue here is collection-shaped.
+        let metaSources = [resMD, metaXML].compactMap { $0 }
+        if metaSources.contains(where: { $0.contains("<r:type>shortcut</r:type>") }) {
+            return .collection
+        }
         // Fallback heuristics using URI scheme and metadata
         let uriSources = [uri, resMD, metaXML].compactMap { $0 }
         if uriSources.contains(where: { $0.contains("libraryfolder") }) { return .collection }
@@ -683,8 +701,9 @@ struct BrowseItem: Identifiable, Codable, Sendable {
         }
         if uriSources.contains(where: { $0.contains("x-sonosapi-radio:") || $0.contains("x-sonosapi-stream:") }) { return .station }
         if isContainer { return .playlist }
-        // Non-container favorite that didn't match any container scheme —
-        // almost always a single track saved by the user.
+        // Last-resort `.song` fallback. Anything reaching here is genuinely
+        // a non-container, non-streaming favorite that didn't match any
+        // hint — almost always a single track the user saved.
         return .song
     }
 
