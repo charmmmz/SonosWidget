@@ -54,7 +54,7 @@ The app probes reachability and can fall back **LAN → Cloud** when you leave t
 2. Open `SonosWidget.xcodeproj` in Xcode
 3. Build and run on a **physical device** (widgets and Live Activities are not fully represented on Simulator)
 4. Grant local-network access when prompted so discovery and SOAP calls can reach your speakers
-5. **Sonos Cloud sign-in** — register an integration at [Sonos integration portal](https://integration.sonos.com) and set **`clientID` / `clientSecret` / `redirect URI`** in `Shared/SonosAuth.swift` to match your app and hosted callback. **Do not commit real secrets** to a public fork; use local overrides or a private config pattern you control.
+5. **Sonos Cloud sign-in** — register an integration at [Sonos integration portal](https://integration.sonos.com). Copy `Config/SonosSecrets.example.xcconfig` to `Config/SonosSecrets.xcconfig` and set **`SONOS_OAUTH_CLIENT_ID`**, **`SONOS_OAUTH_CLIENT_SECRET`**, and **`SONOS_OAUTH_REDIRECT_URI`** to match your app and hosted callback. `SonosSecrets.xcconfig` is gitignored — do not commit real credentials.
 
 ## Optional: Live Activity relay (NAS / home server)
 

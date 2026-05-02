@@ -90,7 +90,7 @@ and inside the relay (it does today via the bridge's `groupName ?? uuid`).
 ```
 nas-relay/
 ├── docker-compose.yml      # Portainer stack
-├── Dockerfile              # multi-stage Node 22 alpine build
+├── Dockerfile              # multi-stage Node 25 alpine build
 ├── .env.example
 ├── package.json / tsconfig.json
 ├── data/                   # mounted volume — tokens.json, apns.p8 live here

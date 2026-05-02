@@ -37,6 +37,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SonosOAuth.xcconfig; sourceTree = "<group>"; };
+		BA832D942F90E0020023DEE7 /* SonosSecrets.example.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SonosSecrets.example.xcconfig; sourceTree = "<group>"; };
 		BA832D502F90D1690023DEE7 /* SonosWidget.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SonosWidget.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA832D622F90D2A80023DEE7 /* TheWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TheWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA832D642F90D2A80023DEE7 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
@@ -104,9 +106,19 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		BA832D952F90E0020023DEE7 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */,
+				BA832D942F90E0020023DEE7 /* SonosSecrets.example.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 		BA832D472F90D1690023DEE7 = {
 			isa = PBXGroup;
 			children = (
+				BA832D952F90E0020023DEE7 /* Config */,
 				BA832D522F90D1690023DEE7 /* SonosWidget */,
 				BA832D802F90D3000023DEE7 /* Shared */,
 				BA832D682F90D2A80023DEE7 /* TheWidget */,
@@ -388,6 +400,7 @@
 		};
 		BA832D5C2F90D16C0023DEE7 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -425,6 +438,7 @@
 		};
 		BA832D5D2F90D16C0023DEE7 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -462,6 +476,7 @@
 		};
 		BA832D7B2F90D2AA0023DEE7 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
@@ -493,6 +508,7 @@
 		};
 		BA832D7C2F90D2AA0023DEE7 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;

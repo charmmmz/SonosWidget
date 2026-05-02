@@ -2,7 +2,7 @@
 # registry.npmmirror.com, use the default or set DNS. For China, override at build:
 #   docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
 # --- Build stage -----------------------------------------------------------
-FROM docker.m.daocloud.io/library/node:20-alpine AS builder
+FROM docker.m.daocloud.io/library/node:25-alpine AS builder
 ARG NPM_REGISTRY=https://registry.npmjs.org
 WORKDIR /app
 RUN npm config set registry ${NPM_REGISTRY} \
@@ -18,7 +18,7 @@ COPY src ./src
 RUN npm run build
 
 # --- Runtime stage ---------------------------------------------------------
-FROM docker.m.daocloud.io/library/node:20-alpine
+FROM docker.m.daocloud.io/library/node:25-alpine
 ARG NPM_REGISTRY=https://registry.npmjs.org
 WORKDIR /app
 ENV NODE_ENV=production

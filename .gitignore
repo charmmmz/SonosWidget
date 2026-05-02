@@ -19,3 +19,6 @@ Package.resolved
 *.xcuserstate
 *.xcscmblueprint
 *.xccheckout
+
+# Local Sonos OAuth secrets (see Config/SonosSecrets.example.xcconfig)
+Config/SonosSecrets.xcconfig

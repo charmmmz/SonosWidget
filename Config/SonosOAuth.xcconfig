@@ -1,0 +1,13 @@
+// OAuth credentials for Sonos Cloud sign-in.
+// Copy SonosSecrets.example.xcconfig → SonosSecrets.xcconfig and fill in real values.
+// SonosSecrets.xcconfig is gitignored.
+
+SONOS_OAUTH_CLIENT_ID =
+SONOS_OAUTH_CLIENT_SECRET =
+SONOS_OAUTH_REDIRECT_URI =
+
+#include? "SonosSecrets.xcconfig"
+
+INFOPLIST_KEY_SonosOAuthClientID = $(SONOS_OAUTH_CLIENT_ID)
+INFOPLIST_KEY_SonosOAuthClientSecret = $(SONOS_OAUTH_CLIENT_SECRET)
+INFOPLIST_KEY_SonosOAuthRedirectURI = $(SONOS_OAUTH_REDIRECT_URI)
