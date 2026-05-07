@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 
 import { SonosBridge } from './sonos.js';
+import { createInternalSonosRouter, internalAuthMiddleware } from './internalSonosRoutes.js';
 import { ApnsClient, toSwiftDate } from './apns.js';
 import { TokenStore } from './tokenStore.js';
 import type { LiveActivityContentState, RegisterRequest, SonosGroupSnapshot } from './types.js';
@@ -80,6 +81,8 @@ async function main(): Promise<void> {
       serializers: { req: req => ({ method: req.method, url: req.url }) },
     }),
   );
+
+  app.use('/internal', internalAuthMiddleware(log), createInternalSonosRouter(sonos, log));
 
   app.get('/api/health', (_req, res) => {
     res.json({

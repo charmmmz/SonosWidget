@@ -29,6 +29,9 @@ services:
       # via ZoneGroupTopology. Pick any always-on speaker on your network.
       SONOS_SEED_IP: ${SONOS_SEED_IP}
 
+      # Shared secret for `/internal/*` (Python agent). Optional if you don't run nas-agent.
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
+
       # APNs — leave blank during initial setup; the relay runs in dry-run
       # mode and just logs the payloads it *would* have sent. Fill these in
       # once you have your Apple Developer .p8 key.

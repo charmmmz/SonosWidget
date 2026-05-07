@@ -37,12 +37,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SonosOAuth.xcconfig; sourceTree = "<group>"; };
-		BA832D942F90E0020023DEE7 /* SonosSecrets.example.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SonosSecrets.example.xcconfig; sourceTree = "<group>"; };
 		BA832D502F90D1690023DEE7 /* SonosWidget.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SonosWidget.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA832D622F90D2A80023DEE7 /* TheWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TheWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		BA832D642F90D2A80023DEE7 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		BA832D662F90D2A80023DEE7 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SonosOAuth.xcconfig; sourceTree = "<group>"; };
+		BA832D942F90E0020023DEE7 /* SonosSecrets.example.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = SonosSecrets.example.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -106,15 +106,6 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		BA832D952F90E0020023DEE7 /* Config */ = {
-			isa = PBXGroup;
-			children = (
-				BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */,
-				BA832D942F90E0020023DEE7 /* SonosSecrets.example.xcconfig */,
-			);
-			path = Config;
-			sourceTree = "<group>";
-		};
 		BA832D472F90D1690023DEE7 = {
 			isa = PBXGroup;
 			children = (
@@ -143,6 +134,15 @@
 				BA832D662F90D2A80023DEE7 /* SwiftUI.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		BA832D952F90E0020023DEE7 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				BA832D932F90E0020023DEE7 /* SonosOAuth.xcconfig */,
+				BA832D942F90E0020023DEE7 /* SonosSecrets.example.xcconfig */,
+			);
+			path = Config;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */

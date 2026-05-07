@@ -17,6 +17,9 @@ struct SettingsView: View {
     /// observable changes and re-renders the status row.
     @Bindable private var relay = RelayManager.shared
 
+    @State private var agentURLDraft: String = AgentManager.shared.urlString
+    @State private var agentTokenDraft: String = AgentManager.shared.tokenString
+    @Bindable private var agent = AgentManager.shared
     @Bindable private var auth = SonosAuth.shared
 
     var body: some View {
@@ -26,6 +29,7 @@ struct SettingsView: View {
                 speakersSection
                 musicServicesSection
                 relaySection
+                agentSection
                 aboutSection
             }
             .navigationTitle("Settings")
@@ -37,7 +41,10 @@ struct SettingsView: View {
             .preferredColorScheme(.dark)
             .onAppear {
                 relayURLDraft = relay.urlString
+                agentURLDraft = agent.urlString
+                agentTokenDraft = agent.tokenString
                 Task { await relay.probeNow() }
+                Task { await agent.probeNow() }
             }
         }
     }
@@ -431,6 +438,114 @@ struct SettingsView: View {
         case .disabled:                return "Enter a URL to enable APNs-driven Live Activity updates."
         case .probing:                 return nil
         case .connected:               return "Live Activity will update via the relay even when the app is suspended."
+        case .unreachable(let reason): return reason
+        }
+    }
+
+    // MARK: - NAS Agent
+
+    @ViewBuilder
+    private var agentSection: some View {
+        Section {
+            TextField("http://192.168.50.10:8790",
+                      text: $agentURLDraft,
+                      axis: .vertical)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .submitLabel(.done)
+                .onSubmit {
+                    agent.setURL(agentURLDraft)
+                }
+
+            SecureField("Agent bearer token", text: $agentTokenDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.done)
+                .onSubmit {
+                    agent.setToken(agentTokenDraft)
+                }
+
+            agentStatusRow
+
+            Button {
+                if agent.urlString != agentURLDraft {
+                    agent.setURL(agentURLDraft)
+                }
+                if agent.tokenString != agentTokenDraft {
+                    agent.setToken(agentTokenDraft)
+                }
+                Task { await agent.probeNow() }
+            } label: {
+                Label("Test Agent Connection", systemImage: "bolt.horizontal.circle")
+            }
+            .disabled(
+                agentURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || agentTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+        } header: {
+            Text("NAS Agent")
+        } footer: {
+            Text("""
+                 Optional Python agent (`nas-agent/`) for natural-language Sonos control via \
+                 your relay. Use the same machine as the relay with port 8790 by default, \
+                 and paste the `AGENT_USER_TOKEN` from your Docker `.env`. Requires OpenAI \
+                 API key on the server.
+                 """)
+        }
+    }
+
+    @ViewBuilder
+    private var agentStatusRow: some View {
+        HStack(spacing: 12) {
+            agentStatusIndicator
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agentStatusTitle)
+                    .font(.subheadline.weight(.semibold))
+                if let detail = agentStatusDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+            }
+        }
+    }
+
+    private var agentStatusIndicator: some View {
+        let color: Color
+        switch agent.status {
+        case .connected: color = .green
+        case .probing: color = .yellow
+        case .disabled: color = .secondary
+        case .unreachable: color = .red
+        }
+        return Circle()
+            .fill(color)
+            .frame(width: 10, height: 10)
+            .overlay {
+                if case .probing = agent.status {
+                    Circle().stroke(Color.yellow, lineWidth: 1).scaleEffect(1.5)
+                        .opacity(0.5)
+                }
+            }
+    }
+
+    private var agentStatusTitle: String {
+        switch agent.status {
+        case .disabled: return "Disabled"
+        case .probing: return "Probing…"
+        case .connected: return "Connected"
+        case .unreachable: return "Unreachable"
+        }
+    }
+
+    private var agentStatusDetail: String? {
+        switch agent.status {
+        case .disabled:
+            return "Enter agent URL and bearer token from your NAS stack `.env`."
+        case .probing: return nil
+        case .connected: return "Agent can reach OpenAI and the Node relay."
         case .unreachable(let reason): return reason
         }
     }

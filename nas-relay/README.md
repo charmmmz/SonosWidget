@@ -80,6 +80,20 @@ requires for Live Activity pushes.
 | POST   | `/api/register-activity`              | `{ groupId, token, attributes? }`                               | Called by iOS on every push-token rotation               |
 | DELETE | `/api/register-activity/:token`       | path: `:token`                                                  | Called by iOS when the Live Activity ends                |
 
+### Internal Sonos API (for `nas-agent`)
+
+All routes require header **`X-Internal-Token: $INTERNAL_API_TOKEN`**. If `INTERNAL_API_TOKEN` is unset, these routes return **503**.
+
+| Method | Path | Body / Params | Description |
+|--------|------|---------------|-------------|
+| GET | `/internal/sonos/groups` | — | Cached snapshots for all discovered coordinators (`groupId` = coordinator LAN IP). |
+| GET | `/internal/sonos/state` | `?groupId=` | Refresh AVTransport snapshot for one group. |
+| POST | `/internal/sonos/play` | `{ groupId }` | Play / resume. |
+| POST | `/internal/sonos/pause` | `{ groupId }` | Pause. |
+| POST | `/internal/sonos/next` | `{ groupId }` | Next track. |
+| POST | `/internal/sonos/previous` | `{ groupId }` | Previous track. |
+| POST | `/internal/sonos/volume` | `{ groupId, volume }` | Group volume 0–100. |
+
 `groupId` is whatever string the iOS app assigns to a Sonos coordinator —
 it doesn't have to match Sonos's internal `RINCON_…` UUID, the only
 requirement is that the same value is used both in `register-activity`
@@ -96,6 +110,7 @@ nas-relay/
 ├── data/                   # mounted volume — tokens.json, apns.p8 live here
 └── src/
     ├── index.ts            # Express + wire-up
+    ├── internalSonosRoutes.ts  # /internal/sonos/* for Python agent
     ├── sonos.ts            # @svrooij/sonos bridge
     ├── apns.ts             # @parse/node-apn wrapper + dry-run
     ├── tokenStore.ts       # disk-backed token registry

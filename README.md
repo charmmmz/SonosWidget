@@ -23,6 +23,7 @@ Built as a personal project to fill the gap — the official Sonos app doesn't s
 | `Shared/` | App Group storage (`SharedStorage`), `SonosAPI` (LAN UPnP/SOAP), `SonosCloudAPI`, OAuth (`SonosAuth`), `SonosControl` façade, optional **Relay** client |
 | `TheWidget/` | WidgetKit timelines, Live Activity layouts, playback AppIntents |
 | `nas-relay/` | Optional Node.js relay: LAN Sonos UPnP events → APNs push for Live Activity updates |
+| `nas-agent/` | Optional Python agent: OpenAI tool-calling → HTTP to relay `/internal/sonos/*` |
 
 Control commands go through **`SonosControl`**, which routes to either:
 
@@ -41,6 +42,7 @@ The app probes reachability and can fall back **LAN → Cloud** when you leave t
 - **`BGAppRefresh`** — periodic refresh hook to bump widget timelines when playback changes
 - SSDP discovery, Sonos LAN UPnP/SOAP, Sonos Cloud OAuth + APIs
 - Optional **Express + TypeScript relay** (`nas-relay/`) with `@svrooij/sonos` and APNs (`@parse/node-apn`)
+- Optional **FastAPI agent** (`nas-agent/`) calling the relay internal API (see `compose.yml`)
 
 ## Requirements
 
@@ -62,6 +64,16 @@ When the iOS app is not running, Live Activities only update if the system deliv
 
 - Full design, env vars, Docker/Portainer flow, and API (`/api/health`, `/api/register-activity`) → **[nas-relay/README.md](nas-relay/README.md)**
 - The iOS app stores a relay **base URL** in App Group settings; `RelayManager` probes health and registers push tokens when a Live Activity uses the relay path.
+
+## Optional: relay + LLM agent stack
+
+Run **both** `nas-relay` and `nas-agent` with host networking:
+
+1. Copy [`.env.stack.example`](.env.stack.example) to `.env` at the repo root (do not commit `.env`).
+2. Set `INTERNAL_API_TOKEN`, `SONOS_SEED_IP`, `OPENAI_API_KEY`, `AGENT_USER_TOKEN`, and APNs vars as needed.
+3. `docker compose up -d --build`
+
+The agent listens on **`AGENT_PORT`** (default **8790**). In **Settings → NAS Agent**, enter that URL and the same **`AGENT_USER_TOKEN`** value.
 
 ## License
 

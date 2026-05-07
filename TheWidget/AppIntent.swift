@@ -67,10 +67,21 @@ struct VolumeUpIntent: AppIntent {
     static var description: IntentDescription = "Increase volume by 2."
 
     func perform() async throws -> some IntentResult {
-        guard let ip = SharedStorage.speakerIP else { return .result() }
-        let current = (try? await SonosAPI.getVolume(ip: ip)) ?? SharedStorage.cachedVolume
+        guard let ip = SharedStorage.coordinatorIP ?? SharedStorage.speakerIP else { return .result() }
+        let current: Int
+        if let groupVolume = try? await SonosAPI.getGroupVolume(ip: ip) {
+            current = groupVolume
+        } else if let speakerVolume = try? await SonosAPI.getVolume(ip: ip) {
+            current = speakerVolume
+        } else {
+            current = SharedStorage.cachedVolume
+        }
         let newVol = min(100, current + 2)
-        try? await SonosAPI.setVolume(ip: ip, volume: newVol)
+        do {
+            try await SonosAPI.setGroupVolume(ip: ip, volume: newVol)
+        } catch {
+            try? await SonosAPI.setVolume(ip: ip, volume: newVol)
+        }
         SharedStorage.cachedVolume = newVol
         WidgetCenter.shared.reloadTimelines(ofKind: "SonosWidget")
         return .result()
@@ -82,10 +93,21 @@ struct VolumeDownIntent: AppIntent {
     static var description: IntentDescription = "Decrease volume by 2."
 
     func perform() async throws -> some IntentResult {
-        guard let ip = SharedStorage.speakerIP else { return .result() }
-        let current = (try? await SonosAPI.getVolume(ip: ip)) ?? SharedStorage.cachedVolume
+        guard let ip = SharedStorage.coordinatorIP ?? SharedStorage.speakerIP else { return .result() }
+        let current: Int
+        if let groupVolume = try? await SonosAPI.getGroupVolume(ip: ip) {
+            current = groupVolume
+        } else if let speakerVolume = try? await SonosAPI.getVolume(ip: ip) {
+            current = speakerVolume
+        } else {
+            current = SharedStorage.cachedVolume
+        }
         let newVol = max(0, current - 2)
-        try? await SonosAPI.setVolume(ip: ip, volume: newVol)
+        do {
+            try await SonosAPI.setGroupVolume(ip: ip, volume: newVol)
+        } catch {
+            try? await SonosAPI.setVolume(ip: ip, volume: newVol)
+        }
         SharedStorage.cachedVolume = newVol
         WidgetCenter.shared.reloadTimelines(ofKind: "SonosWidget")
         return .result()

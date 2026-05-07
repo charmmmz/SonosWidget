@@ -15,6 +15,9 @@ DerivedData/
 Packages/
 Package.resolved
 
+# Node dependencies
+node_modules/
+
 # Xcode state
 *.xcuserstate
 *.xcscmblueprint
@@ -22,3 +25,11 @@ Package.resolved
 
 # Local Sonos OAuth secrets (see Config/SonosSecrets.example.xcconfig)
 Config/SonosSecrets.xcconfig
+
+# NAS Docker stack secrets (see `.env.stack.example`)
+.env
+
+# Generated/bundled artifacts
+artifacts/
+
+nas-agent/.venv/

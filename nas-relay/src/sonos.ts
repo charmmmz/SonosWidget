@@ -1,4 +1,4 @@
-import { SonosManager } from '@svrooij/sonos';
+import { SonosManager, type SonosDevice } from '@svrooij/sonos';
 import { EventEmitter } from 'node:events';
 import type { Logger } from 'pino';
 import type { SonosGroupSnapshot } from './types.js';
@@ -62,6 +62,64 @@ export class SonosBridge extends EventEmitter {
 
   allSnapshots(): SonosGroupSnapshot[] {
     return Array.from(this.snapshots.values());
+  }
+
+  /// Coordinator IP used as `groupId` by iOS / relay health — resolve group coordinator.
+  resolveCoordinator(groupId: string): SonosDevice | undefined {
+    for (const device of this.manager.Devices) {
+      const coord = device.Coordinator;
+      if (coord.Host === groupId) return coord;
+    }
+    return undefined;
+  }
+
+  async pullFreshSnapshot(groupId: string): Promise<SonosGroupSnapshot | undefined> {
+    const coord = this.resolveCoordinator(groupId);
+    if (!coord) return undefined;
+    await this.refreshSnapshot(coord);
+    return this.snapshots.get(groupId);
+  }
+
+  async play(groupId: string): Promise<void> {
+    const coord = this.requireCoordinator(groupId);
+    await coord.Play();
+    await this.refreshSnapshot(coord);
+  }
+
+  async pause(groupId: string): Promise<void> {
+    const coord = this.requireCoordinator(groupId);
+    await coord.Pause();
+    await this.refreshSnapshot(coord);
+  }
+
+  async next(groupId: string): Promise<void> {
+    const coord = this.requireCoordinator(groupId);
+    await coord.Next();
+    await this.refreshSnapshot(coord);
+  }
+
+  async previous(groupId: string): Promise<void> {
+    const coord = this.requireCoordinator(groupId);
+    await coord.Previous();
+    await this.refreshSnapshot(coord);
+  }
+
+  async setGroupVolume(groupId: string, volume: number): Promise<void> {
+    const coord = this.requireCoordinator(groupId);
+    const v = Math.min(100, Math.max(0, Math.round(volume)));
+    await coord.GroupRenderingControlService.SetGroupVolume({
+      InstanceID: 0,
+      DesiredVolume: v,
+    });
+    await this.refreshSnapshot(coord);
+  }
+
+  private requireCoordinator(groupId: string): SonosDevice {
+    const coord = this.resolveCoordinator(groupId);
+    if (!coord) {
+      throw new Error(`unknown_group: no coordinator matches groupId ${groupId}`);
+    }
+    return coord;
   }
 
   // ---- internals --------------------------------------------------------

@@ -1207,45 +1207,8 @@ struct NowPlayingOverlay: View {
 
             if !isTV, let image = manager.albumArtImage {
                 ZStack(alignment: .bottomLeading) {
-                    // Sharp version: opaque through the upper 80%,
-                    // cross-fading to clear over the bottom 20%. Keeping
-                    // the sharp zone deep preserves more cover detail
-                    // (pier rails, signs, text on the artwork) before the
-                    // blur takes over.
                     Image(uiImage: image)
                         .resizable().aspectRatio(1, contentMode: .fit)
-                        .mask(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .black, location: 0.0),
-                                    .init(color: .black, location: 0.80),
-                                    .init(color: .clear, location: 1.0)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-
-                    // Blurred version: cross-fades in over the same
-                    // bottom 20% region the sharp version is fading out.
-                    // By the cover's bottom edge only the blurred copy
-                    // is visible — and the artBackground's mirrored
-                    // reflection (also blurred at radius 60) starts at
-                    // that exact edge, so the transition reads as
-                    // "blur → blur" with no sharp/blurred boundary line.
-                    Image(uiImage: image)
-                        .resizable().aspectRatio(1, contentMode: .fit)
-                        .blur(radius: 50)
-                        .mask(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .clear, location: 0.78),
-                                    .init(color: .black, location: 1.0)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
 
                     if verticalSizeClass != .compact,
                        let source = manager.trackInfo?.source, source != .unknown {

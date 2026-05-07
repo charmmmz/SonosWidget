@@ -173,6 +173,20 @@ enum SharedStorage {
         set { defaults.set(newValue, forKey: "relayURL") }
     }
 
+    // MARK: - NAS LLM Agent
+
+    /// Base URL of the optional Python agent (`nas-agent/`), e.g. `http://192.168.50.10:8790`.
+    nonisolated static var agentURLString: String? {
+        get { defaults.string(forKey: "agentURL") }
+        set { defaults.set(newValue, forKey: "agentURL") }
+    }
+
+    /// Bearer token matching the agent's `AGENT_USER_TOKEN` env var.
+    nonisolated static var agentTokenString: String? {
+        get { defaults.string(forKey: "agentToken") }
+        set { defaults.set(newValue, forKey: "agentToken") }
+    }
+
     // MARK: - Saved Speakers
 
     nonisolated static var savedSpeakers: [SonosPlayer] {

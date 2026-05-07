@@ -175,6 +175,14 @@ final class SonosManager {
     /// IP for volume commands (individual speaker)
     private var volumeIP: String? { selectedSpeaker?.ipAddress }
 
+    private func currentGroupStatusIndex() -> Int? {
+        guard let selected = selectedSpeaker else { return nil }
+        let selectedGroupID = selected.groupId ?? selected.id
+        return groupStatuses.firstIndex {
+            $0.id == selectedGroupID || $0.coordinator.id == selected.id
+        }
+    }
+
     // MARK: - Lifecycle
 
     func loadSavedState() {
@@ -489,8 +497,11 @@ final class SonosManager {
     func updateVolume(_ newVolume: Int) async {
         guard let backend = await controlBackendEnsured() else { return }
         volume = newVolume
+        if let idx = currentGroupStatusIndex() {
+            groupStatuses[idx].volume = newVolume
+        }
         do {
-            try await SonosControl.setVolume(backend, newVolume)
+            try await SonosControl.setGroupVolume(backend, newVolume)
             SharedStorage.cachedVolume = newVolume
         } catch {
             errorMessage = error.localizedDescription
@@ -549,7 +560,7 @@ final class SonosManager {
         do {
             // Use GroupRenderingControl so all group members are adjusted proportionally.
             try await SonosAPI.setGroupVolume(ip: coordinatorIP, volume: newVolume)
-            if coordinatorIP == volumeIP {
+            if currentGroupStatusIndex() == idx {
                 volume = newVolume
                 SharedStorage.cachedVolume = newVolume
             }
@@ -1269,11 +1280,11 @@ final class SonosManager {
     }
 
     private func refreshStateLAN() async {
-        guard let pIP = playbackIP, let vIP = volumeIP else { return }
+        guard let pIP = playbackIP else { return }
         do {
             async let t = SonosAPI.getTransportInfo(ip: pIP)
             async let p = SonosAPI.getPositionInfo(ip: pIP)
-            async let v = SonosAPI.getVolume(ip: vIP)
+            async let v = SonosAPI.getGroupVolume(ip: pIP)
             async let m = SonosAPI.getPlayMode(ip: pIP)
             async let mediaURI = SonosAPI.getMediaInfo(ip: pIP)
             applyIncomingTransportState(try await t)
@@ -1282,7 +1293,11 @@ final class SonosManager {
             // whose local sid varies per install (NetEase etc.), so we no
             // longer need a manual second pass here.
             trackInfo = try await p
-            volume = try await v
+            let groupVolume = try await v
+            volume = groupVolume
+            if let idx = currentGroupStatusIndex() {
+                groupStatuses[idx].volume = groupVolume
+            }
             // Soundbar TV-mode toggles only show up in the player UI when
             // source == .tv — fetching them off the music path would just
             // be wasted SOAP calls (and most non-soundbars 402 on it).
@@ -1358,12 +1373,15 @@ final class SonosManager {
             return
         }
         do {
-            // Two concurrent requests: playback status (transport + modes +
-            // position) and metadata (track name / artist / art).
+            // Concurrent requests: playback status (transport + modes +
+            // position), metadata (track name / artist / art), and group
+            // volume for the full player / widget shared cache.
             async let statusCall = SonosCloudAPI.getPlaybackStatus(token: token, groupId: gid)
             async let metaCall = SonosCloudAPI.getPlaybackMetadata(token: token, groupId: gid)
+            async let volumeCall = SonosCloudAPI.getGroupVolume(token: token, groupId: gid)
             let status = try await statusCall
             let meta = try await metaCall
+            let groupVolume = try? await volumeCall
 
             applyIncomingTransportState(
                 Self.transportState(fromCloudPlaybackState: status.playbackState))
@@ -1412,6 +1430,12 @@ final class SonosManager {
 
             positionSeconds = positionSec
             durationSeconds = durationSec
+            if let groupVolume = groupVolume?.volume {
+                volume = groupVolume
+                if let idx = currentGroupStatusIndex() {
+                    groupStatuses[idx].volume = groupVolume
+                }
+            }
             positionFetchedAt = Date()
 
             consecutiveFailures = 0
