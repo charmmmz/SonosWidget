@@ -1,4 +1,7 @@
 import Foundation
+#if SONOSWIDGET_TEST_TARGET
+@testable import SonosWidget
+#endif
 
 enum HandoffMatcher {
     struct Match: Equatable {

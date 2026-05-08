@@ -69,6 +69,31 @@
 			);
 			target = BA832D612F90D2A80023DEE7 /* TheWidgetExtension */;
 		};
+		BA832DA22F930A000023DEE7 /* Exceptions for "Shared" folder in "SonosWidgetTests" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AgentClient.swift,
+				AgentManager.swift,
+				AppleMusicHandoff.swift,
+				BrandMedia.xcassets,
+				DominantColor.swift,
+				ExpandableText.swift,
+				Models.swift,
+				QueueArtDiskCache.swift,
+				RelayClient.swift,
+				RelayManager.swift,
+				SharedStorage.swift,
+				SonosAPI.swift,
+				SonosAuth.swift,
+				SonosCloudAPI.swift,
+				SonosControl.swift,
+				SonosLog.swift,
+				SourceBadgeView.swift,
+				StreamingServiceBranding.swift,
+				ToastModifier.swift,
+			);
+			target = BA832D9C2F92E1000023DEE7 /* SonosWidgetTests */;
+		};
 		BA832D7E2F90D3000023DEE7 /* Exceptions for "SonosWidget" folder in "SonosWidget" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -99,6 +124,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				BA832D962F92D0000023DEE7 /* Exceptions for "Shared" folder in "TheWidgetExtension" target */,
+				BA832DA22F930A000023DEE7 /* Exceptions for "Shared" folder in "SonosWidgetTests" target */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -243,6 +269,7 @@
 				BA832DA12F92E1000023DEE7 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
+				BA832D802F90D3000023DEE7 /* Shared */,
 				BA832D982F92E1000023DEE7 /* SonosWidgetTests */,
 			);
 			name = SonosWidgetTests;
@@ -636,6 +663,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.charm.SonosWidgetTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) SONOSWIDGET_TEST_TARGET";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
@@ -664,6 +692,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.charm.SonosWidgetTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) SONOSWIDGET_TEST_TARGET";
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
