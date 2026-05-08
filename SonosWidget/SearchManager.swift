@@ -1540,6 +1540,11 @@ final class SearchManager {
         }
         configure(speakerIP: selectedSpeaker.playbackIP)
 
+        if let trackInfo = manager.trackInfo,
+           isKnownNonAppleSource(trackInfo) {
+            throw ReverseHandoffError.notAppleMusicSource
+        }
+
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
             throw ReverseHandoffError.sonosCloudDisconnected
@@ -1655,6 +1660,10 @@ final class SearchManager {
         return SonosAppleMusicTrackResolver.storeID(fromObjectID: objectID)
     }
 
+    private func isKnownNonAppleSource(_ trackInfo: TrackInfo) -> Bool {
+        trackInfo.source != .unknown && trackInfo.source != .appleMusic
+    }
+
     private func isAppleMusicTrack(_ trackInfo: TrackInfo) -> Bool {
         if trackInfo.source == .appleMusic {
             return true
@@ -1729,7 +1738,7 @@ final class SearchManager {
               let serviceId = cloudServiceId(forLocalSid: localServiceID),
               let accountId = parsed.accountID,
               let trackObjectID = SonosAppleMusicTrackResolver
-                .trackObjectIDForNowPlaying(fromTrackURI: trackURI) else {
+                .cloudTrackObjectIDForNowPlaying(fromTrackURI: trackURI) else {
             return nil
         }
 

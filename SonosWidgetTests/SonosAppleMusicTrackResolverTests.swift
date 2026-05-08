@@ -33,6 +33,32 @@ final class SonosAppleMusicTrackResolverTests: XCTestCase {
         XCTAssertEqual(parsed.accountID, "2")
     }
 
+    func testCloudTrackObjectIDForNowPlayingStripsKnownAppleMusicPrefix() {
+        let uri = "x-sonos-http:1003206ctrack%3Aabc123.unknown?sid=204&sn=2"
+
+        let objectID = SonosAppleMusicTrackResolver
+            .cloudTrackObjectIDForNowPlaying(fromTrackURI: uri)
+
+        XCTAssertEqual(objectID, "track:abc123")
+    }
+
+    func testCloudTrackObjectIDForNowPlayingKeepsPureNumericID() {
+        let uri = "x-sonos-http:123456789012345.mp4?sid=204&sn=2"
+
+        let objectID = SonosAppleMusicTrackResolver
+            .cloudTrackObjectIDForNowPlaying(fromTrackURI: uri)
+
+        XCTAssertEqual(objectID, "123456789012345")
+    }
+
+    func testStoreIDFromTrackURIHandlesUppercaseKnownAppleMusicPrefix() {
+        let uri = "x-sonos-http:1003206C1234567890.mp4?sid=204&sn=2"
+
+        let storeID = SonosAppleMusicTrackResolver.storeID(fromTrackURI: uri)
+
+        XCTAssertEqual(storeID, "1234567890")
+    }
+
     func testStoreIDFromBrowseItemPrefersItemID() {
         let item = BrowseItem(
             id: "100320209876543210",

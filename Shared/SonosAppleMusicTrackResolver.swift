@@ -49,13 +49,19 @@ enum SonosAppleMusicTrackResolver {
         parseTrackURI(uri).sonosTrackObjectID
     }
 
+    static func cloudTrackObjectIDForNowPlaying(fromTrackURI uri: String?) -> String? {
+        guard let objectID = trackObjectID(from: uri) else { return nil }
+        return cloudTrackObjectID(fromObjectID: objectID)
+    }
+
     static func storeID(fromBrowseItem item: BrowseItem) -> String? {
         storeID(fromObjectID: item.id) ?? storeID(fromTrackURI: item.uri)
     }
 
     static func storeID(fromObjectID rawObjectID: String?) -> String? {
         guard var objectID = normalizedObjectID(rawObjectID) else { return nil }
-        for prefix in appleMusicTrackObjectPrefixes where objectID.hasPrefix(prefix) {
+        let lowercasedObjectID = objectID.lowercased()
+        for prefix in appleMusicTrackObjectPrefixes where lowercasedObjectID.hasPrefix(prefix) {
             objectID = String(objectID.dropFirst(prefix.count))
             break
         }
@@ -67,7 +73,22 @@ enum SonosAppleMusicTrackResolver {
         return objectID
     }
 
-    private static func trackObjectID(from uri: String) -> String? {
+    private static func cloudTrackObjectID(fromObjectID rawObjectID: String?) -> String? {
+        guard var objectID = normalizedObjectID(rawObjectID) else { return nil }
+        let lowercasedObjectID = objectID.lowercased()
+        if let prefix = appleMusicTrackObjectPrefixes.first(where: {
+            lowercasedObjectID.hasPrefix($0)
+        }) {
+            objectID = String(objectID.dropFirst(prefix.count))
+        } else if hasDIDLObjectPrefixBeforeScopedID(objectID) {
+            objectID = String(objectID.dropFirst(8))
+        }
+
+        return objectID.isEmpty ? nil : objectID
+    }
+
+    private static func trackObjectID(from uri: String?) -> String? {
+        guard let uri = sanitized(uri) else { return nil }
         let pathPart = uri.split(separator: "?", maxSplits: 1).first.map(String.init) ?? uri
         let rawObjectID: String
         if let colonRange = pathPart.range(of: ":", options: .backwards) {
@@ -76,6 +97,18 @@ enum SonosAppleMusicTrackResolver {
             rawObjectID = pathPart
         }
         return normalizedObjectID(rawObjectID)
+    }
+
+    private static func hasDIDLObjectPrefixBeforeScopedID(_ objectID: String) -> Bool {
+        guard objectID.count > 8 else { return false }
+        let prefixEnd = objectID.index(objectID.startIndex, offsetBy: 8)
+        let prefix = objectID[..<prefixEnd]
+        let scopedID = objectID[prefixEnd...]
+        guard prefix.allSatisfy({ $0.isHexDigit }),
+              let firstScopedCharacter = scopedID.first else {
+            return false
+        }
+        return !firstScopedCharacter.isNumber
     }
 
     private static func normalizedObjectID(_ value: String?) -> String? {

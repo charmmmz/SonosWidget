@@ -1502,18 +1502,10 @@ struct NowPlayingOverlay: View {
             return
         }
 
-        var objectId = trackURI.split(separator: "?").first.map(String.init) ?? trackURI
-        if let colonRange = objectId.range(of: ":", options: .backwards) {
-            objectId = String(objectId[colonRange.upperBound...])
-        }
-        if objectId.count > 8, objectId.prefix(8).allSatisfy({ $0.isHexDigit }) {
-            objectId = String(objectId.dropFirst(8))
-        }
-        if let dotIdx = objectId.lastIndex(of: "."), dotIdx > objectId.startIndex {
-            let ext = String(objectId[dotIdx...])
-            if [".mp4", ".mp3", ".flac", ".unknown", ".m4a", ".ogg"].contains(ext.lowercased()) {
-                objectId = String(objectId[..<dotIdx])
-            }
+        guard let objectId = SonosAppleMusicTrackResolver
+            .cloudTrackObjectIDForNowPlaying(fromTrackURI: trackURI) else {
+            nowPlayingInfo = nil
+            return
         }
 
         do {

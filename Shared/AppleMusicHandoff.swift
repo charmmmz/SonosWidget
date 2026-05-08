@@ -93,17 +93,7 @@ final class AppleMusicHandoffManager {
             player.currentPlaybackTime = max(0, position)
         }
 
-        try await Task.sleep(for: .milliseconds(700))
-        guard let item = player.nowPlayingItem else {
-            throw AppleMusicHandoffError.phonePlaybackFailed
-        }
-        let currentStoreID = item.playbackStoreID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !currentStoreID.isEmpty, currentStoreID != trimmedStoreID {
-            throw AppleMusicHandoffError.phonePlaybackFailed
-        }
-        guard player.playbackState == .playing || !currentStoreID.isEmpty else {
-            throw AppleMusicHandoffError.phonePlaybackFailed
-        }
+        try await waitForRequestedPlayback(storeID: trimmedStoreID)
     }
 
     func pausePhonePlayback() {
@@ -120,6 +110,24 @@ final class AppleMusicHandoffManager {
                 }
             }
         }
+    }
+
+    private func waitForRequestedPlayback(storeID: String) async throws {
+        let deadline = Date().addingTimeInterval(2.5)
+        repeat {
+            if isPlayingRequestedStoreID(storeID) { return }
+            try await Task.sleep(for: .milliseconds(200))
+        } while Date() < deadline
+
+        if isPlayingRequestedStoreID(storeID) { return }
+        throw AppleMusicHandoffError.phonePlaybackFailed
+    }
+
+    private func isPlayingRequestedStoreID(_ storeID: String) -> Bool {
+        guard player.playbackState == .playing,
+              let item = player.nowPlayingItem else { return false }
+        let currentStoreID = item.playbackStoreID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return currentStoreID == storeID
     }
 
     private func mediaLibraryAuthorizationStatus() async -> MPMediaLibraryAuthorizationStatus {
