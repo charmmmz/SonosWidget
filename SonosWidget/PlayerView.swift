@@ -64,7 +64,7 @@ struct PlayerView: View {
 
     @State private var dropTargetGroupID: String?
     @State private var isSeparateZoneTargeted = false
-    @State private var isTransferringAppleMusic = false
+    @State private var isTransferringPlayback = false
     @State private var homeToastMessage: String?
 
     private var speakersHomeView: some View {
@@ -226,19 +226,29 @@ struct PlayerView: View {
     }
 
     private var transferZone: some View {
-        Button {
-            transferAppleMusicToSonos()
+        Menu {
+            Button {
+                transferAppleMusicToSonos()
+            } label: {
+                Label("iPhone -> Sonos", systemImage: "iphone.and.arrow.forward")
+            }
+
+            Button {
+                transferSonosToIPhone()
+            } label: {
+                Label("Sonos -> iPhone", systemImage: "speaker.wave.2.fill")
+            }
         } label: {
             VStack(spacing: 5) {
                 ZStack {
                     Circle()
-                        .fill(isTransferringAppleMusic ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
+                        .fill(isTransferringPlayback ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
                     Circle()
                         .strokeBorder(Color.white.opacity(0.2), lineWidth: 1.5)
-                    if isTransferringAppleMusic {
+                    if isTransferringPlayback {
                         ProgressView().controlSize(.small)
                     } else {
-                        Image(systemName: "iphone.and.arrow.forward")
+                        Image(systemName: "arrow.left.arrow.right")
                             .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.55))
                     }
@@ -252,8 +262,8 @@ struct PlayerView: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(isTransferringAppleMusic || !manager.isConfigured)
-        .accessibilityLabel("Transfer Apple Music to selected Sonos speaker")
+        .disabled(isTransferringPlayback || !manager.isConfigured)
+        .accessibilityLabel("Transfer playback")
     }
 
     private var ungroupZone: some View {
@@ -310,8 +320,8 @@ struct PlayerView: View {
     }
 
     private func transferAppleMusicToSonos() {
-        guard !isTransferringAppleMusic else { return }
-        isTransferringAppleMusic = true
+        guard !isTransferringPlayback else { return }
+        isTransferringPlayback = true
 
         Task {
             do {
@@ -323,7 +333,28 @@ struct PlayerView: View {
                 manager.errorMessage = error.localizedDescription
                 $homeToastMessage.showToast(error.localizedDescription)
             }
-            isTransferringAppleMusic = false
+            isTransferringPlayback = false
+        }
+    }
+
+    private func transferSonosToIPhone() {
+        guard !isTransferringPlayback else { return }
+        isTransferringPlayback = true
+
+        Task {
+            do {
+                let result = try await searchManager.transferSonosAppleMusicToPhone(manager: manager)
+                if let warning = result.warningMessage {
+                    manager.errorMessage = warning
+                    $homeToastMessage.showToast(warning)
+                } else {
+                    $homeToastMessage.showToast("Transferred to iPhone")
+                }
+            } catch {
+                manager.errorMessage = error.localizedDescription
+                $homeToastMessage.showToast(error.localizedDescription)
+            }
+            isTransferringPlayback = false
         }
     }
 
