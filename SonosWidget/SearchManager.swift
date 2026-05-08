@@ -24,6 +24,38 @@ let stationRetryDelayMs: Int = 2000
 /// freshly-set track has propagated to the position-info endpoint.
 let playbackSettleDelayMs: Int = 1500
 
+struct HandoffResult: Equatable {
+    let matchedTitle: String
+    let targetName: String
+    let seeked: Bool
+}
+
+enum HandoffTransferError: LocalizedError, Equatable {
+    case noSelectedSpeaker
+    case missingCloudAuth
+    case noLinkedAppleMusicAccount
+    case noSearchResults
+    case noConfidentMatch
+    case sonosPlaybackFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .noSelectedSpeaker:
+            return "Select a Sonos speaker before transferring Apple Music."
+        case .missingCloudAuth:
+            return "Sign in to Sonos Cloud before transferring Apple Music."
+        case .noLinkedAppleMusicAccount:
+            return "Apple Music is not linked to this Sonos household."
+        case .noSearchResults:
+            return "No Apple Music matches were found on Sonos."
+        case .noConfidentMatch:
+            return "Sonos could not confidently match the Apple Music track."
+        case .sonosPlaybackFailed:
+            return "Sonos could not start playing the matched Apple Music track."
+        }
+    }
+}
+
 @Observable
 final class SearchManager {
     var favorites: [BrowseItem] = []
@@ -1101,6 +1133,7 @@ final class SearchManager {
         return BrowseItem(
             id: objectId, title: name, artist: artistName, album: albumName,
             albumArtURL: artURL, uri: uri, metaXML: nil,
+            duration: TimeInterval(resource.durationMs ?? 0) / 1000,
             isContainer: isContainer, serviceId: localSid, cloudType: type)
     }
 
@@ -1384,7 +1417,94 @@ final class SearchManager {
         return "x-rincon-cpcontainer:\(itemId)?sid=\(params.sid)&flags=\(flags)&sn=\(params.sn)"
     }
 
+    func transferAppleMusicTrack(
+        _ track: AppleMusicHandoffTrack,
+        manager: SonosManager
+    ) async throws -> HandoffResult {
+        guard let selectedSpeaker = manager.selectedSpeaker else {
+            throw HandoffTransferError.noSelectedSpeaker
+        }
+        configure(speakerIP: selectedSpeaker.playbackIP)
+
+        guard let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else {
+            throw HandoffTransferError.missingCloudAuth
+        }
+
+        if !hasProbed {
+            await probeLinkedServices()
+        }
+        await refreshServiceIdMappingIfNeeded()
+
+        guard let appleMusicAccount = linkedAccounts.first(where: { isAppleMusicAccount($0) }),
+              let serviceId = appleMusicAccount.serviceId,
+              let accountId = appleMusicAccount.accountId else {
+            throw HandoffTransferError.noLinkedAppleMusicAccount
+        }
+
+        let term = "\(track.title) \(track.artist)"
+        let response = try await searchServiceWithTokenRefresh(
+            token: token,
+            householdId: householdId,
+            serviceId: serviceId,
+            accountId: accountId,
+            term: term)
+
+        let candidates = response.allResources.compactMap { resource -> BrowseItem? in
+            guard resource.type == "TRACK" else { return nil }
+            return convertToBrowseItem(resource, serviceId: serviceId, accountId: accountId)
+        }
+
+        guard !candidates.isEmpty else {
+            throw HandoffTransferError.noSearchResults
+        }
+
+        guard let match = HandoffMatcher.bestMatch(for: track, candidates: candidates) else {
+            throw HandoffTransferError.noConfidentMatch
+        }
+
+        let started = await playNowInternal(item: match.item, manager: manager)
+        guard started else {
+            throw HandoffTransferError.sonosPlaybackFailed
+        }
+
+        var seeked = false
+        let duration = track.duration ?? match.item.duration
+        if track.position > 3, duration > 2 {
+            let seekTarget = max(0, min(track.position, duration - 2))
+            await manager.seekTo(seekTarget)
+            seeked = true
+        }
+
+        await manager.refreshState()
+        return HandoffResult(
+            matchedTitle: match.item.title,
+            targetName: selectedSpeaker.name,
+            seeked: seeked)
+    }
+
+    private func isAppleMusicAccount(_ account: SonosCloudAPI.CloudMusicServiceAccount) -> Bool {
+        let values = [
+            account.name,
+            account.nickname,
+            account.integrationId,
+            account.username
+        ]
+        return values.contains { value in
+            guard let value else { return false }
+            let normalized = value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+            return normalized.contains("apple music") || normalized.contains("applemusic")
+        }
+    }
+
     func playNow(item: BrowseItem, manager: SonosManager) async {
+        _ = await playNowInternal(item: item, manager: manager)
+    }
+
+    @discardableResult
+    private func playNowInternal(item: BrowseItem, manager: SonosManager) async -> Bool {
         // Push to recents before any await so a failed play still records
         // intent (mirrors Apple Music's "attempted plays" behaviour).
         pushRecentlyPlayed(item)
@@ -1402,16 +1522,17 @@ final class SearchManager {
                                                     favoriteId: favId)
                 try? await Task.sleep(for: .milliseconds(800))
                 await manager.refreshState()
+                return true
             } catch {
                 SonosLog.error(.playback, "loadFavorite failed: \(error)")
                 errorMessage = error.localizedDescription
+                return false
             }
-            return
         }
 
         if item.isArtist {
             await startStation(item: item, manager: manager)
-            return
+            return false
         }
 
         // Everything below this line uses UPnP — gate on .cloud mode so users
@@ -1420,12 +1541,12 @@ final class SearchManager {
             errorMessage = SonosControlError
                 .unsupportedInCloudMode(feature: "Playing this item")
                 .localizedDescription
-            return
+            return false
         }
 
         guard let ip = manager.selectedSpeaker?.playbackIP else {
             SonosLog.error(.playback, "playNow: no speaker IP")
-            return
+            return false
         }
 
         var playURI = item.uri
@@ -1443,13 +1564,13 @@ final class SearchManager {
 
         guard let uri = playURI, !uri.isEmpty else {
             SonosLog.error(.playback, "playNow: no URI for '\(item.title)'")
-            return
+            return false
         }
 
         do {
             guard let uuid = manager.selectedSpeaker?.id else {
                 SonosLog.error(.playback, "playNow: no speaker UUID")
-                return
+                return false
             }
 
             let isRadio = uri.contains("x-sonosapi-radio:")
@@ -1474,9 +1595,11 @@ final class SearchManager {
 
             try? await Task.sleep(for: .milliseconds(playbackSettleDelayMs))
             await manager.refreshState()
+            return true
         } catch {
             SonosLog.error(.playback, "playNow failed: \(error)")
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
