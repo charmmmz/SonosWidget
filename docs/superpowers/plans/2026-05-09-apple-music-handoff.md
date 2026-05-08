@@ -19,6 +19,8 @@
 - Create `Shared/HandoffMatcher.swift`
   - Pure Swift matcher for comparing an iPhone Apple Music track against Sonos `BrowseItem` candidates.
   - No app, network, or MediaPlayer dependencies.
+- Modify `Shared/Models.swift`
+  - Add `BrowseItem.duration` as a seconds-based value with a default of `0` so matching can reject wrong-duration candidates without forcing every existing initializer to change.
 - Create `SonosWidgetTests/HandoffMatcherTests.swift`
   - Unit tests for exact, punctuation, remaster, wrong-artist, and duration mismatch cases.
 - Modify `SonosWidget.xcodeproj/project.pbxproj`
@@ -181,10 +183,25 @@ git commit -m "Add Apple Music handoff capture"
 
 **Files:**
 - Create: `Shared/HandoffMatcher.swift`
+- Modify: `Shared/Models.swift`
 - Create: `SonosWidgetTests/HandoffMatcherTests.swift`
 - Modify: `SonosWidget.xcodeproj/project.pbxproj`
 
-- [ ] **Step 1: Add matcher tests first**
+- [ ] **Step 1: Add duration to BrowseItem**
+
+In `Shared/Models.swift`, add a defaulted duration field to `BrowseItem`:
+
+```swift
+/// Track duration in seconds when known. Search-result based items use this
+/// for Apple Music handoff matching; legacy/local browse items default to 0.
+var duration: TimeInterval = 0
+```
+
+Place it after `metaXML` and before `resMD` so it stays close to playback
+metadata. The default value keeps existing memberwise initializers source
+compatible.
+
+- [ ] **Step 2: Add matcher tests first**
 
 Create `SonosWidgetTests/HandoffMatcherTests.swift`:
 
@@ -310,7 +327,7 @@ final class HandoffMatcherTests: XCTestCase {
 
 If the project does not yet have a test target, add a `SonosWidgetTests` XCTest target that builds for iOS and includes `HandoffMatcherTests.swift`.
 
-- [ ] **Step 2: Run the matcher tests and verify they fail**
+- [ ] **Step 3: Run the matcher tests and verify they fail**
 
 Run:
 
@@ -324,7 +341,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 Expected before implementation: failure because `HandoffMatcher` is not defined.
 
-- [ ] **Step 3: Add the matcher implementation**
+- [ ] **Step 4: Add the matcher implementation**
 
 Create `Shared/HandoffMatcher.swift`:
 
@@ -420,11 +437,11 @@ enum HandoffMatcher {
 }
 ```
 
-- [ ] **Step 4: Add the matcher file to the project**
+- [ ] **Step 5: Add the matcher file to the project**
 
 Add `Shared/HandoffMatcher.swift` to the app target and the test target. Mirror how other `Shared/*.swift` files are referenced in `SonosWidget.xcodeproj/project.pbxproj`.
 
-- [ ] **Step 5: Run matcher tests and verify they pass**
+- [ ] **Step 6: Run matcher tests and verify they pass**
 
 Run:
 
@@ -438,10 +455,10 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
 
 Expected: all `HandoffMatcherTests` pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add Shared/HandoffMatcher.swift SonosWidgetTests/HandoffMatcherTests.swift SonosWidget.xcodeproj/project.pbxproj
+git add Shared/HandoffMatcher.swift Shared/Models.swift SonosWidgetTests/HandoffMatcherTests.swift SonosWidget.xcodeproj/project.pbxproj
 git commit -m "Add Apple Music handoff matcher"
 ```
 
