@@ -397,7 +397,7 @@ struct SonosWidgetMediumView: View {
         HStack(spacing: 12) {
             Image(systemName: "hifispeaker.2.fill").font(.largeTitle).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
-                Text("Sonos Widget").font(.headline)
+                Text("Charm Player").font(.headline)
                 Text("Open the app to connect to your Sonos speakers.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -438,7 +438,7 @@ struct SonosWidget: Widget {
                     WidgetBlurredBackground(albumArtData: entry.albumArtData)
                 }
         }
-        .configurationDisplayName("Sonos Controller")
+        .configurationDisplayName("Charm Player")
         .description("Control your Sonos speakers and see what's playing.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }

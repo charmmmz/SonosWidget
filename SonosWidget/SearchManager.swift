@@ -59,6 +59,8 @@ struct ReverseHandoffResult: Equatable {
     let seeked: Bool
     let sonosPaused: Bool
     let warningMessage: String?
+    let transferredTrackCount: Int
+    let skippedUnsupportedItemCount: Int
 }
 
 enum ReverseHandoffError: LocalizedError, Equatable {
@@ -1580,8 +1582,16 @@ final class SearchManager {
             token: token,
             householdId: householdId)
 
-        try await AppleMusicHandoffManager.shared.playAppleMusicTrack(
-            storeID: storeID,
+        let queuePlan = await reverseHandoffQueuePlan(
+            manager: manager,
+            selectedSpeaker: selectedSpeaker,
+            currentTrackInfo: trackInfo,
+            currentStoreID: storeID)
+        try ensureReverseHandoffTargetStillSelected(selectedSpeaker, manager: manager)
+
+        let playbackStoreIDs = queuePlan?.storeIDs ?? [storeID]
+        try await AppleMusicHandoffManager.shared.playAppleMusicQueue(
+            storeIDs: playbackStoreIDs,
             position: track.position)
 
         var paused = true
@@ -1600,7 +1610,48 @@ final class SearchManager {
             targetName: selectedSpeaker.name,
             seeked: track.position > 3,
             sonosPaused: paused,
-            warningMessage: warning)
+            warningMessage: warning,
+            transferredTrackCount: queuePlan?.transferredTrackCount ?? 1,
+            skippedUnsupportedItemCount: queuePlan?.skippedUnsupportedItemCount ?? 0)
+    }
+
+    private func reverseHandoffQueuePlan(
+        manager: SonosManager,
+        selectedSpeaker: SonosPlayer,
+        currentTrackInfo: TrackInfo,
+        currentStoreID: String
+    ) async -> AppleMusicQueueHandoffPlan? {
+        guard manager.isPlayingFromQueue else { return nil }
+
+        async let queueResultTask = reverseHandoffQueueResult(ip: selectedSpeaker.playbackIP)
+        async let currentTrackNumberTask = reverseHandoffCurrentTrackNumber(
+            ip: selectedSpeaker.playbackIP)
+        let (queueResult, currentTrackNumber) = await (queueResultTask, currentTrackNumberTask)
+
+        guard let queue = queueResult?.items, !queue.isEmpty else { return nil }
+        return AppleMusicQueueHandoffPlanner.makePlan(
+            queue: queue,
+            currentTrackNumber: currentTrackNumber,
+            currentTrackInfo: currentTrackInfo,
+            currentStoreID: currentStoreID)
+    }
+
+    private func reverseHandoffQueueResult(ip: String) async -> QueueResult? {
+        do {
+            return try await SonosAPI.getQueue(ip: ip)
+        } catch {
+            SonosLog.error(.playback, "Reverse handoff queue lookup failed: \(error)")
+            return nil
+        }
+    }
+
+    private func reverseHandoffCurrentTrackNumber(ip: String) async -> Int? {
+        do {
+            return try await SonosAPI.getCurrentTrackNumber(ip: ip)
+        } catch {
+            SonosLog.error(.playback, "Reverse handoff queue track number lookup failed: \(error)")
+            return nil
+        }
     }
 
     private func isAppleMusicAccount(_ account: SonosCloudAPI.CloudMusicServiceAccount) -> Bool {

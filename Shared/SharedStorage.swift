@@ -200,4 +200,9 @@ enum SharedStorage {
             defaults.set(data, forKey: "savedSpeakers")
         }
     }
+
+    nonisolated static var homeSpeakerGroupOrder: [String] {
+        get { defaults.stringArray(forKey: "homeSpeakerGroupOrder") ?? [] }
+        set { defaults.set(newValue, forKey: "homeSpeakerGroupOrder") }
+    }
 }

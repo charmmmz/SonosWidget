@@ -1,4 +1,4 @@
-# SonosWidget NAS stack: Live Activity relay (Node) + LLM agent (Python).
+# Charm for Sonos NAS stack: Live Activity relay (Node) + LLM agent (Python).
 # Copy `.env.stack.example` → `.env` in this directory, fill in values, then:
 #   docker compose up -d --build
 #

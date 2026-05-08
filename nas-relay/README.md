@@ -2,7 +2,7 @@
 
 A small Node.js + TypeScript service that subscribes to Sonos UPnP events on
 your LAN and pushes the corresponding Live Activity updates to the
-SonosWidget iOS app via Apple's APNs HTTP/2 endpoint.
+Charm for Sonos iOS app via Apple's APNs HTTP/2 endpoint.
 
 The point: keep the iPhone Lock Screen Live Activity fresh **without** the
 iOS app needing to run in the background. UPnP eventing means we don't poll

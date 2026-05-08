@@ -133,6 +133,8 @@ final class SonosManager {
     }()
 
     enum ConnectionState { case connected, disconnected, reconnecting }
+    enum SpeakerGroupDropIntent: Equatable { case reorderBefore, merge, reorderAfter }
+    enum SpeakerGroupReorderPlacement: Equatable { case before, after }
 
     var isPlaying: Bool { transportState == .playing }
     var isConfigured: Bool { selectedSpeaker != nil }
@@ -181,6 +183,109 @@ final class SonosManager {
         return groupStatuses.firstIndex {
             $0.id == selectedGroupID || $0.coordinator.id == selected.id
         }
+    }
+
+    nonisolated static func sortedSpeakerGroups(
+        _ statuses: [SpeakerGroupStatus],
+        preferredOrder: [String] = SharedStorage.homeSpeakerGroupOrder
+    ) -> [SpeakerGroupStatus] {
+        let orderRanks = Dictionary(
+            preferredOrder.enumerated().map { ($0.element, $0.offset) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return statuses.sorted { lhs, rhs in
+            let leftRank = speakerOrderRank(for: lhs, orderRanks: orderRanks)
+            let rightRank = speakerOrderRank(for: rhs, orderRanks: orderRanks)
+
+            switch (leftRank, rightRank) {
+            case let (left?, right?) where left != right:
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                let leftName = lhs.coordinator.name.lowercased()
+                let rightName = rhs.coordinator.name.lowercased()
+                if leftName != rightName { return leftName < rightName }
+                return lhs.id < rhs.id
+            }
+        }
+    }
+
+    private nonisolated static func speakerOrderRank(
+        for status: SpeakerGroupStatus,
+        orderRanks: [String: Int]
+    ) -> Int? {
+        let keys = [
+            status.id,
+            status.coordinator.id,
+            status.coordinator.groupId
+        ].compactMap { $0 }
+
+        return keys.compactMap { orderRanks[$0] }.min()
+    }
+
+    private nonisolated static func speakerOrderStorageID(for status: SpeakerGroupStatus) -> String {
+        status.coordinator.groupId ?? status.id
+    }
+
+    nonisolated static func speakerGroupDropIntent(
+        locationY: CGFloat,
+        targetHeight: CGFloat
+    ) -> SpeakerGroupDropIntent {
+        guard targetHeight > 0 else { return .merge }
+
+        let clampedY = min(max(locationY, 0), targetHeight)
+        let reorderZoneHeight = targetHeight * 0.25
+
+        if clampedY < reorderZoneHeight { return .reorderBefore }
+        if clampedY > targetHeight - reorderZoneHeight { return .reorderAfter }
+        return .merge
+    }
+
+    func moveSpeakerGroup(fromOffsets source: IndexSet, toOffset destination: Int) {
+        var reordered = groupStatuses
+        reordered.move(fromOffsets: source, toOffset: destination)
+        groupStatuses = reordered
+        SharedStorage.homeSpeakerGroupOrder = reordered.map(Self.speakerOrderStorageID)
+    }
+
+    func reorderSpeakerGroup(
+        sourceID: String,
+        relativeTo targetID: String,
+        placement: SpeakerGroupReorderPlacement
+    ) {
+        guard sourceID != targetID,
+              let sourceIndex = groupStatuses.firstIndex(where: { Self.speakerGroupStatus($0, matches: sourceID) })
+        else { return }
+
+        var reordered = groupStatuses
+        let source = reordered.remove(at: sourceIndex)
+
+        guard let targetIndex = reordered.firstIndex(where: { Self.speakerGroupStatus($0, matches: targetID) }) else {
+            reordered.insert(source, at: sourceIndex)
+            return
+        }
+
+        let insertionIndex = placement == .before ? targetIndex : targetIndex + 1
+        reordered.insert(source, at: insertionIndex)
+        groupStatuses = reordered
+        SharedStorage.homeSpeakerGroupOrder = reordered.map(Self.speakerOrderStorageID)
+    }
+
+    private nonisolated static func speakerGroupStatus(
+        _ status: SpeakerGroupStatus,
+        matches id: String
+    ) -> Bool {
+        status.id == id
+            || status.coordinator.id == id
+            || status.coordinator.groupId == id
+    }
+
+    private func applyPreferredSpeakerOrder(to statuses: [SpeakerGroupStatus]) {
+        groupStatuses = Self.sortedSpeakerGroups(statuses)
     }
 
     // MARK: - Lifecycle
@@ -905,12 +1010,7 @@ final class SonosManager {
             SharedStorage.savedSpeakers = fresh
 
             var statuses: [SpeakerGroupStatus] = []
-            // Sort alphabetically by display name — matches the cloud
-            // path's ordering, so when `probeBackend()` flips between
-            // .lan and .cloud the Home cards stay in the same slots
-            // instead of visibly reshuffling.
             let coordinators = fresh.filter(\.isCoordinator)
-                .sorted { $0.name.lowercased() < $1.name.lowercased() }
 
             for coord in coordinators {
                 let members = fresh.filter { $0.groupId == coord.groupId && !$0.isInvisible }
@@ -934,7 +1034,7 @@ final class SonosManager {
                     ))
                 }
             }
-            groupStatuses = statuses
+            applyPreferredSpeakerOrder(to: statuses)
             await loadGroupAlbumColors()
         } catch { /* keep existing data */ }
     }
@@ -1106,22 +1206,7 @@ final class SonosManager {
                     trackInfo: track, transportState: state, volume: vol
                 ))
             }
-            // Sonos Cloud's `getGroups` returns groups in *unstable* order
-            // across refreshes (often flipping every few seconds), which
-            // made the Home cards visibly jump around. Lock in a
-            // deterministic order: alphabetical by coordinator name, with
-            // group id as a tiebreaker so identically-named groups
-            // (shouldn't happen in practice, but defensively) also stay
-            // put. LAN mode uses a similar alphabetical order implicitly
-            // via discovery ordering, so Home stays consistent across
-            // both backends.
-            statuses.sort { lhs, rhs in
-                let ln = lhs.coordinator.name.lowercased()
-                let rn = rhs.coordinator.name.lowercased()
-                if ln != rn { return ln < rn }
-                return lhs.id < rhs.id
-            }
-            groupStatuses = statuses
+            applyPreferredSpeakerOrder(to: statuses)
             await loadGroupAlbumColors()
         } catch {
             // `getGroups` failed (network blip, token drift, Sonos cloud
@@ -1179,17 +1264,16 @@ final class SonosManager {
     private func projectSkeletonGroupStatusesFromSavedSpeakers() {
         guard groupStatuses.isEmpty, !allSpeakers.isEmpty else { return }
         let coordinators = allSpeakers.filter(\.isCoordinator)
-        groupStatuses = coordinators
-            .sorted { $0.name.lowercased() < $1.name.lowercased() }
-            .map { coord in
-                let members = allSpeakers.filter {
-                    $0.groupId == coord.groupId && !$0.isInvisible
-                }
-                return SpeakerGroupStatus(
-                    id: coord.groupId ?? coord.id,
-                    coordinator: coord, members: members,
-                    trackInfo: nil, transportState: .unknown, volume: 0)
+        let statuses = coordinators.map { coord in
+            let members = allSpeakers.filter {
+                $0.groupId == coord.groupId && !$0.isInvisible
             }
+            return SpeakerGroupStatus(
+                id: coord.groupId ?? coord.id,
+                coordinator: coord, members: members,
+                trackInfo: nil, transportState: .unknown, volume: 0)
+        }
+        applyPreferredSpeakerOrder(to: statuses)
     }
 
     private func loadGroupAlbumColors() async {

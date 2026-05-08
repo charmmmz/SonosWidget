@@ -44,7 +44,7 @@ async def lifespan(_app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="SonosWidget NAS Agent", lifespan=lifespan)
+app = FastAPI(title="Charm for Sonos NAS Agent", lifespan=lifespan)
 
 
 class ChatBody(BaseModel):

@@ -65,6 +65,7 @@ struct PlayerView: View {
     @State private var dropTargetGroupID: String?
     @State private var isSeparateZoneTargeted = false
     @State private var isTransferringPlayback = false
+    @State private var speakerCardSizes: [String: CGSize] = [:]
     @State private var homeToastMessage: String?
 
     private var speakersHomeView: some View {
@@ -97,16 +98,27 @@ struct PlayerView: View {
                                 ?? .accentColor
 
                             speakerGroupCard(group)
+                                .background {
+                                    GeometryReader { proxy in
+                                        Color.clear.preference(
+                                            key: SpeakerCardSizePreferenceKey.self,
+                                            value: [group.id: proxy.size]
+                                        )
+                                    }
+                                }
                                 // Drag source: carry the group ID as a String.
                                 .draggable(group.id) {
                                     dragPreview(group)
                                 }
-                                // Drop target: receive another group's ID.
-                                .dropDestination(for: String.self) { items, _ in
+                                // Drop center to group, or top/bottom edges to reorder.
+                                .dropDestination(for: String.self) { items, location in
                                     guard let sourceID = items.first,
                                           sourceID != group.id else { return false }
-                                    Task { await manager.mergeGroups(sourceGroupID: sourceID,
-                                                                     intoGroupID: group.id) }
+                                    handleSpeakerCardDrop(
+                                        sourceID: sourceID,
+                                        targetGroup: group,
+                                        location: location
+                                    )
                                     return true
                                 } isTargeted: { targeted in
                                     withAnimation(.easeInOut(duration: 0.15)) {
@@ -116,9 +128,22 @@ struct PlayerView: View {
                                 // Highlight drop target with an animated border.
                                 .overlay {
                                     if isDropTarget {
-                                        RoundedRectangle(cornerRadius: 14)
-                                            .strokeBorder(dropAccent.opacity(0.8), lineWidth: 2)
-                                            .transition(.opacity)
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 14)
+                                                .strokeBorder(dropAccent.opacity(0.8), lineWidth: 2)
+
+                                            VStack {
+                                                Capsule()
+                                                    .fill(dropAccent.opacity(0.85))
+                                                    .frame(width: 56, height: 3)
+                                                Spacer()
+                                                Capsule()
+                                                    .fill(dropAccent.opacity(0.85))
+                                                    .frame(width: 56, height: 3)
+                                            }
+                                            .padding(.vertical, 8)
+                                        }
+                                        .transition(.opacity)
                                     }
                                 }
                                 .scaleEffect(isDropTarget ? 1.02 : 1.0)
@@ -127,6 +152,9 @@ struct PlayerView: View {
                         }
                     }
                     .padding(.horizontal)
+                    .onPreferenceChange(SpeakerCardSizePreferenceKey.self) { sizes in
+                        speakerCardSizes = sizes
+                    }
                 }
 
                 Spacer(minLength: 20)
@@ -226,18 +254,8 @@ struct PlayerView: View {
     }
 
     private var transferZone: some View {
-        Menu {
-            Button {
-                transferAppleMusicToSonos()
-            } label: {
-                Label("iPhone -> Sonos", systemImage: "iphone.and.arrow.forward")
-            }
-
-            Button {
-                transferSonosToIPhone()
-            } label: {
-                Label("Sonos -> iPhone", systemImage: "speaker.wave.2.fill")
-            }
+        Button {
+            handoffPlayback()
         } label: {
             VStack(spacing: 5) {
                 ZStack {
@@ -255,7 +273,7 @@ struct PlayerView: View {
                 }
                 .frame(width: 52, height: 52)
 
-                Text("TRANSFER")
+                Text("HANDOFF")
                     .font(.system(size: 8, weight: .bold))
                     .tracking(0.6)
                     .foregroundStyle(.white.opacity(0.45))
@@ -263,7 +281,7 @@ struct PlayerView: View {
         }
         .buttonStyle(.plain)
         .disabled(isTransferringPlayback || !manager.isConfigured)
-        .accessibilityLabel("Transfer playback")
+        .accessibilityLabel("Handoff playback")
     }
 
     private var ungroupZone: some View {
@@ -337,6 +355,15 @@ struct PlayerView: View {
         }
     }
 
+    private func handoffPlayback() {
+        switch HandoffDirectionResolver.direction(forSonosState: manager.transportState) {
+        case .sonosToPhone:
+            transferSonosToIPhone()
+        case .phoneToSonos:
+            transferAppleMusicToSonos()
+        }
+    }
+
     private func transferSonosToIPhone() {
         guard !isTransferringPlayback else { return }
         isTransferringPlayback = true
@@ -344,17 +371,57 @@ struct PlayerView: View {
         Task {
             do {
                 let result = try await searchManager.transferSonosAppleMusicToPhone(manager: manager)
+                var messages = [reverseHandoffSuccessMessage(for: result)]
+                if result.skippedUnsupportedItemCount > 0 {
+                    messages.append("Skipped \(result.skippedUnsupportedItemCount) unsupported queue items")
+                }
                 if let warning = result.warningMessage {
                     manager.errorMessage = warning
-                    $homeToastMessage.showToast(warning)
-                } else {
-                    $homeToastMessage.showToast("Transferred to iPhone")
+                    messages.append(warning)
                 }
+                $homeToastMessage.showToast(messages.joined(separator: ". "))
             } catch {
                 manager.errorMessage = error.localizedDescription
                 $homeToastMessage.showToast(error.localizedDescription)
             }
             isTransferringPlayback = false
+        }
+    }
+
+    private func reverseHandoffSuccessMessage(for result: ReverseHandoffResult) -> String {
+        if result.transferredTrackCount > 1 {
+            return "Transferred \(result.transferredTrackCount) songs to iPhone"
+        }
+        return "Transferred to iPhone"
+    }
+
+    private func handleSpeakerCardDrop(
+        sourceID: String,
+        targetGroup: SpeakerGroupStatus,
+        location: CGPoint
+    ) {
+        let targetHeight = speakerCardSizes[targetGroup.id]?.height ?? 0
+        switch SonosManager.speakerGroupDropIntent(locationY: location.y, targetHeight: targetHeight) {
+        case .reorderBefore:
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                manager.reorderSpeakerGroup(
+                    sourceID: sourceID,
+                    relativeTo: targetGroup.id,
+                    placement: .before
+                )
+            }
+        case .merge:
+            Task {
+                await manager.mergeGroups(sourceGroupID: sourceID, intoGroupID: targetGroup.id)
+            }
+        case .reorderAfter:
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                manager.reorderSpeakerGroup(
+                    sourceID: sourceID,
+                    relativeTo: targetGroup.id,
+                    placement: .after
+                )
+            }
         }
     }
 
@@ -507,6 +574,14 @@ struct PlayerView: View {
 }
 
 // MARK: - Speaker Group Card
+
+private struct SpeakerCardSizePreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGSize] = [:]
+
+    static func reduce(value: inout [String: CGSize], nextValue: () -> [String: CGSize]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
 
 private struct SpeakerGroupCardView: View {
     let group: SpeakerGroupStatus

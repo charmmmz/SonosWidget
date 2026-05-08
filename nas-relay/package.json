@@ -2,7 +2,7 @@
   "name": "sonos-live-activity-relay",
   "version": "0.1.0",
   "private": true,
-  "description": "Subscribes to Sonos UPnP events and pushes Live Activity updates to the SonosWidget iOS app via APNs.",
+  "description": "Subscribes to Sonos UPnP events and pushes Live Activity updates to the Charm for Sonos iOS app via APNs.",
   "type": "module",
   "scripts": {
     "build": "tsc",
