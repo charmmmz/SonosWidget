@@ -93,8 +93,15 @@ final class AppleMusicHandoffManager {
             player.currentPlaybackTime = max(0, position)
         }
 
-        try? await Task.sleep(for: .milliseconds(700))
-        guard player.playbackState == .playing || player.nowPlayingItem != nil else {
+        try await Task.sleep(for: .milliseconds(700))
+        guard let item = player.nowPlayingItem else {
+            throw AppleMusicHandoffError.phonePlaybackFailed
+        }
+        let currentStoreID = item.playbackStoreID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentStoreID.isEmpty, currentStoreID != trimmedStoreID {
+            throw AppleMusicHandoffError.phonePlaybackFailed
+        }
+        guard player.playbackState == .playing || !currentStoreID.isEmpty else {
             throw AppleMusicHandoffError.phonePlaybackFailed
         }
     }
