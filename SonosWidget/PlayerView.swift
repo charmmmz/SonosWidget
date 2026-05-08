@@ -64,6 +64,8 @@ struct PlayerView: View {
 
     @State private var dropTargetGroupID: String?
     @State private var isSeparateZoneTargeted = false
+    @State private var isTransferringPlayback = false
+    @State private var homeToastMessage: String?
 
     private var speakersHomeView: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -149,16 +151,7 @@ struct PlayerView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            ungroupZone
-                .dropDestination(for: String.self) { items, _ in
-                    guard let groupID = items.first else { return false }
-                    Task { await manager.separateGroup(groupID: groupID) }
-                    return true
-                } isTargeted: { targeted in
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
-                        isSeparateZoneTargeted = targeted
-                    }
-                }
+            homeActionZone
                 .padding(.trailing, 20)
                 // The mini-player no longer lives inside this view's bounds —
                 // it's attached above the tab bar via safeAreaInset / the
@@ -167,6 +160,7 @@ struct PlayerView: View {
                 // margin is all that's needed.
                 .padding(.bottom, 16)
         }
+        .toast($homeToastMessage)
         .onAppear {
             Task { await manager.refreshAllGroupStatuses() }
         }
@@ -213,6 +207,63 @@ struct PlayerView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         .padding(.horizontal)
         .padding(.top, 8)
+    }
+
+    private var homeActionZone: some View {
+        VStack(spacing: 14) {
+            transferZone
+            ungroupZone
+                .dropDestination(for: String.self) { items, _ in
+                    guard let groupID = items.first else { return false }
+                    Task { await manager.separateGroup(groupID: groupID) }
+                    return true
+                } isTargeted: { targeted in
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                        isSeparateZoneTargeted = targeted
+                    }
+                }
+        }
+    }
+
+    private var transferZone: some View {
+        Menu {
+            Button {
+                transferAppleMusicToSonos()
+            } label: {
+                Label("iPhone -> Sonos", systemImage: "iphone.and.arrow.forward")
+            }
+
+            Button {
+                transferSonosToIPhone()
+            } label: {
+                Label("Sonos -> iPhone", systemImage: "speaker.wave.2.fill")
+            }
+        } label: {
+            VStack(spacing: 5) {
+                ZStack {
+                    Circle()
+                        .fill(isTransferringPlayback ? Color.white.opacity(0.18) : Color.white.opacity(0.08))
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.2), lineWidth: 1.5)
+                    if isTransferringPlayback {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.left.arrow.right")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                }
+                .frame(width: 52, height: 52)
+
+                Text("TRANSFER")
+                    .font(.system(size: 8, weight: .bold))
+                    .tracking(0.6)
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isTransferringPlayback || !manager.isConfigured)
+        .accessibilityLabel("Transfer playback")
     }
 
     private var ungroupZone: some View {
@@ -266,6 +317,45 @@ struct PlayerView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(accent.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func transferAppleMusicToSonos() {
+        guard !isTransferringPlayback else { return }
+        isTransferringPlayback = true
+
+        Task {
+            do {
+                let track = try await AppleMusicHandoffManager.shared.currentAppleMusicTrack()
+                let result = try await searchManager.transferAppleMusicTrack(track, manager: manager)
+                AppleMusicHandoffManager.shared.pausePhonePlayback()
+                $homeToastMessage.showToast("Transferred to \(result.targetName)")
+            } catch {
+                manager.errorMessage = error.localizedDescription
+                $homeToastMessage.showToast(error.localizedDescription)
+            }
+            isTransferringPlayback = false
+        }
+    }
+
+    private func transferSonosToIPhone() {
+        guard !isTransferringPlayback else { return }
+        isTransferringPlayback = true
+
+        Task {
+            do {
+                let result = try await searchManager.transferSonosAppleMusicToPhone(manager: manager)
+                if let warning = result.warningMessage {
+                    manager.errorMessage = warning
+                    $homeToastMessage.showToast(warning)
+                } else {
+                    $homeToastMessage.showToast("Transferred to iPhone")
+                }
+            } catch {
+                manager.errorMessage = error.localizedDescription
+                $homeToastMessage.showToast(error.localizedDescription)
+            }
+            isTransferringPlayback = false
+        }
     }
 
     private func speakerGroupCard(_ group: SpeakerGroupStatus) -> some View {
@@ -1412,18 +1502,10 @@ struct NowPlayingOverlay: View {
             return
         }
 
-        var objectId = trackURI.split(separator: "?").first.map(String.init) ?? trackURI
-        if let colonRange = objectId.range(of: ":", options: .backwards) {
-            objectId = String(objectId[colonRange.upperBound...])
-        }
-        if objectId.count > 8, objectId.prefix(8).allSatisfy({ $0.isHexDigit }) {
-            objectId = String(objectId.dropFirst(8))
-        }
-        if let dotIdx = objectId.lastIndex(of: "."), dotIdx > objectId.startIndex {
-            let ext = String(objectId[dotIdx...])
-            if [".mp4", ".mp3", ".flac", ".unknown", ".m4a", ".ogg"].contains(ext.lowercased()) {
-                objectId = String(objectId[..<dotIdx])
-            }
+        guard let objectId = SonosAppleMusicTrackResolver
+            .cloudTrackObjectIDForNowPlaying(fromTrackURI: trackURI) else {
+            nowPlayingInfo = nil
+            return
         }
 
         do {
