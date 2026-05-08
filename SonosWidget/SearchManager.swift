@@ -53,6 +53,43 @@ enum HandoffTransferError: LocalizedError, Equatable {
     }
 }
 
+struct ReverseHandoffResult: Equatable {
+    let matchedTitle: String
+    let targetName: String
+    let seeked: Bool
+    let sonosPaused: Bool
+    let warningMessage: String?
+}
+
+enum ReverseHandoffError: LocalizedError, Equatable {
+    case noSelectedSpeaker
+    case noBackend
+    case notAppleMusicSource
+    case missingSonosTrackMetadata
+    case sonosCloudDisconnected
+    case appleMusicNotLinkedOnSonos
+    case noConfidentMatch
+
+    var errorDescription: String? {
+        switch self {
+        case .noSelectedSpeaker:
+            return "Select a Sonos speaker before transferring to iPhone."
+        case .noBackend:
+            return "Speaker unreachable — pull to refresh."
+        case .notAppleMusicSource:
+            return "Only Apple Music can be transferred to iPhone."
+        case .missingSonosTrackMetadata:
+            return "The current Sonos track could not be identified."
+        case .sonosCloudDisconnected:
+            return "Sign in to Sonos Cloud before transferring to iPhone."
+        case .appleMusicNotLinkedOnSonos:
+            return "Apple Music is not linked to this Sonos household."
+        case .noConfidentMatch:
+            return "Apple Music could not confidently match the Sonos track."
+        }
+    }
+}
+
 @Observable
 final class SearchManager {
     var favorites: [BrowseItem] = []
@@ -1495,6 +1532,67 @@ final class SearchManager {
             seeked: didSeek)
     }
 
+    func transferSonosAppleMusicToPhone(
+        manager: SonosManager
+    ) async throws -> ReverseHandoffResult {
+        guard let selectedSpeaker = manager.selectedSpeaker else {
+            throw ReverseHandoffError.noSelectedSpeaker
+        }
+        configure(speakerIP: selectedSpeaker.playbackIP)
+
+        guard let token = await SonosAuth.shared.validAccessToken(),
+              let householdId = SonosAuth.shared.householdId else {
+            throw ReverseHandoffError.sonosCloudDisconnected
+        }
+
+        guard let backend = await manager.controlBackendEnsured() else {
+            throw ReverseHandoffError.noBackend
+        }
+
+        if !hasProbed {
+            await probeLinkedServices()
+        }
+        await refreshServiceIdMappingIfNeeded()
+        await manager.refreshState()
+
+        guard let trackInfo = manager.trackInfo else {
+            throw ReverseHandoffError.missingSonosTrackMetadata
+        }
+
+        guard isAppleMusicTrack(trackInfo) else {
+            throw ReverseHandoffError.notAppleMusicSource
+        }
+
+        let track = try reverseSourceTrack(from: trackInfo)
+        let storeID = try await resolveAppleMusicStoreID(
+            for: track,
+            trackInfo: trackInfo,
+            token: token,
+            householdId: householdId)
+
+        try await AppleMusicHandoffManager.shared.playAppleMusicTrack(
+            storeID: storeID,
+            position: track.position)
+
+        var paused = true
+        var warning: String?
+        do {
+            try await SonosControl.pause(backend)
+        } catch {
+            paused = false
+            warning = "Playing on iPhone. Couldn’t pause Sonos."
+            SonosLog.error(.playback, "Reverse handoff Sonos pause failed: \(error)")
+        }
+
+        await manager.refreshState()
+        return ReverseHandoffResult(
+            matchedTitle: track.title,
+            targetName: selectedSpeaker.name,
+            seeked: track.position > 3,
+            sonosPaused: paused,
+            warningMessage: warning)
+    }
+
     private func isAppleMusicAccount(_ account: SonosCloudAPI.CloudMusicServiceAccount) -> Bool {
         let values = [
             account.name,
@@ -1509,6 +1607,123 @@ final class SearchManager {
                 .lowercased()
             return normalized.contains("apple music") || normalized.contains("applemusic")
         }
+    }
+
+    private func reverseSourceTrack(from trackInfo: TrackInfo) throws -> AppleMusicHandoffTrack {
+        let title = trackInfo.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = trackInfo.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !artist.isEmpty else {
+            throw ReverseHandoffError.missingSonosTrackMetadata
+        }
+
+        let album = trackInfo.album.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AppleMusicHandoffTrack(
+            title: title,
+            artist: artist,
+            album: album.isEmpty ? nil : album,
+            duration: trackInfo.durationSeconds > 0 ? trackInfo.durationSeconds : nil,
+            position: max(0, trackInfo.positionSeconds),
+            playbackStoreID: SonosAppleMusicTrackResolver.storeID(fromTrackURI: trackInfo.trackURI),
+            persistentID: nil)
+    }
+
+    private func isAppleMusicTrack(_ trackInfo: TrackInfo) -> Bool {
+        if trackInfo.source == .appleMusic {
+            return true
+        }
+
+        guard let trackURI = trackInfo.trackURI else { return false }
+        let parsed = SonosAppleMusicTrackResolver.parseTrackURI(trackURI)
+        guard let localServiceID = parsed.localServiceID,
+              let cloudServiceID = cloudServiceId(forLocalSid: localServiceID),
+              let account = linkedAccounts.first(where: { $0.serviceId == cloudServiceID }) else {
+            return false
+        }
+        return isAppleMusicAccount(account)
+    }
+
+    private func resolveAppleMusicStoreID(
+        for track: AppleMusicHandoffTrack,
+        trackInfo: TrackInfo,
+        token: String,
+        householdId: String
+    ) async throws -> String {
+        if let storeID = track.playbackStoreID {
+            return storeID
+        }
+
+        if let nowPlayingStoreID = try await nowPlayingStoreID(
+            trackInfo: trackInfo,
+            token: token,
+            householdId: householdId) {
+            return nowPlayingStoreID
+        }
+
+        return try await searchMatchedStoreID(
+            for: track,
+            token: token,
+            householdId: householdId)
+    }
+
+    private func nowPlayingStoreID(
+        trackInfo: TrackInfo,
+        token: String,
+        householdId: String
+    ) async throws -> String? {
+        guard let trackURI = trackInfo.trackURI else { return nil }
+        let parsed = SonosAppleMusicTrackResolver.parseTrackURI(trackURI)
+        guard let localServiceID = parsed.localServiceID,
+              let serviceId = cloudServiceId(forLocalSid: localServiceID),
+              let accountId = parsed.accountID,
+              let trackObjectID = SonosAppleMusicTrackResolver
+                .trackObjectIDForNowPlaying(fromTrackURI: trackURI) else {
+            return nil
+        }
+
+        do {
+            let response = try await SonosCloudAPI.nowPlaying(
+                token: token,
+                householdId: householdId,
+                serviceId: serviceId,
+                accountId: accountId,
+                trackObjectId: trackObjectID)
+            let objectID = response.item?.resource?.id?.objectId ?? response.item?.id
+            return SonosAppleMusicTrackResolver.storeID(fromObjectID: objectID)
+        } catch {
+            SonosLog.error(.nowPlaying, "Reverse handoff nowPlaying lookup failed: \(error)")
+            return nil
+        }
+    }
+
+    private func searchMatchedStoreID(
+        for track: AppleMusicHandoffTrack,
+        token: String,
+        householdId: String
+    ) async throws -> String {
+        guard let appleMusicAccount = linkedAccounts.first(where: { isAppleMusicAccount($0) }),
+              let serviceId = appleMusicAccount.serviceId,
+              let accountId = appleMusicAccount.accountId else {
+            throw ReverseHandoffError.appleMusicNotLinkedOnSonos
+        }
+
+        let term = "\(track.title) \(track.artist)"
+        let response = try await searchServiceWithTokenRefresh(
+            token: token,
+            householdId: householdId,
+            serviceId: serviceId,
+            accountId: accountId,
+            term: term)
+
+        let candidates = response.allResources.compactMap { resource -> BrowseItem? in
+            guard resource.type == "TRACK" else { return nil }
+            return convertToBrowseItem(resource, serviceId: serviceId, accountId: accountId)
+        }
+
+        guard let match = HandoffMatcher.bestMatch(for: track, candidates: candidates),
+              let storeID = SonosAppleMusicTrackResolver.storeID(fromBrowseItem: match.item) else {
+            throw ReverseHandoffError.noConfidentMatch
+        }
+        return storeID
     }
 
     func playNow(item: BrowseItem, manager: SonosManager) async {
