@@ -75,17 +75,23 @@ final class AppleMusicHandoffManager {
     }
 
     func playAppleMusicTrack(storeID: String, position: TimeInterval?) async throws {
+        try await playAppleMusicQueue(storeIDs: [storeID], position: position)
+    }
+
+    func playAppleMusicQueue(storeIDs: [String], position: TimeInterval?) async throws {
         let status = await mediaLibraryAuthorizationStatus()
         guard status == .authorized else {
             throw AppleMusicHandoffError.mediaAccessDenied
         }
 
-        let trimmedStoreID = storeID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedStoreID.isEmpty else {
+        let trimmedStoreIDs = storeIDs
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard let firstStoreID = trimmedStoreIDs.first else {
             throw AppleMusicHandoffError.missingPlaybackStoreID
         }
 
-        player.setQueue(with: [trimmedStoreID])
+        player.setQueue(with: trimmedStoreIDs)
         try await prepareToPlay()
         player.play()
 
@@ -93,7 +99,7 @@ final class AppleMusicHandoffManager {
             player.currentPlaybackTime = max(0, position)
         }
 
-        try await waitForRequestedPlayback(storeID: trimmedStoreID)
+        try await waitForRequestedPlayback(storeID: firstStoreID)
     }
 
     func pausePhonePlayback() {

@@ -254,18 +254,8 @@ struct PlayerView: View {
     }
 
     private var transferZone: some View {
-        Menu {
-            Button {
-                transferAppleMusicToSonos()
-            } label: {
-                Label("iPhone -> Sonos", systemImage: "iphone.and.arrow.forward")
-            }
-
-            Button {
-                transferSonosToIPhone()
-            } label: {
-                Label("Sonos -> iPhone", systemImage: "speaker.wave.2.fill")
-            }
+        Button {
+            handoffPlayback()
         } label: {
             VStack(spacing: 5) {
                 ZStack {
@@ -283,7 +273,7 @@ struct PlayerView: View {
                 }
                 .frame(width: 52, height: 52)
 
-                Text("TRANSFER")
+                Text("HANDOFF")
                     .font(.system(size: 8, weight: .bold))
                     .tracking(0.6)
                     .foregroundStyle(.white.opacity(0.45))
@@ -291,7 +281,7 @@ struct PlayerView: View {
         }
         .buttonStyle(.plain)
         .disabled(isTransferringPlayback || !manager.isConfigured)
-        .accessibilityLabel("Transfer playback")
+        .accessibilityLabel("Handoff playback")
     }
 
     private var ungroupZone: some View {
@@ -365,6 +355,15 @@ struct PlayerView: View {
         }
     }
 
+    private func handoffPlayback() {
+        switch HandoffDirectionResolver.direction(forSonosState: manager.transportState) {
+        case .sonosToPhone:
+            transferSonosToIPhone()
+        case .phoneToSonos:
+            transferAppleMusicToSonos()
+        }
+    }
+
     private func transferSonosToIPhone() {
         guard !isTransferringPlayback else { return }
         isTransferringPlayback = true
@@ -372,18 +371,28 @@ struct PlayerView: View {
         Task {
             do {
                 let result = try await searchManager.transferSonosAppleMusicToPhone(manager: manager)
+                var messages = [reverseHandoffSuccessMessage(for: result)]
+                if result.skippedUnsupportedItemCount > 0 {
+                    messages.append("Skipped \(result.skippedUnsupportedItemCount) unsupported queue items")
+                }
                 if let warning = result.warningMessage {
                     manager.errorMessage = warning
-                    $homeToastMessage.showToast(warning)
-                } else {
-                    $homeToastMessage.showToast("Transferred to iPhone")
+                    messages.append(warning)
                 }
+                $homeToastMessage.showToast(messages.joined(separator: ". "))
             } catch {
                 manager.errorMessage = error.localizedDescription
                 $homeToastMessage.showToast(error.localizedDescription)
             }
             isTransferringPlayback = false
         }
+    }
+
+    private func reverseHandoffSuccessMessage(for result: ReverseHandoffResult) -> String {
+        if result.transferredTrackCount > 1 {
+            return "Transferred \(result.transferredTrackCount) songs to iPhone"
+        }
+        return "Transferred to iPhone"
     }
 
     private func handleSpeakerCardDrop(
