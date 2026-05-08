@@ -544,6 +544,21 @@ return false
 
 - [ ] **Step 3: Add the transfer method**
 
+Before adding the transfer method, update `convertToBrowseItem(_:serviceId:accountId:)`
+so Cloud search results preserve track duration for matching:
+
+```swift
+let duration = resource.durationMs.map { TimeInterval($0) / 1000.0 } ?? 0
+
+return BrowseItem(
+    id: objectId, title: name, artist: artistName, album: albumName,
+    albumArtURL: artURL, uri: uri, metaXML: nil,
+    duration: duration,
+    isContainer: isContainer, serviceId: localSid, cloudType: type)
+```
+
+Keep the default `0` for resources where Sonos Cloud does not return duration.
+
 Add this method inside `SearchManager`:
 
 ```swift
