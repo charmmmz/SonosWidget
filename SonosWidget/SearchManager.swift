@@ -32,26 +32,23 @@ struct HandoffResult: Equatable {
 
 enum HandoffTransferError: LocalizedError, Equatable {
     case noSelectedSpeaker
-    case missingCloudAuth
-    case noLinkedAppleMusicAccount
-    case noSearchResults
+    case sonosCloudDisconnected
+    case appleMusicNotLinkedOnSonos
     case noConfidentMatch
-    case sonosPlaybackFailed
+    case sonosPlaybackFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .noSelectedSpeaker:
             return "Select a Sonos speaker before transferring Apple Music."
-        case .missingCloudAuth:
+        case .sonosCloudDisconnected:
             return "Sign in to Sonos Cloud before transferring Apple Music."
-        case .noLinkedAppleMusicAccount:
+        case .appleMusicNotLinkedOnSonos:
             return "Apple Music is not linked to this Sonos household."
-        case .noSearchResults:
-            return "No Apple Music matches were found on Sonos."
         case .noConfidentMatch:
             return "Sonos could not confidently match the Apple Music track."
-        case .sonosPlaybackFailed:
-            return "Sonos could not start playing the matched Apple Music track."
+        case .sonosPlaybackFailed(let message):
+            return message
         }
     }
 }
@@ -1428,7 +1425,7 @@ final class SearchManager {
 
         guard let token = await SonosAuth.shared.validAccessToken(),
               let householdId = SonosAuth.shared.householdId else {
-            throw HandoffTransferError.missingCloudAuth
+            throw HandoffTransferError.sonosCloudDisconnected
         }
 
         if !hasProbed {
@@ -1439,7 +1436,7 @@ final class SearchManager {
         guard let appleMusicAccount = linkedAccounts.first(where: { isAppleMusicAccount($0) }),
               let serviceId = appleMusicAccount.serviceId,
               let accountId = appleMusicAccount.accountId else {
-            throw HandoffTransferError.noLinkedAppleMusicAccount
+            throw HandoffTransferError.appleMusicNotLinkedOnSonos
         }
 
         let term = "\(track.title) \(track.artist)"
@@ -1456,31 +1453,35 @@ final class SearchManager {
         }
 
         guard !candidates.isEmpty else {
-            throw HandoffTransferError.noSearchResults
+            throw HandoffTransferError.noConfidentMatch
         }
 
         guard let match = HandoffMatcher.bestMatch(for: track, candidates: candidates) else {
             throw HandoffTransferError.noConfidentMatch
         }
 
-        let started = await playNowInternal(item: match.item, manager: manager)
-        guard started else {
-            throw HandoffTransferError.sonosPlaybackFailed
+        let previousError = errorMessage
+        errorMessage = nil
+        let played = await playNowInternal(item: match.item, manager: manager)
+        guard played else {
+            throw HandoffTransferError.sonosPlaybackFailed(
+                errorMessage ?? previousError ?? "Couldn’t start playback on Sonos.")
         }
 
-        var seeked = false
-        let duration = track.duration ?? match.item.duration
-        if track.position > 3, duration > 2 {
-            let seekTarget = max(0, min(track.position, duration - 2))
-            await manager.seekTo(seekTarget)
-            seeked = true
+        var didSeek = false
+        if track.position > 3 {
+            let maxPosition = track.duration.map {
+                max(0, min(track.position, $0 - 2))
+            } ?? track.position
+            await manager.seekTo(maxPosition)
+            didSeek = true
         }
 
         await manager.refreshState()
         return HandoffResult(
             matchedTitle: match.item.title,
             targetName: selectedSpeaker.name,
-            seeked: seeked)
+            seeked: didSeek)
     }
 
     private func isAppleMusicAccount(_ account: SonosCloudAPI.CloudMusicServiceAccount) -> Bool {
