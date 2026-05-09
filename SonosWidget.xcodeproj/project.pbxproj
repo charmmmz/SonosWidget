@@ -64,6 +64,7 @@
 		BA832D962F92D0000023DEE7 /* Exceptions for "Shared" folder in "TheWidgetExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				AlbumPaletteExtractor.swift,
 				AppleMusicHandoff.swift,
 				HandoffMatcher.swift,
 				HueAmbienceModels.swift,
@@ -76,6 +77,7 @@
 			membershipExceptions = (
 				AgentClient.swift,
 				AgentManager.swift,
+				AlbumPaletteExtractor.swift,
 				AppleMusicHandoff.swift,
 				BrandMedia.xcassets,
 				DominantColor.swift,
