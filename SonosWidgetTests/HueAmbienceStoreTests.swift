@@ -41,6 +41,7 @@ final class HueAmbienceStoreTests: XCTestCase {
         store.isEnabled = true
         store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
         store.groupStrategy = .coordinatorOnly
+        store.statusText = "Ready"
         store.upsertMapping(HueSonosMapping(
             sonosID: "RINCON_kitchen",
             sonosName: "Kitchen",
@@ -54,6 +55,7 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertTrue(restored.isEnabled)
         XCTAssertEqual(restored.bridge?.id, "bridge-1")
         XCTAssertEqual(restored.groupStrategy, .coordinatorOnly)
+        XCTAssertEqual(restored.statusText, "Ready")
         XCTAssertEqual(restored.mapping(forSonosID: "RINCON_kitchen")?.preferredTarget, .entertainmentArea("ent-kitchen"))
     }
 
@@ -62,15 +64,19 @@ final class HueAmbienceStoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let store = HueAmbienceStore(storage: HueAmbienceDefaults(defaults: defaults))
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
         store.isEnabled = true
         store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.statusText = "Connected"
         store.upsertMapping(HueSonosMapping(sonosID: "RINCON_living", sonosName: "Living Room"))
 
         store.disconnectBridge()
+        let restored = HueAmbienceStore(storage: storage)
 
-        XCTAssertFalse(store.isEnabled)
-        XCTAssertNil(store.bridge)
-        XCTAssertTrue(store.mappings.isEmpty)
+        XCTAssertFalse(restored.isEnabled)
+        XCTAssertNil(restored.bridge)
+        XCTAssertTrue(restored.mappings.isEmpty)
+        XCTAssertNil(restored.statusText)
     }
 }

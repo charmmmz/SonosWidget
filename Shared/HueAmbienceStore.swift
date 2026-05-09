@@ -112,7 +112,6 @@ final class HueAmbienceStore {
 
     @ObservationIgnored private let storage: HueAmbienceStorage
     @ObservationIgnored private let encoder = JSONEncoder()
-    @ObservationIgnored private let decoder = JSONDecoder()
 
     var isEnabled: Bool {
         didSet {
