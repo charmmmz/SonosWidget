@@ -66,6 +66,7 @@
 			membershipExceptions = (
 				AppleMusicHandoff.swift,
 				HandoffMatcher.swift,
+				HueAmbienceModels.swift,
 			);
 			target = BA832D612F90D2A80023DEE7 /* TheWidgetExtension */;
 		};
@@ -79,6 +80,7 @@
 				DominantColor.swift,
 				ExpandableText.swift,
 				HandoffMatcher.swift,
+				HueAmbienceModels.swift,
 				Models.swift,
 				QueueArtDiskCache.swift,
 				RelayClient.swift,
