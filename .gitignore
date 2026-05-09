@@ -31,5 +31,6 @@ Config/SonosSecrets.xcconfig
 
 # Generated/bundled artifacts
 artifacts/
+.superpowers/
 
 nas-agent/.venv/
