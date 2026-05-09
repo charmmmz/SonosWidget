@@ -1619,6 +1619,36 @@ final class SearchManager {
         }
     }
 
+    private func playCloudForwardTrack(
+        item: BrowseItem,
+        token: String,
+        groupId: String,
+        manager: SonosManager
+    ) async -> Bool {
+        pushRecentlyPlayed(item)
+        guard let uri = item.uri, !uri.isEmpty else {
+            SonosLog.error(.playback, "Cloud forward handoff: no URI for '\(item.title)'")
+            errorMessage = "The Apple Music track could not be loaded remotely."
+            return false
+        }
+
+        do {
+            SonosLog.debug(.playback, "remote forward handoff -> loadStreamUrl(\(item.id))")
+            try await SonosCloudAPI.loadStreamUrl(
+                token: token,
+                groupId: groupId,
+                streamUrl: uri,
+                itemId: item.id)
+            try? await Task.sleep(for: .milliseconds(playbackSettleDelayMs))
+            await manager.refreshState()
+            return true
+        } catch {
+            SonosLog.error(.playback, "Cloud forward handoff loadStreamUrl failed: \(error)")
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     func transferAppleMusicTrack(
         _ track: AppleMusicHandoffTrack,
         manager: SonosManager
@@ -1674,6 +1704,7 @@ final class SearchManager {
         errorMessage = nil
         let transferBackend = manager.transportBackend
         let transferCloudGroupId = manager.currentCloudGroupId
+        var albumPlaybackError: String?
         if let albumAttempt = await forwardAlbumQueueAttempt(
             sourceTrack: track,
             matchedCandidate: matchedCloudCandidate,
@@ -1699,14 +1730,24 @@ final class SearchManager {
             }
 
             // Album queue sync is best-effort; do not leave its error visible if single-track fallback succeeds.
+            albumPlaybackError = errorMessage
             errorMessage = nil
         }
 
-        let played = await playNowInternal(item: match.item, manager: manager,
+        let played: Bool
+        if transferBackend == .cloud, let groupId = transferCloudGroupId {
+            played = await playCloudForwardTrack(
+                item: match.item,
+                token: token,
+                groupId: groupId,
+                manager: manager)
+        } else {
+            played = await playNowInternal(item: match.item, manager: manager,
                                            lockedTarget: selectedSpeaker)
+        }
         guard played else {
             throw HandoffTransferError.sonosPlaybackFailed(
-                errorMessage ?? previousError ?? "Couldn’t start playback on Sonos.")
+                errorMessage ?? albumPlaybackError ?? previousError ?? "Couldn’t start playback on Sonos.")
         }
 
         var didSeek = false
@@ -1714,16 +1755,20 @@ final class SearchManager {
             let maxPosition = track.duration.map {
                 max(0, min(track.position, $0 - 2))
             } ?? track.position
-            if transferBackend == .cloud, let groupId = transferCloudGroupId {
-                try? await SonosCloudAPI.seek(
-                    token: token, groupId: groupId,
-                    positionMillis: Int((maxPosition * 1000.0).rounded()))
-            } else {
-                try? await SonosAPI.seek(
-                    ip: selectedSpeaker.playbackIP,
-                    position: SonosTime.apiFormat(maxPosition))
+            do {
+                if transferBackend == .cloud, let groupId = transferCloudGroupId {
+                    try await SonosCloudAPI.seek(
+                        token: token, groupId: groupId,
+                        positionMillis: Int((maxPosition * 1000.0).rounded()))
+                } else {
+                    try await SonosAPI.seek(
+                        ip: selectedSpeaker.playbackIP,
+                        position: SonosTime.apiFormat(maxPosition))
+                }
+                didSeek = true
+            } catch {
+                SonosLog.error(.playback, "Forward single-track handoff seek failed: \(error)")
             }
-            didSeek = true
         }
 
         await manager.refreshState()
