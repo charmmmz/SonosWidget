@@ -119,6 +119,10 @@ struct HueBridgeResources: Equatable, Sendable {
     var areas: [HueAreaResource]
 }
 
+protocol HueLightUpdating {
+    func updateLight(id: String, body: [String: HueJSONValue]) async throws
+}
+
 struct HueBridgeClient {
     private let bridge: HueBridgeInfo
     private let credentialStore: HueCredentialStore
@@ -238,6 +242,8 @@ struct HueBridgeClient {
         transport
     }
 }
+
+extension HueBridgeClient: HueLightUpdating {}
 
 private extension String {
     func matchesHueBridgeHost(_ configuredHost: String?) -> Bool {
