@@ -67,6 +67,7 @@
 				AppleMusicHandoff.swift,
 				HandoffMatcher.swift,
 				HueAmbienceModels.swift,
+				HueAmbienceStore.swift,
 			);
 			target = BA832D612F90D2A80023DEE7 /* TheWidgetExtension */;
 		};
@@ -81,6 +82,7 @@
 				ExpandableText.swift,
 				HandoffMatcher.swift,
 				HueAmbienceModels.swift,
+				HueAmbienceStore.swift,
 				Models.swift,
 				QueueArtDiskCache.swift,
 				RelayClient.swift,

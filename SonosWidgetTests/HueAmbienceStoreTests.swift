@@ -29,4 +29,48 @@ final class HueAmbienceStoreTests: XCTestCase {
     func testStopBehaviorDefaultsToLeaveCurrent() {
         XCTAssertEqual(HueAmbienceStopBehavior.default, .leaveCurrent)
     }
+
+    func testStorePersistsEnabledBridgeMappingsAndStrategy() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+
+        store.isEnabled = true
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.groupStrategy = .coordinatorOnly
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "RINCON_kitchen",
+            sonosName: "Kitchen",
+            preferredTarget: .entertainmentArea("ent-kitchen"),
+            fallbackTarget: .zone("zone-kitchen"),
+            capability: .gradientReady
+        ))
+
+        let restored = HueAmbienceStore(storage: storage)
+
+        XCTAssertTrue(restored.isEnabled)
+        XCTAssertEqual(restored.bridge?.id, "bridge-1")
+        XCTAssertEqual(restored.groupStrategy, .coordinatorOnly)
+        XCTAssertEqual(restored.mapping(forSonosID: "RINCON_kitchen")?.preferredTarget, .entertainmentArea("ent-kitchen"))
+    }
+
+    func testRemovingBridgeClearsMappingsAndDisablesSync() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = HueAmbienceStore(storage: HueAmbienceDefaults(defaults: defaults))
+        store.isEnabled = true
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.upsertMapping(HueSonosMapping(sonosID: "RINCON_living", sonosName: "Living Room"))
+
+        store.disconnectBridge()
+
+        XCTAssertFalse(store.isEnabled)
+        XCTAssertNil(store.bridge)
+        XCTAssertTrue(store.mappings.isEmpty)
+    }
 }
