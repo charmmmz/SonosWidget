@@ -31,8 +31,7 @@ struct HandoffResult: Equatable {
     let transferredTrackCount: Int
     let skippedUnsupportedItemCount: Int
     let warningMessage: String?
-
-    var usedAlbumQueue: Bool { transferredTrackCount > 1 }
+    let usedAlbumQueue: Bool
 }
 
 enum HandoffTransferError: LocalizedError, Equatable {
@@ -1539,7 +1538,8 @@ final class SearchManager {
             seeked: didSeek,
             transferredTrackCount: 1,
             skippedUnsupportedItemCount: 0,
-            warningMessage: nil)
+            warningMessage: nil,
+            usedAlbumQueue: false)
     }
 
     func transferSonosAppleMusicToPhone(
