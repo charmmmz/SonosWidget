@@ -1594,30 +1594,38 @@ final class SearchManager {
                 try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             }
 
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.removeAllTracksFromQueue(ip: ip)
 
             for item in plan.items {
                 guard let uri = item.uri, !uri.isEmpty else { continue }
+                try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
                 _ = try await SonosAPI.addURIToQueue(
                     ip: ip,
                     uri: uri,
                     metadata: playbackMetadata(for: item))
             }
 
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.setAVTransportToQueue(
                 ip: ip,
                 speakerUUID: speakerUUID)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.seekToTrack(
                 ip: ip,
                 trackNumber: plan.targetTrackNumber)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.play(ip: ip)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
 
             var didSeek = false
             if sourceTrack.position > 3 {
+                try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
                 let maxPosition = sourceTrack.duration.map {
                     max(0, min(sourceTrack.position, $0 - 2))
                 } ?? sourceTrack.position
                 do {
+                    try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
                     try await SonosAPI.seek(
                         ip: ip,
                         position: SonosTime.apiFormat(maxPosition))
@@ -1628,11 +1636,11 @@ final class SearchManager {
             }
 
             try? await Task.sleep(for: .milliseconds(playbackSettleDelayMs))
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
-            await manager.refreshState()
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
-            await manager.loadQueue()
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
+            try await refreshForwardHandoffState(
+                selectedSpeaker: selectedSpeaker,
+                backend: backend,
+                manager: manager,
+                loadQueue: true)
             return (true, didSeek)
         } catch let error as HandoffTransferError {
             throw error
@@ -1647,6 +1655,7 @@ final class SearchManager {
         item: BrowseItem,
         token: String,
         groupId: String,
+        backend: SonosControl.Backend,
         selectedSpeaker: SonosPlayer,
         manager: SonosManager
     ) async throws -> Bool {
@@ -1660,15 +1669,19 @@ final class SearchManager {
         do {
             try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             SonosLog.debug(.playback, "remote forward handoff -> loadStreamUrl(\(item.id))")
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosCloudAPI.loadStreamUrl(
                 token: token,
                 groupId: groupId,
                 streamUrl: uri,
                 itemId: item.id)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try? await Task.sleep(for: .milliseconds(playbackSettleDelayMs))
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
-            await manager.refreshState()
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
+            try await refreshForwardHandoffState(
+                selectedSpeaker: selectedSpeaker,
+                backend: backend,
+                manager: manager,
+                loadQueue: false)
             return true
         } catch let error as HandoffTransferError {
             throw error
@@ -1696,19 +1709,26 @@ final class SearchManager {
         do {
             try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try? await SonosAPI.removeAllTracksFromQueue(ip: ip)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             let trackNr = try await SonosAPI.addURIToQueue(
                 ip: ip,
                 uri: uri,
                 metadata: playbackMetadata(for: item))
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.setAVTransportToQueue(ip: ip, speakerUUID: speakerUUID)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.seekToTrack(ip: ip, trackNumber: trackNr)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             try await SonosAPI.play(ip: ip)
+            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
             SonosLog.info(.playback, "forward handoff queue '\(item.title)' -> track \(trackNr)")
 
             try? await Task.sleep(for: .milliseconds(playbackSettleDelayMs))
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
-            await manager.refreshState()
-            try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
+            try await refreshForwardHandoffState(
+                selectedSpeaker: selectedSpeaker,
+                backend: backend,
+                manager: manager,
+                loadQueue: true)
             return true
         } catch let error as HandoffTransferError {
             throw error
@@ -1820,6 +1840,7 @@ final class SearchManager {
                 item: match.item,
                 token: cloudToken,
                 groupId: groupId,
+                backend: transferControlBackend,
                 selectedSpeaker: selectedSpeaker,
                 manager: manager)
         case .lan:
@@ -1843,10 +1864,12 @@ final class SearchManager {
             do {
                 switch transferControlBackend {
                 case .cloud(let groupId, let cloudToken, _, _):
+                    try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
                     try await SonosCloudAPI.seek(
                         token: cloudToken, groupId: groupId,
                         positionMillis: Int((maxPosition * 1000.0).rounded()))
                 case .lan(let ip, _, _):
+                    try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
                     try await SonosAPI.seek(
                         ip: ip,
                         position: SonosTime.apiFormat(maxPosition))
@@ -1857,9 +1880,11 @@ final class SearchManager {
             }
         }
 
-        try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
-        await manager.refreshState()
-        try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
+        try await refreshForwardHandoffState(
+            selectedSpeaker: selectedSpeaker,
+            backend: transferControlBackend,
+            manager: manager,
+            loadQueue: false)
         let warningMessage: String?
         switch transferControlBackend {
         case .cloud:
@@ -2030,6 +2055,23 @@ final class SearchManager {
         guard manager.selectedSpeaker?.id == selectedSpeaker.id else {
             throw HandoffTransferError.noSelectedSpeaker
         }
+    }
+
+    private func refreshForwardHandoffState(
+        selectedSpeaker: SonosPlayer,
+        backend: SonosControl.Backend,
+        manager: SonosManager,
+        loadQueue: Bool
+    ) async throws {
+        try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
+        let stillSelected = await manager.refreshState(
+            usingLockedBackend: backend,
+            expectedSpeakerID: selectedSpeaker.id,
+            loadQueue: loadQueue)
+        guard stillSelected else {
+            throw HandoffTransferError.noSelectedSpeaker
+        }
+        try ensureForwardHandoffTargetStillSelected(selectedSpeaker, manager: manager)
     }
 
     private func forwardHandoffControlBackend(

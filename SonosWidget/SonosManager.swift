@@ -1363,6 +1363,165 @@ final class SonosManager {
         }
     }
 
+    /// Refresh after a handoff using the backend captured when the transfer
+    /// started. This avoids accidentally polling a newly-selected speaker if
+    /// the user switches targets while the handoff is settling.
+    func refreshState(
+        usingLockedBackend backend: SonosControl.Backend,
+        expectedSpeakerID: String,
+        loadQueue: Bool = false
+    ) async -> Bool {
+        guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+
+        switch backend {
+        case .lan(let ip, _, _):
+            return await refreshLockedLANState(
+                ip: ip,
+                expectedSpeakerID: expectedSpeakerID,
+                loadQueue: loadQueue)
+        case .cloud(let groupId, let token, _, _):
+            return await refreshLockedCloudState(
+                token: token,
+                groupId: groupId,
+                expectedSpeakerID: expectedSpeakerID)
+        }
+    }
+
+    private func refreshLockedLANState(
+        ip: String,
+        expectedSpeakerID: String,
+        loadQueue: Bool
+    ) async -> Bool {
+        guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+
+        do {
+            async let transportCall = SonosAPI.getTransportInfo(ip: ip)
+            async let positionCall = SonosAPI.getPositionInfo(ip: ip)
+            async let volumeCall = SonosAPI.getGroupVolume(ip: ip)
+            async let modeCall = SonosAPI.getPlayMode(ip: ip)
+            async let mediaCall = SonosAPI.getMediaInfo(ip: ip)
+
+            let incomingTransport = try await transportCall
+            let positionInfo = try await positionCall
+            let groupVolume = try await volumeCall
+            let playMode = try await modeCall
+            let mediaURI = try? await mediaCall
+            let queueSnapshot = loadQueue ? (try? await SonosAPI.getQueue(ip: ip)) : nil
+
+            guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+
+            applyIncomingTransportState(incomingTransport)
+            trackInfo = positionInfo
+            volume = groupVolume
+            if let idx = currentGroupStatusIndex() {
+                groupStatuses[idx].volume = groupVolume
+            }
+            isPlayingFromQueue = mediaURI?.hasPrefix("x-rincon-queue:") ?? true
+            if Date() > playModeLockUntil {
+                isShuffling = playMode.shuffle
+                repeatMode = playMode.repeat
+            }
+
+            positionSeconds = positionInfo.positionSeconds
+            durationSeconds = positionInfo.durationSeconds
+            positionFetchedAt = Date()
+
+            if let queueSnapshot {
+                queue = queueSnapshot.items
+                queueUpdateID = queueSnapshot.updateID
+                queueLoaded = true
+                schedulePrefetch()
+            }
+
+            consecutiveFailures = 0
+            connectionState = .connected
+            errorMessage = nil
+            updateSharedCache()
+            managePositionTimer()
+            manageLiveActivity()
+            return selectedSpeaker?.id == expectedSpeakerID
+        } catch {
+            guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+            errorMessage = error.localizedDescription
+            return true
+        }
+    }
+
+    private func refreshLockedCloudState(
+        token: String,
+        groupId: String,
+        expectedSpeakerID: String
+    ) async -> Bool {
+        guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+
+        do {
+            async let statusCall = SonosCloudAPI.getPlaybackStatus(token: token, groupId: groupId)
+            async let metaCall = SonosCloudAPI.getPlaybackMetadata(token: token, groupId: groupId)
+            async let volumeCall = SonosCloudAPI.getGroupVolume(token: token, groupId: groupId)
+            let status = try await statusCall
+            let meta = try await metaCall
+            let groupVolume = try? await volumeCall
+
+            guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+
+            applyIncomingTransportState(
+                Self.transportState(fromCloudPlaybackState: status.playbackState))
+
+            if Date() > playModeLockUntil,
+               let modes = status.playModes {
+                isShuffling = modes.shuffle ?? false
+                repeatMode = Self.repeatMode(fromCloud: modes.repeatMode, one: modes.repeatOne)
+            }
+
+            let track = meta.currentItem?.track
+            let durationSec: TimeInterval = (track?.durationMillis).map { TimeInterval($0) / 1000.0 } ?? 0
+            let positionSec: TimeInterval = (status.positionMillis).map { TimeInterval($0) / 1000.0 } ?? 0
+
+            var info = trackInfo ?? TrackInfo(title: "", artist: "", album: "")
+            info.title = track?.name ?? info.title
+            info.artist = track?.artist?.name ?? info.artist
+            info.album = track?.album?.name ?? info.album
+            let artURL = Self.pickPublicArtURL(
+                track?.imageUrl,
+                track?.album?.imageUrl,
+                meta.container?.imageUrl) ?? info.albumArtURL
+            info.albumArtURL = artURL
+            info.duration = SonosTime.apiFormat(durationSec)
+            info.position = SonosTime.apiFormat(positionSec)
+            let sourceHint = track?.service?.name ?? meta.container?.name
+            info.source = PlaybackSource.from(serviceName: sourceHint)
+            if let q = track?.quality, let mapped = AudioQuality.from(cloudQuality: q) {
+                info.audioQuality = mapped
+            }
+            trackInfo = info
+
+            positionSeconds = positionSec
+            durationSeconds = durationSec
+            if let groupVolume = groupVolume?.volume {
+                volume = groupVolume
+                if let idx = currentGroupStatusIndex() {
+                    groupStatuses[idx].volume = groupVolume
+                }
+            }
+            positionFetchedAt = Date()
+
+            consecutiveFailures = 0
+            connectionState = .connected
+            errorMessage = nil
+            updateSharedCache()
+            managePositionTimer()
+            manageLiveActivity()
+            return selectedSpeaker?.id == expectedSpeakerID
+        } catch SonosCloudError.unauthorized {
+            _ = await SonosAuth.shared.refreshAccessToken()
+            return selectedSpeaker?.id == expectedSpeakerID
+        } catch {
+            guard selectedSpeaker?.id == expectedSpeakerID else { return false }
+            errorMessage = error.localizedDescription
+            return true
+        }
+    }
+
     private func refreshStateLAN() async {
         guard let pIP = playbackIP else { return }
         do {
