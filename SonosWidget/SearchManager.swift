@@ -119,6 +119,16 @@ final class SearchManager {
         let accountId: String?
         let resMD: String?
     }
+
+    private struct ForwardAlbumQueueAttempt {
+        let plan: AppleMusicForwardAlbumQueuePlan
+    }
+
+    private struct ForwardCloudTrackCandidate {
+        let resource: SonosCloudAPI.CloudResource
+        let item: BrowseItem
+    }
+
     var stationOptions: [RadioStationOption] = []
     var showStationPicker = false
     var pendingStationManager: SonosManager?
@@ -1177,6 +1187,47 @@ final class SearchManager {
             isContainer: isContainer, serviceId: localSid, cloudType: type)
     }
 
+    private func forwardAlbumCandidate(
+        from albumTrack: SonosCloudAPI.AlbumTrackItem,
+        fallbackAlbumTitle: String,
+        fallbackArtURL: String?,
+        serviceId: String,
+        accountId: String
+    ) -> AppleMusicForwardAlbumTrackCandidate? {
+        if let type = albumTrack.type?.uppercased(), type != "TRACK" {
+            return nil
+        }
+        let objectId = albumTrack.resource?.id?.objectId ?? albumTrack.id ?? ""
+        let cleanedObjectId = browseTrackId(from: objectId)
+        guard !cleanedObjectId.isEmpty,
+              let title = albumTrack.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty else {
+            return nil
+        }
+
+        let cloudServiceId = albumTrack.resource?.id?.serviceId ?? serviceId
+        let cloudAccountId = albumTrack.resource?.id?.accountId ?? accountId
+        let artist = albumTrack.artists?.first?.name ?? albumTrack.subtitle ?? ""
+        let artURL = albumTrack.images?.tile1x1 ?? fallbackArtURL
+        let mimeType = albumTrack.resource?.defaults.flatMap { decodeMimeType(from: $0) }
+        let duration = albumTrack.duration.flatMap(TimeInterval.init) ?? 0
+
+        var item = makeTrackItem(
+            objectId: cleanedObjectId,
+            title: title,
+            artist: artist,
+            album: fallbackAlbumTitle,
+            artURL: artURL,
+            mimeType: mimeType,
+            cloudServiceId: cloudServiceId,
+            accountId: cloudAccountId)
+        item.duration = duration
+
+        return AppleMusicForwardAlbumTrackCandidate(
+            item: item,
+            ordinal: albumTrack.ordinal)
+    }
+
     private func decodeMimeType(from defaults: String) -> String? {
         guard let data = Data(base64Encoded: defaults),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -1490,18 +1541,24 @@ final class SearchManager {
             accountId: accountId,
             term: term)
 
-        let candidates = response.allResources.compactMap { resource -> BrowseItem? in
-            guard resource.type == "TRACK" else { return nil }
-            return convertToBrowseItem(resource, serviceId: serviceId, accountId: accountId)
+        let cloudCandidates = response.allResources.compactMap { resource -> ForwardCloudTrackCandidate? in
+            guard resource.type == "TRACK",
+                  let item = convertToBrowseItem(resource, serviceId: serviceId, accountId: accountId) else {
+                return nil
+            }
+            return ForwardCloudTrackCandidate(resource: resource, item: item)
         }
+        let candidates = cloudCandidates.map(\.item)
 
         guard !candidates.isEmpty else {
             throw HandoffTransferError.noConfidentMatch
         }
 
-        guard let match = HandoffMatcher.bestMatch(for: track, candidates: candidates) else {
+        guard let match = HandoffMatcher.bestMatch(for: track, candidates: candidates),
+              let matchedCloudCandidate = cloudCandidates.first(where: { $0.item == match.item }) else {
             throw HandoffTransferError.noConfidentMatch
         }
+        _ = matchedCloudCandidate
 
         let previousError = errorMessage
         errorMessage = nil
@@ -1813,6 +1870,66 @@ final class SearchManager {
             SonosLog.error(.nowPlaying, "Reverse handoff nowPlaying lookup failed: \(error)")
             return nil
         }
+    }
+
+    private func forwardAlbumId(
+        from matchedResource: SonosCloudAPI.CloudResource,
+        matchedItem: BrowseItem,
+        token: String,
+        householdId: String,
+        serviceId: String,
+        accountId: String
+    ) async -> String? {
+        if let containerId = browseAlbumId(from: matchedResource.container?.id?.objectId),
+           !containerId.isEmpty {
+            return containerId
+        }
+
+        let trackObjectId = SonosAppleMusicTrackResolver
+            .cloudTrackObjectIDForNowPlaying(fromTrackURI: matchedItem.uri)
+            ?? matchedResource.id?.objectId
+            ?? matchedItem.id
+        let cleanedTrackObjectId = browseTrackId(from: trackObjectId)
+        guard !cleanedTrackObjectId.isEmpty else { return nil }
+
+        do {
+            let response = try await SonosCloudAPI.nowPlaying(
+                token: token,
+                householdId: householdId,
+                serviceId: serviceId,
+                accountId: accountId,
+                trackObjectId: cleanedTrackObjectId)
+            return browseAlbumId(from: response.item?.albumId)
+        } catch {
+            SonosLog.error(.nowPlaying, "Forward handoff album lookup failed: \(error)")
+            return nil
+        }
+    }
+
+    private func browseAlbumId(from rawId: String?) -> String? {
+        guard let rawId else { return nil }
+        let trimmed = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let base = trimmed.firstIndex(of: "#").map { String(trimmed[..<$0]) } ?? trimmed
+        let parts = base.components(separatedBy: ":")
+        guard let albumIndex = parts.firstIndex(where: { $0.caseInsensitiveCompare("album") == .orderedSame }),
+              albumIndex < parts.index(before: parts.endIndex) else {
+            return base
+        }
+        return parts[albumIndex...].joined(separator: ":")
+    }
+
+    private func browseTrackId(from rawId: String?) -> String {
+        guard let rawId else { return "" }
+        let trimmed = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let base = trimmed.firstIndex(of: "#").map { String(trimmed[..<$0]) } ?? trimmed
+        let parts = base.components(separatedBy: ":")
+        guard let trackIndex = parts.firstIndex(where: { $0.caseInsensitiveCompare("track") == .orderedSame }),
+              trackIndex < parts.index(before: parts.endIndex) else {
+            return base
+        }
+        return parts[trackIndex...].joined(separator: ":")
     }
 
     private func searchMatchedStoreID(
