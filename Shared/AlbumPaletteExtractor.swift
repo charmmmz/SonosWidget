@@ -25,7 +25,7 @@ struct HueRGBColor: Codable, Equatable, Hashable, Sendable {
         let total = x + y + z
 
         guard total > 0 else {
-            return HueXYColor(x: 0, y: 0)
+            return HueXYColor(x: 0.3127, y: 0.3290)
         }
 
         return HueXYColor(
@@ -44,8 +44,9 @@ struct HueRGBColor: Codable, Equatable, Hashable, Sendable {
 }
 
 enum AlbumPaletteExtractor {
-    static func palette(from image: UIImage, maxColors: Int = 6) -> [HueRGBColor] {
+    static func palette(from image: UIImage, maxColors: Int = 5) -> [HueRGBColor] {
         guard maxColors > 0 else { return [] }
+        let colorLimit = min(maxColors, 5)
 
         let sampledColors = image.sampledHueColors()
         var buckets: [ColorBucketKey: ColorBucket] = [:]
@@ -62,7 +63,7 @@ enum AlbumPaletteExtractor {
                 continue
             }
             palette.append(color)
-            if palette.count == maxColors {
+            if palette.count == colorLimit {
                 return palette
             }
         }
