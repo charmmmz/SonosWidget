@@ -336,6 +336,79 @@ final class HueBridgeClientTests: XCTestCase {
         XCTAssertEqual(zone?.childLightIDs, ["light-1"])
     }
 
+    func testFetchResourcesDecodesLightFunctionMetadata() async throws {
+        let transport = MockHueTransport(responses: [
+            "GET /clip/v2/resource/light": """
+            {
+              "data": [
+                {
+                  "id": "decorative-light",
+                  "metadata": {
+                    "name": "Decorative Strip",
+                    "function": "decorative"
+                  },
+                  "color": {}
+                },
+                {
+                  "id": "task-light",
+                  "metadata": {
+                    "name": "Desk Lamp",
+                    "function": "functional"
+                  },
+                  "color": {}
+                },
+                {
+                  "id": "mixed-light",
+                  "metadata": {
+                    "name": "Mixed Lamp",
+                    "function": "mixed"
+                  },
+                  "color": {}
+                },
+                {
+                  "id": "unknown-light",
+                  "metadata": {
+                    "name": "Unknown Lamp"
+                  },
+                  "color": {}
+                }
+              ]
+            }
+            """,
+            "GET /clip/v2/resource/room": """
+            {
+              "data": []
+            }
+            """,
+            "GET /clip/v2/resource/zone": """
+            {
+              "data": []
+            }
+            """,
+            "GET /clip/v2/resource/entertainment_configuration": """
+            {
+              "data": []
+            }
+            """
+        ])
+        let client = HueBridgeClient(
+            bridge: HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue"),
+            credentialStore: HueCredentialStore(storage: InMemoryHueCredentialStorage()),
+            transport: transport,
+            applicationKeyProvider: { "generated-key" }
+        )
+
+        let resources = try await client.fetchResources()
+
+        XCTAssertEqual(resources.lights.map(\.function), [
+            .decorative,
+            .functional,
+            .mixed,
+            .unknown
+        ])
+        XCTAssertTrue(resources.lights.allSatisfy(\.functionMetadataResolved))
+    }
+
     func testFetchResourcesThrowsMissingApplicationKeyBeforeSendingRequest() async throws {
         let transport = MockHueTransport(responses: [:])
         let client = HueBridgeClient(

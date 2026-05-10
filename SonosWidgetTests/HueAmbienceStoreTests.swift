@@ -8,6 +8,7 @@ final class HueAmbienceStoreTests: XCTestCase {
             sonosName: "Living Room",
             preferredTarget: .entertainmentArea("ent-1"),
             fallbackTarget: .room("room-1"),
+            includedLightIDs: ["light-1"],
             excludedLightIDs: ["light-2"],
             capability: .liveEntertainment
         )
@@ -18,8 +19,67 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertEqual(decoded.sonosID, "RINCON_living")
         XCTAssertEqual(decoded.preferredTarget, .entertainmentArea("ent-1"))
         XCTAssertEqual(decoded.fallbackTarget, .room("room-1"))
+        XCTAssertEqual(decoded.includedLightIDs, ["light-1"])
         XCTAssertEqual(decoded.excludedLightIDs, ["light-2"])
         XCTAssertEqual(decoded.capability, .liveEntertainment)
+    }
+
+    func testOlderMappingPayloadDefaultsIncludedLightsToEmpty() throws {
+        let data = """
+        {
+          "sonosID": "RINCON_living",
+          "sonosName": "Living Room",
+          "preferredTarget": {
+            "room": {
+              "_0": "room-1"
+            }
+          },
+          "excludedLightIDs": [],
+          "capability": "basic"
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(HueSonosMapping.self, from: data)
+
+        XCTAssertTrue(decoded.includedLightIDs.isEmpty)
+    }
+
+    func testOlderLightPayloadDefaultsFunctionToUnknown() throws {
+        let data = """
+        {
+          "id": "light-1",
+          "name": "Lamp",
+          "ownerID": "room-1",
+          "supportsColor": true,
+          "supportsGradient": false,
+          "supportsEntertainment": false
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(HueLightResource.self, from: data)
+
+        XCTAssertEqual(decoded.function, .unknown)
+        XCTAssertFalse(decoded.functionMetadataResolved)
+    }
+
+    func testHueBridgeResourcesDetectsUnresolvedFunctionMetadata() {
+        let resources = HueBridgeResources(
+            lights: [
+                HueLightResource(
+                    id: "light-1",
+                    name: "Lamp",
+                    ownerID: nil,
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: false,
+                    function: .unknown,
+                    functionMetadataResolved: false
+                )
+            ],
+            areas: []
+        )
+
+        XCTAssertTrue(resources.needsFunctionMetadataRefresh)
     }
 
     func testGroupStrategyDefaultsToAllMappedRooms() {

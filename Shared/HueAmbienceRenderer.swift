@@ -33,8 +33,14 @@ struct StoredHueTargetResolver: HueTargetResolving {
                     continue
                 }
 
-                let lightIDs = area.childLightIDs.filter {
-                    !mapping.excludedLightIDs.contains($0) && lightsByID[$0] != nil
+                let lightIDs = area.childLightIDs.filter { lightID in
+                    guard !mapping.excludedLightIDs.contains(lightID),
+                          let light = lightsByID[lightID] else {
+                        return false
+                    }
+
+                    return light.participatesInAmbienceByDefault
+                        || mapping.includedLightIDs.contains(lightID)
                 }
                 guard !lightIDs.isEmpty else {
                     continue

@@ -311,7 +311,7 @@ struct HueAmbienceSetupSheet: View {
         hueAreas = store.hueAreas
         hueLights = store.hueLights
 
-        if hueAreas.isEmpty {
+        if hueAreas.isEmpty || store.hueResources.needsFunctionMetadataRefresh {
             Task { await refreshHueResources() }
         }
     }
@@ -418,6 +418,8 @@ private struct HueMappingRow: View {
     let areas: [HueAreaResource]
     let lights: [HueLightResource]
 
+    @State private var isLightSelectionExpanded = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
@@ -455,6 +457,25 @@ private struct HueMappingRow: View {
                 .buttonStyle(.borderless)
             }
 
+            if !areaLights.isEmpty {
+                DisclosureGroup("Lights", isExpanded: $isLightSelectionExpanded) {
+                    ForEach(areaLights) { light in
+                        Toggle(isOn: Binding(
+                            get: { isLightEnabled(light) },
+                            set: { setLight(light, isEnabled: $0) }
+                        )) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(light.name)
+                                Text(light.function.label)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .font(.caption)
+            }
+
             if store.mapping(forSonosID: speaker.id) != nil {
                 Button(role: .destructive) {
                     removeAssignment()
@@ -479,6 +500,24 @@ private struct HueMappingRow: View {
         return areas.first { $0.ambienceTarget == target }
     }
 
+    private var areaLights: [HueLightResource] {
+        guard let currentArea else {
+            return []
+        }
+
+        let lightsByID = lights.reduce(into: [String: HueLightResource]()) { result, light in
+            result[light.id] = light
+        }
+
+        return currentArea.childLightIDs.compactMap { lightID in
+            guard let light = lightsByID[lightID], light.supportsColor else {
+                return nil
+            }
+
+            return light
+        }
+    }
+
     private var statusText: String {
         guard let mapping = currentMapping else {
             return "No Hue area assigned"
@@ -489,6 +528,10 @@ private struct HueMappingRow: View {
     }
 
     private func saveArea(_ area: HueAreaResource) {
+        guard currentArea?.id != area.id else {
+            return
+        }
+
         let didSave = store.assignArea(
             sonosID: speaker.id,
             sonosName: speaker.name,
@@ -499,6 +542,44 @@ private struct HueMappingRow: View {
         if didSave {
             manager.refreshStatus()
         }
+    }
+
+    private func isLightEnabled(_ light: HueLightResource) -> Bool {
+        guard let mapping = currentMapping else {
+            return false
+        }
+
+        if mapping.excludedLightIDs.contains(light.id) {
+            return false
+        }
+
+        return light.participatesInAmbienceByDefault
+            || mapping.includedLightIDs.contains(light.id)
+    }
+
+    private func setLight(_ light: HueLightResource, isEnabled: Bool) {
+        guard var mapping = currentMapping else {
+            return
+        }
+
+        if isEnabled {
+            mapping.excludedLightIDs.remove(light.id)
+            if light.participatesInAmbienceByDefault {
+                mapping.includedLightIDs.remove(light.id)
+            } else {
+                mapping.includedLightIDs.insert(light.id)
+            }
+        } else {
+            mapping.includedLightIDs.remove(light.id)
+            if light.participatesInAmbienceByDefault {
+                mapping.excludedLightIDs.insert(light.id)
+            } else {
+                mapping.excludedLightIDs.remove(light.id)
+            }
+        }
+
+        store.upsertMapping(mapping)
+        manager.refreshStatus()
     }
 
     private func removeAssignment() {

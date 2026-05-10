@@ -378,6 +378,138 @@ final class MusicAmbienceManagerTests: XCTestCase {
         XCTAssertEqual(targets.first?.lightsByID["light-1"]?.supportsGradient, true)
     }
 
+    func testStoredResolverSkipsFunctionalLightsByDefault() {
+        let resolver = StoredHueTargetResolver(
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Office",
+                    kind: .room,
+                    childLightIDs: ["decorative", "task", "unknown"]
+                )
+            ],
+            lights: [
+                makeLight(id: "decorative", function: .decorative),
+                makeLight(id: "task", function: .functional),
+                makeLight(id: "unknown", function: .unknown)
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "office",
+            sonosName: "Office",
+            preferredTarget: .room("room-1")
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertEqual(targets.first?.lightIDs, ["decorative", "unknown"])
+    }
+
+    func testStoredResolverSkipsUnresolvedFunctionMetadataLights() {
+        let resolver = StoredHueTargetResolver(
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Office",
+                    kind: .room,
+                    childLightIDs: ["legacy"]
+                )
+            ],
+            lights: [
+                makeLight(id: "legacy", function: .unknown, functionMetadataResolved: false)
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "office",
+            sonosName: "Office",
+            preferredTarget: .room("room-1")
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertTrue(targets.isEmpty)
+    }
+
+    func testReceiveRefreshesUnresolvedFunctionMetadataBeforeRendering() async {
+        let store = makeStore()
+        store.isEnabled = true
+        store.motionStyle = .still
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.updateResources(HueBridgeResources(
+            lights: [
+                makeLight(id: "light-1", function: .unknown, functionMetadataResolved: false)
+            ],
+            areas: [
+                HueAreaResource(id: "room-1", name: "Office", kind: .room, childLightIDs: ["light-1"])
+            ]
+        ))
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "living",
+            sonosName: "Living",
+            preferredTarget: .room("room-1")
+        ))
+
+        let fetchExpectation = expectation(description: "refreshes function metadata")
+        let applyExpectation = expectation(description: "applies after function metadata refresh")
+        let renderer = RecordingAmbienceRendering(applyExpectation: applyExpectation)
+        let resourceFetcher = RecordingHueAmbienceResourceFetching(
+            resources: HueBridgeResources(
+                lights: [
+                    makeLight(id: "light-1", function: .decorative)
+                ],
+                areas: [
+                    HueAreaResource(id: "room-1", name: "Office", kind: .room, childLightIDs: ["light-1"])
+                ]
+            ),
+            expectation: fetchExpectation
+        )
+        let manager = MusicAmbienceManager(
+            store: store,
+            renderer: renderer,
+            resourceFetcher: resourceFetcher
+        )
+        let snapshot = makePlayingSnapshot(trackTitle: "Metadata Song")
+
+        manager.receive(snapshot: snapshot)
+
+        await fulfillment(of: [fetchExpectation], timeout: 1)
+        XCTAssertEqual(renderer.applyCount, 0)
+        XCTAssertFalse(store.hueResources.needsFunctionMetadataRefresh)
+
+        manager.receive(snapshot: snapshot)
+
+        await fulfillment(of: [applyExpectation], timeout: 1)
+        XCTAssertEqual(renderer.applyCount, 1)
+    }
+
+    func testStoredResolverAllowsIncludedFunctionalLightsAndExclusionsWin() {
+        let resolver = StoredHueTargetResolver(
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Office",
+                    kind: .room,
+                    childLightIDs: ["decorative", "task"]
+                )
+            ],
+            lights: [
+                makeLight(id: "decorative", function: .decorative),
+                makeLight(id: "task", function: .functional)
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "office",
+            sonosName: "Office",
+            preferredTarget: .room("room-1"),
+            includedLightIDs: ["task"],
+            excludedLightIDs: ["decorative"]
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertEqual(targets.first?.lightIDs, ["task"])
+    }
+
     private func makeTarget() -> HueResolvedAmbienceTarget {
         HueResolvedAmbienceTarget(
             areaID: "room-1",
@@ -392,6 +524,23 @@ final class MusicAmbienceManagerTests: XCTestCase {
                     supportsEntertainment: false
                 )
             ]
+        )
+    }
+
+    private func makeLight(
+        id: String,
+        function: HueLightFunction,
+        functionMetadataResolved: Bool = true
+    ) -> HueLightResource {
+        HueLightResource(
+            id: id,
+            name: id,
+            ownerID: nil,
+            supportsColor: true,
+            supportsGradient: false,
+            supportsEntertainment: false,
+            function: function,
+            functionMetadataResolved: functionMetadataResolved
         )
     }
 
@@ -490,6 +639,21 @@ private struct StaticHueTargetResolving: HueTargetResolving {
 
     func resolveTargets(for mappings: [HueSonosMapping]) -> [HueResolvedAmbienceTarget] {
         targets
+    }
+}
+
+private final class RecordingHueAmbienceResourceFetching: HueAmbienceResourceFetching {
+    private let resources: HueBridgeResources
+    private let expectation: XCTestExpectation
+
+    init(resources: HueBridgeResources, expectation: XCTestExpectation) {
+        self.resources = resources
+        self.expectation = expectation
+    }
+
+    func fetchResources(for bridge: HueBridgeInfo) async throws -> HueBridgeResources {
+        expectation.fulfill()
+        return resources
     }
 }
 

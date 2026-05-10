@@ -120,6 +120,10 @@ struct HueBridgeResources: Codable, Equatable, Sendable {
     var areas: [HueAreaResource]
 
     static let empty = HueBridgeResources(lights: [], areas: [])
+
+    var needsFunctionMetadataRefresh: Bool {
+        lights.contains { !$0.functionMetadataResolved }
+    }
 }
 
 struct HueLocalBridgeRecord: Equatable, Sendable {
@@ -497,6 +501,7 @@ private struct HueV2Envelope<Resource: Decodable>: Decodable {
 
 private struct HueMetadataDTO: Decodable {
     var name: String?
+    var function: String?
 }
 
 private struct HueResourceReferenceDTO: Decodable {
@@ -530,7 +535,9 @@ private struct HueLightDTO: Decodable {
             ownerID: owner?.rid,
             supportsColor: color != nil,
             supportsGradient: (gradient?.pointsCapable ?? 0) > 1,
-            supportsEntertainment: true
+            supportsEntertainment: true,
+            function: HueLightFunction(apiValue: metadata?.function),
+            functionMetadataResolved: true
         )
     }
 }

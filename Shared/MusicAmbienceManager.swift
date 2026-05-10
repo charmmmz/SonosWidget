@@ -2,6 +2,16 @@ import Foundation
 import Observation
 import UIKit
 
+protocol HueAmbienceResourceFetching {
+    func fetchResources(for bridge: HueBridgeInfo) async throws -> HueBridgeResources
+}
+
+private struct DefaultHueAmbienceResourceFetcher: HueAmbienceResourceFetching {
+    func fetchResources(for bridge: HueBridgeInfo) async throws -> HueBridgeResources {
+        try await HueBridgeClient(bridge: bridge).fetchResources()
+    }
+}
+
 @MainActor
 @Observable
 final class MusicAmbienceManager {
@@ -36,23 +46,27 @@ final class MusicAmbienceManager {
     @ObservationIgnored private let store: HueAmbienceStore
     @ObservationIgnored private let renderer: HueAmbienceRendering?
     @ObservationIgnored private let targetResolver: HueTargetResolving?
+    @ObservationIgnored private let resourceFetcher: HueAmbienceResourceFetching?
     @ObservationIgnored private let flowIntervalSeconds: TimeInterval
     @ObservationIgnored private var lastTrackKey: String?
     @ObservationIgnored private var lastPalette: [HueRGBColor] = []
     @ObservationIgnored private var lastRenderSignature: RenderSignature?
     @ObservationIgnored private var lastResolvedTargets: [HueResolvedAmbienceTarget] = []
     @ObservationIgnored private var renderTask: Task<Void, Never>?
+    @ObservationIgnored private var resourceRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var renderGeneration = 0
 
     init(
         store: HueAmbienceStore? = nil,
         renderer: HueAmbienceRendering? = nil,
         targetResolver: HueTargetResolving? = nil,
+        resourceFetcher: HueAmbienceResourceFetching? = nil,
         flowIntervalSeconds: TimeInterval = 8
     ) {
         self.store = store ?? .shared
         self.renderer = renderer
         self.targetResolver = targetResolver
+        self.resourceFetcher = resourceFetcher
         self.flowIntervalSeconds = flowIntervalSeconds
         refreshStatus()
     }
@@ -65,6 +79,7 @@ final class MusicAmbienceManager {
             stopActiveAmbience()
             setStatus(.unconfigured)
         } else {
+            refreshHueResourcesIfNeeded()
             setStatus(.idle)
         }
     }
@@ -110,6 +125,11 @@ final class MusicAmbienceManager {
         guard !mappings.isEmpty else {
             stopActiveAmbience()
             setStatus(.paused("No Hue area mapped"))
+            return
+        }
+        guard !store.hueResources.needsFunctionMetadataRefresh else {
+            refreshHueResourcesIfNeeded()
+            setStatus(.paused("Refreshing Hue lights"))
             return
         }
 
@@ -220,6 +240,48 @@ final class MusicAmbienceManager {
         }
 
         return HueAmbienceRenderer(lightClient: HueBridgeClient(bridge: bridge))
+    }
+
+    private func refreshHueResourcesIfNeeded() {
+        guard resourceRefreshTask == nil,
+              store.hueResources.needsFunctionMetadataRefresh,
+              let bridge = store.bridge else {
+            return
+        }
+
+        let fetcher = resourceFetcher ?? DefaultHueAmbienceResourceFetcher()
+        resourceRefreshTask = Task { [weak self] in
+            do {
+                let resources = try await fetcher.fetchResources(for: bridge)
+                await MainActor.run { [weak self] in
+                    guard let self else {
+                        return
+                    }
+
+                    resourceRefreshTask = nil
+                    guard store.updateResources(resources, forBridgeID: bridge.id) else {
+                        return
+                    }
+
+                    if store.isEnabled && store.bridge != nil && !store.mappings.isEmpty {
+                        setStatus(.idle)
+                    }
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self else {
+                        return
+                    }
+
+                    resourceRefreshTask = nil
+                    guard store.isEnabled, store.bridge?.id == bridge.id else {
+                        return
+                    }
+
+                    setStatus(.error(error.localizedDescription))
+                }
+            }
+        }
     }
 
     private func resetRenderState() {

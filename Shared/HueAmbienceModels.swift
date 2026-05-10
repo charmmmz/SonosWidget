@@ -121,6 +121,7 @@ struct HueSonosMapping: Codable, Equatable, Identifiable, Sendable {
     var sonosName: String
     var preferredTarget: HueAmbienceTarget?
     var fallbackTarget: HueAmbienceTarget?
+    var includedLightIDs: Set<String>
     var excludedLightIDs: Set<String>
     var capability: HueAmbienceCapability
 
@@ -129,6 +130,7 @@ struct HueSonosMapping: Codable, Equatable, Identifiable, Sendable {
         sonosName: String,
         preferredTarget: HueAmbienceTarget? = nil,
         fallbackTarget: HueAmbienceTarget? = nil,
+        includedLightIDs: Set<String> = [],
         excludedLightIDs: Set<String> = [],
         capability: HueAmbienceCapability = .basic
     ) {
@@ -136,8 +138,30 @@ struct HueSonosMapping: Codable, Equatable, Identifiable, Sendable {
         self.sonosName = sonosName
         self.preferredTarget = preferredTarget
         self.fallbackTarget = fallbackTarget
+        self.includedLightIDs = includedLightIDs
         self.excludedLightIDs = excludedLightIDs
         self.capability = capability
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sonosID
+        case sonosName
+        case preferredTarget
+        case fallbackTarget
+        case includedLightIDs
+        case excludedLightIDs
+        case capability
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sonosID = try container.decode(String.self, forKey: .sonosID)
+        sonosName = try container.decode(String.self, forKey: .sonosName)
+        preferredTarget = try container.decodeIfPresent(HueAmbienceTarget.self, forKey: .preferredTarget)
+        fallbackTarget = try container.decodeIfPresent(HueAmbienceTarget.self, forKey: .fallbackTarget)
+        includedLightIDs = try container.decodeIfPresent(Set<String>.self, forKey: .includedLightIDs) ?? []
+        excludedLightIDs = try container.decodeIfPresent(Set<String>.self, forKey: .excludedLightIDs) ?? []
+        capability = try container.decodeIfPresent(HueAmbienceCapability.self, forKey: .capability) ?? .basic
     }
 }
 
@@ -153,6 +177,59 @@ struct HueAmbiencePlaybackSnapshot: Equatable, Sendable {
     var albumArtImage: Data?
 }
 
+enum HueLightFunction: String, Codable, Equatable, Sendable, CaseIterable {
+    case decorative
+    case functional
+    case mixed
+    case unknown
+
+    init(apiValue: String?) {
+        let normalizedValue = apiValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+
+        switch normalizedValue {
+        case "decorative", "decoration", "for_decoration":
+            self = .decorative
+        case "functional", "task", "tasks", "for_task", "for_tasks":
+            self = .functional
+        case "mixed":
+            self = .mixed
+        default:
+            self = .unknown
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self = Self(apiValue: try? container.decode(String.self))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+
+    var label: String {
+        switch self {
+        case .decorative:
+            return "Decoration"
+        case .functional:
+            return "Task"
+        case .mixed:
+            return "Mixed"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    var participatesInAmbienceByDefault: Bool {
+        self != .functional
+    }
+}
+
 struct HueLightResource: Codable, Equatable, Identifiable, Sendable {
     let id: String
     var name: String
@@ -160,6 +237,58 @@ struct HueLightResource: Codable, Equatable, Identifiable, Sendable {
     var supportsColor: Bool
     var supportsGradient: Bool
     var supportsEntertainment: Bool
+    var function: HueLightFunction
+    var functionMetadataResolved: Bool
+
+    init(
+        id: String,
+        name: String,
+        ownerID: String?,
+        supportsColor: Bool,
+        supportsGradient: Bool,
+        supportsEntertainment: Bool,
+        function: HueLightFunction = .unknown,
+        functionMetadataResolved: Bool = true
+    ) {
+        self.id = id
+        self.name = name
+        self.ownerID = ownerID
+        self.supportsColor = supportsColor
+        self.supportsGradient = supportsGradient
+        self.supportsEntertainment = supportsEntertainment
+        self.function = function
+        self.functionMetadataResolved = functionMetadataResolved
+    }
+
+    var participatesInAmbienceByDefault: Bool {
+        functionMetadataResolved && function.participatesInAmbienceByDefault
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case ownerID
+        case supportsColor
+        case supportsGradient
+        case supportsEntertainment
+        case function
+        case functionMetadataResolved
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        ownerID = try container.decodeIfPresent(String.self, forKey: .ownerID)
+        supportsColor = try container.decode(Bool.self, forKey: .supportsColor)
+        supportsGradient = try container.decode(Bool.self, forKey: .supportsGradient)
+        supportsEntertainment = try container.decode(Bool.self, forKey: .supportsEntertainment)
+        function = try container.decodeIfPresent(HueLightFunction.self, forKey: .function) ?? .unknown
+        functionMetadataResolved = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .functionMetadataResolved
+        ) ?? false
+    }
 }
 
 struct HueAreaResource: Codable, Equatable, Identifiable, Sendable {
