@@ -104,8 +104,9 @@ final class SonosManager {
     /// `setPlayerVolume` via the Control API. May be nil if the player isn't
     /// in the resolved household / hasn't been seen via `getGroups` yet.
     private var cloudPlayerId: String?
-    /// Cached cloud-sourced audio quality keyed by track title to survive UPnP refreshes.
-    private var cachedCloudQuality: (track: String, quality: AudioQuality)?
+    /// Cached cloud-sourced audio quality keyed by the current track signature
+    /// to survive UPnP refreshes without leaking the badge to same-title tracks.
+    private var cachedCloudQuality: (trackKey: String, quality: AudioQuality)?
     private var isEnrichingQuality = false
     /// When set, refreshState() will not overwrite isShuffling/repeatMode until this date.
     private var playModeLockUntil: Date = .distantPast
@@ -1446,7 +1447,13 @@ final class SonosManager {
             guard selectedSpeaker?.id == expectedSpeakerID else { return false }
 
             applyIncomingTransportState(incomingTransport)
-            trackInfo = positionInfo
+            let incomingTrackInfo = Self.reconciledLANTrackInfo(
+                positionInfo,
+                cachedCloudQuality: cachedCloudQuality,
+                cloudQualityIsAuthoritative: SonosAuth.shared.isLoggedIn
+                    && isCloudQualityAuthoritative(positionInfo.source)
+            )
+            trackInfo = incomingTrackInfo
             volume = groupVolume
             if let idx = currentGroupStatusIndex() {
                 groupStatuses[idx].volume = groupVolume
@@ -1457,8 +1464,8 @@ final class SonosManager {
                 repeatMode = playMode.repeat
             }
 
-            positionSeconds = positionInfo.positionSeconds
-            durationSeconds = positionInfo.durationSeconds
+            positionSeconds = incomingTrackInfo.positionSeconds
+            durationSeconds = incomingTrackInfo.durationSeconds
             positionFetchedAt = Date()
 
             if let queueSnapshot {
@@ -1570,7 +1577,7 @@ final class SonosManager {
             // which consults SharedStorage's sid → name map for services
             // whose local sid varies per install (NetEase etc.), so we no
             // longer need a manual second pass here.
-            trackInfo = try await p
+            let positionInfo = try await p
             let groupVolume = try await v
             volume = groupVolume
             if let idx = currentGroupStatusIndex() {
@@ -1579,7 +1586,7 @@ final class SonosManager {
             // Soundbar TV-mode toggles only show up in the player UI when
             // source == .tv — fetching them off the music path would just
             // be wasted SOAP calls (and most non-soundbars 402 on it).
-            if trackInfo?.source == .tv {
+            if positionInfo.source == .tv {
                 await refreshSoundbarEQ()
             }
             let mode = try await m
@@ -1589,32 +1596,16 @@ final class SonosManager {
                 repeatMode = mode.repeat
             }
 
-            positionSeconds = trackInfo?.positionSeconds ?? 0
-            durationSeconds = trackInfo?.durationSeconds ?? 0
+            let incomingTrackInfo = Self.reconciledLANTrackInfo(
+                positionInfo,
+                cachedCloudQuality: cachedCloudQuality,
+                cloudQualityIsAuthoritative: SonosAuth.shared.isLoggedIn
+                    && isCloudQualityAuthoritative(positionInfo.source)
+            )
+            trackInfo = incomingTrackInfo
+            positionSeconds = incomingTrackInfo.positionSeconds
+            durationSeconds = incomingTrackInfo.durationSeconds
             positionFetchedAt = Date()
-
-            // Aggressive cloud-first: for first-party streaming services
-            // (Apple Music / Spotify / Amazon / Tidal / YouTube Music),
-            // Sonos Cloud's `playbackMetadata.quality` is the authoritative
-            // source — its `immersive` / `lossless` / `bitDepth` fields
-            // correctly flag Dolby Atmos tracks that UPnP misreports as
-            // "ALAC 24/48 Hi-Res Lossless", and also catch HLS streams that
-            // UPnP marks lossless even when the account tier isn't.
-            //
-            // Drop the UPnP-derived guess up-front so the cache-restore and
-            // Cloud-enrich paths below fill it in cleanly. NetEase etc. are
-            // SMAPI-backed and Sonos Cloud doesn't populate their `quality`,
-            // so we keep UPnP's value there as the only signal.
-            if SonosAuth.shared.isLoggedIn, isCloudQualityAuthoritative(trackInfo?.source) {
-                trackInfo?.audioQuality = nil
-            }
-
-            // Restore cached cloud quality if UPnP didn't provide one and the track matches.
-            if trackInfo?.audioQuality == nil,
-               let cached = cachedCloudQuality,
-               cached.track == trackInfo?.title {
-                trackInfo?.audioQuality = cached.quality
-            }
 
             consecutiveFailures = 0
             connectionState = .connected
@@ -1955,6 +1946,38 @@ final class SonosManager {
         }
     }
 
+    nonisolated static func cloudQualityTrackKey(for trackInfo: TrackInfo?) -> String? {
+        guard let trackInfo else { return nil }
+        let title = trackInfo.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return nil }
+        let artist = trackInfo.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artURL = trackInfo.albumArtURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "\(title)|\(artist)|\(artURL)"
+    }
+
+    nonisolated static func reconciledLANTrackInfo(
+        _ incoming: TrackInfo,
+        cachedCloudQuality: (trackKey: String, quality: AudioQuality)?,
+        cloudQualityIsAuthoritative: Bool
+    ) -> TrackInfo {
+        var info = incoming
+
+        // For streaming services, Sonos Cloud is the source of truth. Reconcile
+        // this in a local copy so SwiftUI never observes the transient
+        // UPnP-without-quality state between awaited polling calls.
+        if cloudQualityIsAuthoritative {
+            info.audioQuality = nil
+        }
+
+        if info.audioQuality == nil,
+           let cachedCloudQuality,
+           cachedCloudQuality.trackKey == cloudQualityTrackKey(for: info) {
+            info.audioQuality = cachedCloudQuality.quality
+        }
+
+        return info
+    }
+
     /// Whether Sonos Cloud's `playbackMetadata.quality` is trustworthy for a
     /// given playback source. First-party streaming services (Sonos-owned
     /// ingest pipeline) plus NetEase Cloud Music — verified to populate
@@ -1976,7 +1999,7 @@ final class SonosManager {
     /// that sets `audioQuality` for Apple Music / Spotify / etc. — making
     /// Cloud the single source of truth as long as the user is logged in.
     private func enrichAudioQualityFromCloud() async {
-        let trackKey = trackInfo.map { "\($0.title ?? "")|\($0.artist ?? "")|\($0.albumArtURL ?? "")" }
+        let trackKey = Self.cloudQualityTrackKey(for: trackInfo)
 
         let needsEnrich: Bool = {
             // Logged in → Sonos Cloud is authoritative. Always refresh once
@@ -2016,8 +2039,8 @@ final class SonosManager {
             if let quality = metadata.currentItem?.track?.quality,
                let mapped = AudioQuality.from(cloudQuality: quality) {
                 trackInfo?.audioQuality = mapped
-                if let title = trackInfo?.title {
-                    cachedCloudQuality = (track: title, quality: mapped)
+                if let trackKey = Self.cloudQualityTrackKey(for: trackInfo) {
+                    cachedCloudQuality = (trackKey: trackKey, quality: mapped)
                 }
             }
             lastEnrichedTrackKey = trackKey
