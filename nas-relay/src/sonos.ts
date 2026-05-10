@@ -165,7 +165,7 @@ export class SonosBridge extends EventEmitter {
           ?? coordinator.CurrentTrack?.AlbumArtURI
           ?? device.CurrentTrack?.AlbumArtUri
           ?? device.CurrentTrack?.AlbumArtURI
-          ?? albumArtUriFromDIDL(position.TrackMetaData),
+          ?? albumArtUriFromMetadata(position.TrackMetaData),
         coordinator.Host ?? device.Host,
       );
 
@@ -204,11 +204,21 @@ function parseDuration(s: string): number {
   return parts[0]! * 3600 + parts[1]! * 60 + parts[2]!;
 }
 
-function albumArtUriFromDIDL(metadata?: string): string | null {
+export function albumArtUriFromMetadata(metadata: unknown): string | null {
   if (!metadata) return null;
+  if (typeof metadata !== 'string') {
+    return albumArtUriFromTrackObject(metadata);
+  }
   const match = metadata.match(/<upnp:albumArtURI[^>]*>([^<]+)<\/upnp:albumArtURI>/i);
   if (!match?.[1]) return null;
   return decodeXmlEntities(match[1]);
+}
+
+function albumArtUriFromTrackObject(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== 'object') return null;
+  const track = metadata as Record<string, unknown>;
+  const value = track.AlbumArtUri ?? track.AlbumArtURI ?? track.albumArtUri;
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function absoluteAlbumArtUri(uri: string | null | undefined, host: string | undefined): string | null {
