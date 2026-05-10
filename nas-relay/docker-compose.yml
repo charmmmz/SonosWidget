@@ -18,7 +18,9 @@
 services:
   relay:
     image: ghcr.io/charmmmz/charm-for-sonos/nas-relay:latest
+    pull_policy: always
     container_name: sonos-live-activity-relay
+    init: true
     restart: unless-stopped
     network_mode: host
     environment:
@@ -47,3 +49,13 @@ services:
       # tokens.json (registered Live Activity push tokens) + apns.p8 live here.
       # Don't bake either into the image.
       - ./data:/app/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          node -e "fetch('http://127.0.0.1:' + (process.env.RELAY_PORT || '8787') + '/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
