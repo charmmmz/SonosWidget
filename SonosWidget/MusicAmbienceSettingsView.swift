@@ -28,6 +28,14 @@ struct MusicAmbienceSettingsSyncActions {
         guard canSyncToRelay() else { return }
         await syncToRelay()
     }
+
+    func groupPlaybackChanged() async {
+        await syncableSettingChanged()
+    }
+
+    func stopBehaviorChanged() async {
+        await syncableSettingChanged()
+    }
 }
 
 struct MusicAmbienceSettingsView: View {
@@ -103,6 +111,18 @@ struct MusicAmbienceSettingsView: View {
             let actions = syncActions
             Task {
                 await actions.syncableSettingChanged()
+            }
+        }
+        .onChange(of: store.groupStrategy) {
+            let actions = syncActions
+            Task {
+                await actions.groupPlaybackChanged()
+            }
+        }
+        .onChange(of: store.stopBehavior) {
+            let actions = syncActions
+            Task {
+                await actions.stopBehaviorChanged()
             }
         }
     }
