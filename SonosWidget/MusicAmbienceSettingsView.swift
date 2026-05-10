@@ -244,7 +244,10 @@ private struct HueAmbienceSetupSheet: View {
 
     private var enhancedSection: some View {
         Section("NAS Enhanced") {
-            LabeledContent("Live Entertainment", value: "Available after NAS runtime is configured")
+            LabeledContent("Live Entertainment", value: HueLiveEntertainmentRuntimeStatus.unavailable.reason)
+            Text("App-only mode can still apply album colors and gradient-ready updates while Charm Player is active.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

@@ -70,6 +70,26 @@ enum HueAmbienceStopBehavior: String, Codable, Equatable, Sendable, CaseIterable
     }
 }
 
+enum HueLiveEntertainmentRuntimeStatus: Equatable, Sendable {
+    case unavailable
+    case available
+    case streaming
+    case conflict
+
+    var reason: String {
+        switch self {
+        case .unavailable:
+            return "Requires NAS/Entertainment streaming runtime"
+        case .available:
+            return "Ready for Live Entertainment"
+        case .streaming:
+            return "Live Entertainment streaming"
+        case .conflict:
+            return "Another Hue app is using this Entertainment Area"
+        }
+    }
+}
+
 struct HueSonosMapping: Codable, Equatable, Identifiable, Sendable {
     var id: String { sonosID }
     var sonosID: String

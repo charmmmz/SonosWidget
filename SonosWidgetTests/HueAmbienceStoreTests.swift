@@ -30,6 +30,13 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertEqual(HueAmbienceStopBehavior.default, .leaveCurrent)
     }
 
+    func testLiveEntertainmentWithoutRuntimeUsesClearUnavailableStatus() {
+        XCTAssertEqual(
+            HueLiveEntertainmentRuntimeStatus.unavailable.reason,
+            "Requires NAS/Entertainment streaming runtime"
+        )
+    }
+
     func testStorePersistsStopBehavior() {
         let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
