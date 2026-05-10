@@ -12,6 +12,7 @@ protocol HueAmbienceRendering {
         to targets: [HueResolvedAmbienceTarget],
         transitionSeconds: Double
     ) async throws
+    func stop(targets: [HueResolvedAmbienceTarget], behavior: HueAmbienceStopBehavior) async throws
 }
 
 protocol HueTargetResolving {
@@ -105,6 +106,28 @@ struct HueAmbienceRenderer {
 
                 try await lightClient.updateLight(id: lightID, body: body)
                 lightOffset += 1
+            }
+        }
+    }
+
+    func stop(targets: [HueResolvedAmbienceTarget], behavior: HueAmbienceStopBehavior) async throws {
+        guard behavior == .turnOff else {
+            return
+        }
+
+        for target in targets {
+            for lightID in target.lightIDs {
+                guard let light = target.lightsByID[lightID], light.supportsColor else {
+                    continue
+                }
+
+                try await lightClient.updateLight(
+                    id: lightID,
+                    body: [
+                        "on": .object(["on": .bool(false)]),
+                        "dynamics": .object(["duration": .number(1_200)])
+                    ]
+                )
             }
         }
     }

@@ -29,6 +29,12 @@ struct MusicAmbienceSettingsView: View {
                         Text(strategy.label).tag(strategy)
                     }
                 }
+
+                Picker("When Playback Stops", selection: $store.stopBehavior) {
+                    ForEach(HueAmbienceStopBehavior.allCases, id: \.self) { behavior in
+                        Text(behavior.label).tag(behavior)
+                    }
+                }
             }
         } header: {
             Text("Hue Music Ambience")
@@ -41,6 +47,9 @@ struct MusicAmbienceSettingsView: View {
                 manager: manager,
                 sonosSpeakers: sonosSpeakers
             )
+        }
+        .onChange(of: store.isEnabled) {
+            manager.refreshStatus()
         }
     }
 

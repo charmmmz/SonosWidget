@@ -114,6 +114,41 @@ final class HueAmbienceRendererTests: XCTestCase {
         XCTAssertEqual(updates[1].body["color"]?.xy, HueRGBColor.green.xy)
     }
 
+    func testStopTurnsOffSyncedLightsWhenConfigured() async throws {
+        let client = RecordingHueLightClient()
+        let renderer = HueAmbienceRenderer(lightClient: client)
+        let target = HueResolvedAmbienceTarget(
+            areaID: "room-1",
+            lightIDs: ["light-1"],
+            lightsByID: [
+                "light-1": makeLight(id: "light-1")
+            ]
+        )
+
+        try await renderer.stop(targets: [target], behavior: .turnOff)
+
+        let updates = await client.snapshot()
+        XCTAssertEqual(updates.count, 1)
+        XCTAssertEqual(updates[0].body["on"], .object(["on": .bool(false)]))
+    }
+
+    func testStopSkipsNonColorLights() async throws {
+        let client = RecordingHueLightClient()
+        let renderer = HueAmbienceRenderer(lightClient: client)
+        let target = HueResolvedAmbienceTarget(
+            areaID: "room-1",
+            lightIDs: ["light-1"],
+            lightsByID: [
+                "light-1": makeLight(id: "light-1", supportsColor: false)
+            ]
+        )
+
+        try await renderer.stop(targets: [target], behavior: .turnOff)
+
+        let updates = await client.snapshot()
+        XCTAssertEqual(updates.count, 0)
+    }
+
     private func makeLight(
         id: String,
         supportsColor: Bool = true,

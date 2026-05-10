@@ -30,6 +30,21 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertEqual(HueAmbienceStopBehavior.default, .leaveCurrent)
     }
 
+    func testStorePersistsStopBehavior() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+
+        store.stopBehavior = .turnOff
+
+        let restored = HueAmbienceStore(storage: storage)
+
+        XCTAssertEqual(restored.stopBehavior, .turnOff)
+    }
+
     func testStorePersistsEnabledBridgeMappingsAndStrategy() {
         let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

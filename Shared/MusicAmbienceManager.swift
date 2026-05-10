@@ -39,6 +39,7 @@ final class MusicAmbienceManager {
     @ObservationIgnored private var lastTrackKey: String?
     @ObservationIgnored private var lastPalette: [HueRGBColor] = []
     @ObservationIgnored private var lastRenderSignature: RenderSignature?
+    @ObservationIgnored private var lastResolvedTargets: [HueResolvedAmbienceTarget] = []
     @ObservationIgnored private var renderTask: Task<Void, Never>?
     @ObservationIgnored private var renderGeneration = 0
 
@@ -55,10 +56,10 @@ final class MusicAmbienceManager {
 
     func refreshStatus() {
         if !store.isEnabled {
-            resetRenderState()
+            stopActiveAmbience()
             setStatus(.disabled)
         } else if store.bridge == nil || store.mappings.isEmpty {
-            resetRenderState()
+            stopActiveAmbience()
             setStatus(.unconfigured)
         } else {
             setStatus(.idle)
@@ -87,24 +88,24 @@ final class MusicAmbienceManager {
 
     func receive(snapshot: HueAmbiencePlaybackSnapshot) {
         guard store.isEnabled else {
-            resetRenderState()
+            stopActiveAmbience()
             setStatus(.disabled)
             return
         }
         guard store.bridge != nil else {
-            resetRenderState()
+            stopActiveAmbience()
             setStatus(.unconfigured)
             return
         }
         guard snapshot.isPlaying else {
-            resetRenderState()
+            stopActiveAmbience()
             setStatus(.idle)
             return
         }
 
         let mappings = mappingsForCurrentPlayback(snapshot)
         guard !mappings.isEmpty else {
-            resetRenderState()
+            stopActiveAmbience()
             setStatus(.paused("No Hue area mapped"))
             return
         }
@@ -136,6 +137,7 @@ final class MusicAmbienceManager {
         guard !resolvedTargets.isEmpty, !lastPalette.isEmpty else {
             return
         }
+        lastResolvedTargets = resolvedTargets
 
         let palette = lastPalette
         let signature = RenderSignature(
@@ -193,7 +195,35 @@ final class MusicAmbienceManager {
         renderTask?.cancel()
         renderTask = nil
         lastRenderSignature = nil
+        lastResolvedTargets = []
         renderGeneration += 1
+    }
+
+    private func stopActiveAmbience() {
+        renderTask?.cancel()
+        renderTask = nil
+        lastRenderSignature = nil
+        renderGeneration += 1
+
+        guard !lastResolvedTargets.isEmpty else {
+            return
+        }
+        let targets = lastResolvedTargets
+        lastResolvedTargets = []
+
+        guard store.stopBehavior == .turnOff,
+              let renderer = renderer ?? defaultRenderer() else {
+            return
+        }
+
+        let behavior = store.stopBehavior
+        let generation = renderGeneration
+        renderTask = Task {
+            try? await renderer.stop(targets: targets, behavior: behavior)
+            if renderGeneration == generation {
+                renderTask = nil
+            }
+        }
     }
 }
 

@@ -7,6 +7,7 @@ protocol HueAmbienceStorage: AnyObject {
     var mappingsData: Data? { get set }
     var resourcesData: Data? { get set }
     var groupStrategyRaw: String? { get set }
+    var stopBehaviorRaw: String? { get set }
     var statusText: String? { get set }
 }
 
@@ -97,6 +98,22 @@ final class HueAmbienceDefaults: HueAmbienceStorage {
         }
     }
 
+    var stopBehaviorRaw: String? {
+        get {
+            if let defaults {
+                return defaults.string(forKey: "hueStopBehavior")
+            }
+            return SharedStorage.hueStopBehaviorRaw
+        }
+        set {
+            if let defaults {
+                updateOptional(newValue, forKey: "hueStopBehavior", in: defaults)
+            } else {
+                SharedStorage.hueStopBehaviorRaw = newValue
+            }
+        }
+    }
+
     var statusText: String? {
         get {
             if let defaults {
@@ -172,6 +189,12 @@ final class HueAmbienceStore {
         }
     }
 
+    var stopBehavior: HueAmbienceStopBehavior {
+        didSet {
+            storage.stopBehaviorRaw = stopBehavior.rawValue
+        }
+    }
+
     var statusText: String? {
         didSet {
             storage.statusText = statusText
@@ -187,6 +210,8 @@ final class HueAmbienceStore {
         self.hueResources = Self.decode(HueBridgeResources.self, from: storage.resourcesData) ?? .empty
         self.groupStrategy = storage.groupStrategyRaw
             .flatMap(HueGroupSyncStrategy.init(rawValue:)) ?? .default
+        self.stopBehavior = storage.stopBehaviorRaw
+            .flatMap(HueAmbienceStopBehavior.init(rawValue:)) ?? .default
         self.statusText = storage.statusText
     }
 

@@ -226,6 +226,43 @@ final class MusicAmbienceManagerTests: XCTestCase {
         XCTAssertEqual(renderer.applyCount, 1)
     }
 
+    func testReceiveStopsActiveAmbienceWhenPlaybackStops() async {
+        let store = makeStore()
+        store.isEnabled = true
+        store.stopBehavior = .turnOff
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "living",
+            sonosName: "Living",
+            preferredTarget: .room("room-1")
+        ))
+
+        let applyExpectation = expectation(description: "renderer applies palette")
+        let stopExpectation = expectation(description: "renderer stops active ambience")
+        let target = makeTarget()
+        let renderer = RecordingAmbienceRendering(
+            applyExpectation: applyExpectation,
+            stopExpectation: stopExpectation
+        )
+        let manager = MusicAmbienceManager(
+            store: store,
+            renderer: renderer,
+            targetResolver: StaticHueTargetResolving(targets: [target])
+        )
+
+        manager.receive(snapshot: makePlayingSnapshot(trackTitle: "Song"))
+        await fulfillment(of: [applyExpectation], timeout: 1)
+
+        var stoppedSnapshot = makePlayingSnapshot(trackTitle: "Song")
+        stoppedSnapshot.isPlaying = false
+        manager.receive(snapshot: stoppedSnapshot)
+
+        await fulfillment(of: [stopExpectation], timeout: 1)
+        XCTAssertEqual(renderer.stopCount, 1)
+        XCTAssertEqual(renderer.lastStopTargets, [target])
+        XCTAssertEqual(renderer.lastStopBehavior, .turnOff)
+    }
+
     func testStaleRenderErrorDoesNotOverrideNewerSyncStatus() async {
         let store = makeStore()
         store.isEnabled = true
@@ -352,12 +389,20 @@ final class MusicAmbienceManagerTests: XCTestCase {
 }
 
 private final class RecordingAmbienceRendering: HueAmbienceRendering {
-    private let applyExpectation: XCTestExpectation
+    private let applyExpectation: XCTestExpectation?
+    private let stopExpectation: XCTestExpectation?
     private(set) var applyCount = 0
+    private(set) var stopCount = 0
     private(set) var lastTargets: [HueResolvedAmbienceTarget] = []
+    private(set) var lastStopTargets: [HueResolvedAmbienceTarget] = []
+    private(set) var lastStopBehavior: HueAmbienceStopBehavior?
 
-    init(applyExpectation: XCTestExpectation) {
+    init(
+        applyExpectation: XCTestExpectation? = nil,
+        stopExpectation: XCTestExpectation? = nil
+    ) {
         self.applyExpectation = applyExpectation
+        self.stopExpectation = stopExpectation
     }
 
     func apply(
@@ -367,7 +412,14 @@ private final class RecordingAmbienceRendering: HueAmbienceRendering {
     ) async throws {
         applyCount += 1
         lastTargets = targets
-        applyExpectation.fulfill()
+        applyExpectation?.fulfill()
+    }
+
+    func stop(targets: [HueResolvedAmbienceTarget], behavior: HueAmbienceStopBehavior) async throws {
+        stopCount += 1
+        lastStopTargets = targets
+        lastStopBehavior = behavior
+        stopExpectation?.fulfill()
     }
 }
 
@@ -407,6 +459,8 @@ private final class StaleFailingAmbienceRendering: HueAmbienceRendering {
 
         secondStarted.fulfill()
     }
+
+    func stop(targets: [HueResolvedAmbienceTarget], behavior: HueAmbienceStopBehavior) async throws {}
 
     func releaseFirstRender() {
         firstRenderContinuation?.resume()
