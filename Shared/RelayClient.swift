@@ -19,8 +19,14 @@ enum RelayClient {
             let isPlaying: Bool?
             let title: String?
         }
+        struct HueAmbience: Decodable, Sendable {
+            let configured: Bool?
+            let enabled: Bool?
+            let runtimeActive: Bool?
+        }
         let ok: Bool
         let groups: [Group]
+        let hueAmbience: HueAmbience?
     }
 
     static func health(baseURL: URL) async throws -> HealthResponse {

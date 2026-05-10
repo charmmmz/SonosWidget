@@ -227,6 +227,65 @@ final class MusicAmbienceManagerTests: XCTestCase {
         XCTAssertEqual(renderer.applyCount, 1)
     }
 
+    func testReceiveDefersLocalRenderingWhenNASRelayIsControllingAmbience() async {
+        let store = makeStore()
+        store.isEnabled = true
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "living",
+            sonosName: "Living",
+            preferredTarget: .room("room-1")
+        ))
+
+        let renderer = RecordingAmbienceRendering()
+        let manager = MusicAmbienceManager(
+            store: store,
+            renderer: renderer,
+            targetResolver: StaticHueTargetResolving(targets: [makeTarget()]),
+            relayRuntime: StaticHueAmbienceRelayRuntime(shouldDeferLocalHueAmbience: true)
+        )
+
+        manager.receive(snapshot: makePlayingSnapshot(trackTitle: "Relay Song"))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(renderer.applyCount, 0)
+        XCTAssertEqual(manager.status, .syncing("NAS Relay controlling Music Ambience"))
+    }
+
+    func testRelayTakeoverCancelsLocalRenderingWithoutSendingStopCommand() async {
+        let store = makeStore()
+        store.isEnabled = true
+        store.stopBehavior = .turnOff
+        store.motionStyle = .still
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "living",
+            sonosName: "Living",
+            preferredTarget: .room("room-1")
+        ))
+
+        let applyExpectation = expectation(description: "local renderer applies before relay takeover")
+        let renderer = RecordingAmbienceRendering(applyExpectation: applyExpectation)
+        let relayRuntime = MutableHueAmbienceRelayRuntime(shouldDeferLocalHueAmbience: false)
+        let manager = MusicAmbienceManager(
+            store: store,
+            renderer: renderer,
+            targetResolver: StaticHueTargetResolving(targets: [makeTarget()]),
+            relayRuntime: relayRuntime
+        )
+
+        let snapshot = makePlayingSnapshot(trackTitle: "Takeover Song")
+        manager.receive(snapshot: snapshot)
+        await fulfillment(of: [applyExpectation], timeout: 1)
+
+        relayRuntime.shouldDeferLocalHueAmbience = true
+        manager.receive(snapshot: snapshot)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(renderer.stopCount, 0)
+        XCTAssertEqual(manager.status, .syncing("NAS Relay controlling Music Ambience"))
+    }
+
     func testFlowingMotionReappliesRotatedPaletteWhilePlaying() async {
         let store = makeStore()
         store.isEnabled = true
@@ -639,6 +698,18 @@ private struct StaticHueTargetResolving: HueTargetResolving {
 
     func resolveTargets(for mappings: [HueSonosMapping]) -> [HueResolvedAmbienceTarget] {
         targets
+    }
+}
+
+private struct StaticHueAmbienceRelayRuntime: HueAmbienceRelayRuntimeProviding {
+    var shouldDeferLocalHueAmbience: Bool
+}
+
+private final class MutableHueAmbienceRelayRuntime: HueAmbienceRelayRuntimeProviding {
+    var shouldDeferLocalHueAmbience: Bool
+
+    init(shouldDeferLocalHueAmbience: Bool) {
+        self.shouldDeferLocalHueAmbience = shouldDeferLocalHueAmbience
     }
 }
 

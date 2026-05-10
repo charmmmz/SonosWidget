@@ -47,6 +47,7 @@ final class MusicAmbienceManager {
     @ObservationIgnored private let renderer: HueAmbienceRendering?
     @ObservationIgnored private let targetResolver: HueTargetResolving?
     @ObservationIgnored private let resourceFetcher: HueAmbienceResourceFetching?
+    @ObservationIgnored private let relayRuntime: HueAmbienceRelayRuntimeProviding?
     @ObservationIgnored private let flowIntervalSeconds: TimeInterval
     @ObservationIgnored private var lastTrackKey: String?
     @ObservationIgnored private var lastPalette: [HueRGBColor] = []
@@ -61,23 +62,28 @@ final class MusicAmbienceManager {
         renderer: HueAmbienceRendering? = nil,
         targetResolver: HueTargetResolving? = nil,
         resourceFetcher: HueAmbienceResourceFetching? = nil,
+        relayRuntime: HueAmbienceRelayRuntimeProviding? = nil,
         flowIntervalSeconds: TimeInterval = 8
     ) {
         self.store = store ?? .shared
         self.renderer = renderer
         self.targetResolver = targetResolver
         self.resourceFetcher = resourceFetcher
+        self.relayRuntime = relayRuntime
         self.flowIntervalSeconds = flowIntervalSeconds
         refreshStatus()
     }
 
     func refreshStatus() {
         if !store.isEnabled {
-            stopActiveAmbience()
+            stopLocalAmbienceForCurrentControlMode()
             setStatus(.disabled)
         } else if store.bridge == nil || store.mappings.isEmpty {
-            stopActiveAmbience()
+            stopLocalAmbienceForCurrentControlMode()
             setStatus(.unconfigured)
+        } else if shouldDeferLocalHueAmbience {
+            resetRenderState()
+            setStatus(.syncing("NAS Relay controlling Music Ambience"))
         } else {
             refreshHueResourcesIfNeeded()
             setStatus(.idle)
@@ -106,13 +112,18 @@ final class MusicAmbienceManager {
 
     func receive(snapshot: HueAmbiencePlaybackSnapshot) {
         guard store.isEnabled else {
-            stopActiveAmbience()
+            stopLocalAmbienceForCurrentControlMode()
             setStatus(.disabled)
             return
         }
         guard store.bridge != nil else {
-            stopActiveAmbience()
+            stopLocalAmbienceForCurrentControlMode()
             setStatus(.unconfigured)
+            return
+        }
+        guard !shouldDeferLocalHueAmbience else {
+            resetRenderState()
+            setStatus(snapshot.isPlaying ? .syncing("NAS Relay controlling Music Ambience") : .idle)
             return
         }
         guard snapshot.isPlaying else {
@@ -281,6 +292,18 @@ final class MusicAmbienceManager {
                     setStatus(.error(error.localizedDescription))
                 }
             }
+        }
+    }
+
+    private var shouldDeferLocalHueAmbience: Bool {
+        (relayRuntime ?? RelayManager.shared).shouldDeferLocalHueAmbience
+    }
+
+    private func stopLocalAmbienceForCurrentControlMode() {
+        if shouldDeferLocalHueAmbience {
+            resetRenderState()
+        } else {
+            stopActiveAmbience()
         }
     }
 

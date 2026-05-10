@@ -2,15 +2,19 @@ import type { Logger } from 'pino';
 
 import { HueClipClient } from './hueClient.js';
 import type { HueAmbienceConfigStore } from './hueConfigStore.js';
-import { rotatePalette, stablePaletteForTrack } from './huePalette.js';
+import { paletteForSnapshot } from './hueAlbumArtPalette.js';
+import { rotatePalette } from './huePalette.js';
 import { applyHuePalette, resolveHueTargets, stopHueTargets } from './hueRenderer.js';
 import type {
   HueAmbienceRuntimeConfig,
   HueAmbienceServiceStatus,
   HueLightClient,
+  HueRGBColor,
   HueResolvedAmbienceTarget,
   HueSnapshot,
 } from './hueTypes.js';
+
+type HuePaletteProvider = (snapshot: HueSnapshot) => Promise<HueRGBColor[]> | HueRGBColor[];
 
 export class HueAmbienceService {
   private config: HueAmbienceRuntimeConfig | null = null;
@@ -25,6 +29,7 @@ export class HueAmbienceService {
     private readonly log: Logger,
     private readonly clientFactory: (config: HueAmbienceRuntimeConfig) => HueLightClient = config =>
       new HueClipClient(config.bridge, config.applicationKey),
+    private readonly paletteProvider: HuePaletteProvider = paletteForSnapshot,
   ) {}
 
   async load(): Promise<void> {
@@ -83,6 +88,7 @@ export class HueAmbienceService {
       snapshot.trackTitle,
       snapshot.artist,
       snapshot.album,
+      snapshot.albumArtUri,
     ].join('|');
     if (trackKey === this.activeTrackKey && this.activeTargets.length > 0) {
       return;
@@ -104,7 +110,7 @@ export class HueAmbienceService {
     this.lastError = null;
 
     const client = this.clientFactory(config);
-    const palette = stablePaletteForTrack(snapshot.trackTitle, snapshot.artist, snapshot.album);
+    const palette = await this.paletteProvider(snapshot);
     const intervalSeconds = Math.max(config.flowIntervalSeconds, 1);
 
     let step = 0;

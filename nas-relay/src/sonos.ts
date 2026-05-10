@@ -152,20 +152,21 @@ export class SonosBridge extends EventEmitter {
       const isPlaying = String(transport.CurrentTransportState) === 'PLAYING';
       const positionSeconds = parseDuration(position.RelTime ?? '00:00:00');
       const durationSeconds = parseDuration(position.TrackDuration ?? '00:00:00');
+      const metadata = trackMetadataFromMetadata(position.TrackMetaData);
 
       // sonos-ts decodes the `currentTrack` event payload into structured
       // fields, but GetPositionInfo gives us back the raw DIDL — title /
       // artist / album live inside, so we either parse the DIDL or use the
       // device's lastTrack cache. The lastTrack cache is friendlier.
-      const trackTitle = coordinator.CurrentTrack?.Title ?? device.CurrentTrack?.Title ?? '';
-      const artist = coordinator.CurrentTrack?.Artist ?? device.CurrentTrack?.Artist ?? '';
-      const album = coordinator.CurrentTrack?.Album ?? device.CurrentTrack?.Album ?? '';
+      const trackTitle = firstNonEmpty(coordinator.CurrentTrack?.Title, device.CurrentTrack?.Title, metadata.title);
+      const artist = firstNonEmpty(coordinator.CurrentTrack?.Artist, device.CurrentTrack?.Artist, metadata.artist);
+      const album = firstNonEmpty(coordinator.CurrentTrack?.Album, device.CurrentTrack?.Album, metadata.album);
       const albumArtUri = absoluteAlbumArtUri(
         coordinator.CurrentTrack?.AlbumArtUri
           ?? coordinator.CurrentTrack?.AlbumArtURI
           ?? device.CurrentTrack?.AlbumArtUri
           ?? device.CurrentTrack?.AlbumArtURI
-          ?? albumArtUriFromMetadata(position.TrackMetaData),
+          ?? metadata.albumArtUri,
         coordinator.Host ?? device.Host,
       );
 
@@ -205,20 +206,71 @@ function parseDuration(s: string): number {
 }
 
 export function albumArtUriFromMetadata(metadata: unknown): string | null {
-  if (!metadata) return null;
-  if (typeof metadata !== 'string') {
-    return albumArtUriFromTrackObject(metadata);
-  }
-  const match = metadata.match(/<upnp:albumArtURI[^>]*>([^<]+)<\/upnp:albumArtURI>/i);
-  if (!match?.[1]) return null;
-  return decodeXmlEntities(match[1]);
+  return trackMetadataFromMetadata(metadata).albumArtUri;
 }
 
-function albumArtUriFromTrackObject(metadata: unknown): string | null {
-  if (!metadata || typeof metadata !== 'object') return null;
+export interface SonosTrackMetadata {
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  albumArtUri: string | null;
+}
+
+export function trackMetadataFromMetadata(metadata: unknown): SonosTrackMetadata {
+  if (!metadata) {
+    return emptyTrackMetadata();
+  }
+  if (typeof metadata !== 'string') {
+    return trackMetadataFromTrackObject(metadata);
+  }
+
+  return {
+    title: xmlTagValue(metadata, 'dc:title'),
+    artist: xmlTagValue(metadata, 'dc:creator') ?? xmlTagValue(metadata, 'upnp:artist'),
+    album: xmlTagValue(metadata, 'upnp:album'),
+    albumArtUri: xmlTagValue(metadata, 'upnp:albumArtURI'),
+  };
+}
+
+function trackMetadataFromTrackObject(metadata: unknown): SonosTrackMetadata {
+  if (!metadata || typeof metadata !== 'object') return emptyTrackMetadata();
   const track = metadata as Record<string, unknown>;
-  const value = track.AlbumArtUri ?? track.AlbumArtURI ?? track.albumArtUri;
-  return typeof value === 'string' && value.length > 0 ? value : null;
+
+  return {
+    title: firstObjectString(track.Title, track.title),
+    artist: firstObjectString(track.Artist, track.artist, track.Creator, track.creator),
+    album: firstObjectString(track.Album, track.album),
+    albumArtUri: firstObjectString(track.AlbumArtUri, track.AlbumArtURI, track.albumArtUri),
+  };
+}
+
+function emptyTrackMetadata(): SonosTrackMetadata {
+  return {
+    title: null,
+    artist: null,
+    album: null,
+    albumArtUri: null,
+  };
+}
+
+function xmlTagValue(xml: string, tag: string): string | null {
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = xml.match(new RegExp(`<${escapedTag}[^>]*>([^<]+)<\\/${escapedTag}>`, 'i'));
+  const value = match?.[1] ? decodeXmlEntities(match[1]).trim() : '';
+  return value.length > 0 ? value : null;
+}
+
+function firstNonEmpty(...values: Array<string | null | undefined>): string {
+  return firstObjectString(...values) ?? '';
+}
+
+function firstObjectString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return null;
 }
 
 function absoluteAlbumArtUri(uri: string | null | undefined, host: string | undefined): string | null {

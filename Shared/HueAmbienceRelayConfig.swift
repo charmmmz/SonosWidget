@@ -177,7 +177,7 @@ extension RelayManager {
                 sonosSpeakers: sonosSpeakers
             )
             try await RelayClient.putHueAmbienceConfig(baseURL: url, config: config)
-            hueAmbienceSyncStatus = .synced(Date())
+            updateHueAmbienceRuntimeStatus(configured: true, enabled: config.enabled)
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)
         }
@@ -192,6 +192,7 @@ extension RelayManager {
         hueAmbienceSyncStatus = .syncing
         do {
             try await RelayClient.deleteHueAmbienceConfig(baseURL: url)
+            updateHueAmbienceRuntimeStatus(configured: false)
             hueAmbienceSyncStatus = .idle
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)
@@ -206,7 +207,10 @@ extension RelayManager {
 
         do {
             let response = try await RelayClient.hueAmbienceStatus(baseURL: url)
-            hueAmbienceSyncStatus = response.status.configured ? .synced(Date()) : .idle
+            updateHueAmbienceRuntimeStatus(
+                configured: response.status.configured,
+                enabled: response.status.enabled != false
+            )
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)
         }

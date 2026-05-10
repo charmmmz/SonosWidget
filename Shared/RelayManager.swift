@@ -1,6 +1,11 @@
 import Foundation
 import Observation
 
+@MainActor
+protocol HueAmbienceRelayRuntimeProviding {
+    var shouldDeferLocalHueAmbience: Bool { get }
+}
+
 /// Optional NAS-side Live Activity relay. Runs as a global singleton because
 /// SettingsView, SonosManager, and the persisted UserDefaults entry all need
 /// to agree on one source of truth.
@@ -45,6 +50,7 @@ final class RelayManager {
 
     private(set) var urlString: String = ""
     private(set) var status: Status = .disabled
+    private(set) var isHueAmbienceRelayConfigured = false
     var hueAmbienceSyncStatus: HueAmbienceSyncStatus = .idle
 
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
@@ -64,6 +70,10 @@ final class RelayManager {
         return false
     }
 
+    var shouldDeferLocalHueAmbience: Bool {
+        isAvailable && isHueAmbienceRelayConfigured
+    }
+
     private init() {
         urlString = SharedStorage.relayURLString ?? ""
     }
@@ -79,6 +89,7 @@ final class RelayManager {
 
         if trimmed.isEmpty {
             status = .disabled
+            isHueAmbienceRelayConfigured = false
             hueAmbienceSyncStatus = .idle
             stopPeriodicProbe()
             return
@@ -104,6 +115,7 @@ final class RelayManager {
                 let health = try await RelayClient.health(baseURL: url)
                 guard !Task.isCancelled else { return }
                 self.status = .connected(groupCount: health.groups.count)
+                self.updateHueAmbienceRuntimeStatus(from: health.hueAmbience)
             } catch is CancellationError {
                 // Newer probe took over — its result is what matters.
             } catch {
@@ -135,4 +147,23 @@ final class RelayManager {
         periodicTask = nil
     }
 
+    func updateHueAmbienceRuntimeStatus(configured: Bool, enabled: Bool = true) {
+        isHueAmbienceRelayConfigured = configured && enabled
+        hueAmbienceSyncStatus = isHueAmbienceRelayConfigured ? .synced(Date()) : .idle
+    }
+
+    private func updateHueAmbienceRuntimeStatus(from health: RelayClient.HealthResponse.HueAmbience?) {
+        guard let health else {
+            updateHueAmbienceRuntimeStatus(configured: false)
+            return
+        }
+
+        updateHueAmbienceRuntimeStatus(
+            configured: health.configured == true,
+            enabled: health.enabled != false
+        )
+    }
+
 }
+
+extension RelayManager: HueAmbienceRelayRuntimeProviding {}

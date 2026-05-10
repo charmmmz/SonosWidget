@@ -1,8 +1,11 @@
 import crypto from 'node:crypto';
 import type { HueRGBColor, HueXYColor } from './hueTypes.js';
 
-export function stablePaletteForTrack(title = '', artist = '', album = ''): HueRGBColor[] {
-  const seed = `${title.trim()}|${artist.trim()}|${album.trim()}` || 'Charm Music Ambience';
+export function stablePaletteForTrack(title = '', artist = '', album = '', fallbackKey = ''): HueRGBColor[] {
+  const seed = [title, artist, album, fallbackKey]
+    .map(value => value.trim())
+    .filter(value => value.length > 0)
+    .join('|') || 'Charm Music Ambience';
   const digest = crypto.createHash('sha256').update(seed).digest();
   const colors: HueRGBColor[] = [];
 
