@@ -51,6 +51,7 @@ final class RelayManager {
     private(set) var urlString: String = ""
     private(set) var status: Status = .disabled
     private(set) var isHueAmbienceRelayConfigured = false
+    private(set) var isHueAmbienceRelayEnabled = false
     var hueAmbienceSyncStatus: HueAmbienceSyncStatus = .idle
 
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
@@ -71,7 +72,7 @@ final class RelayManager {
     }
 
     var shouldDeferLocalHueAmbience: Bool {
-        isAvailable && isHueAmbienceRelayConfigured
+        isAvailable && isHueAmbienceRelayConfigured && isHueAmbienceRelayEnabled
     }
 
     private init() {
@@ -90,6 +91,7 @@ final class RelayManager {
         if trimmed.isEmpty {
             status = .disabled
             isHueAmbienceRelayConfigured = false
+            isHueAmbienceRelayEnabled = false
             hueAmbienceSyncStatus = .idle
             stopPeriodicProbe()
             return
@@ -148,8 +150,9 @@ final class RelayManager {
     }
 
     func updateHueAmbienceRuntimeStatus(configured: Bool, enabled: Bool = true) {
-        isHueAmbienceRelayConfigured = configured && enabled
-        hueAmbienceSyncStatus = isHueAmbienceRelayConfigured ? .synced(Date()) : .idle
+        isHueAmbienceRelayConfigured = configured
+        isHueAmbienceRelayEnabled = configured && enabled
+        hueAmbienceSyncStatus = configured ? .synced(Date()) : .idle
     }
 
     private func updateHueAmbienceRuntimeStatus(from health: RelayClient.HealthResponse.HueAmbience?) {

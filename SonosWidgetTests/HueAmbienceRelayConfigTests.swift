@@ -88,6 +88,30 @@ final class HueAmbienceRelayConfigTests: XCTestCase {
             XCTAssertEqual(error as? HueAmbienceRelayConfigError, .missingApplicationKey)
         }
     }
+
+    func testRelayConfigEncodesDisabledState() throws {
+        let suiteName = "HueAmbienceRelayConfigTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = HueAmbienceStore(storage: HueAmbienceDefaults(defaults: defaults))
+        store.isEnabled = false
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.50.216", name: "Hue Bridge")
+
+        let credentials = InMemoryHueRelayCredentialStorage()
+        let credentialStore = HueCredentialStore(storage: credentials)
+        credentialStore.saveApplicationKey("hue-secret", forBridgeID: "bridge-1")
+
+        let config = try HueAmbienceRelayConfig(
+            store: store,
+            credentialStore: credentialStore,
+            sonosSpeakers: []
+        )
+        let data = try JSONEncoder().encode(config)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object["enabled"] as? Bool, false)
+    }
 }
 
 private final class InMemoryHueRelayCredentialStorage: HueCredentialStorage {

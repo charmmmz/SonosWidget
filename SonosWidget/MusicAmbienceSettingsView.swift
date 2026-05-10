@@ -12,6 +12,19 @@ struct MusicAmbienceSetupPresentationState: Equatable {
     }
 }
 
+@MainActor
+struct MusicAmbienceSettingsSyncActions {
+    let refreshStatus: () -> Void
+    let canSyncToRelay: () -> Bool
+    let syncToRelay: () async -> Void
+
+    func enabledChanged() async {
+        refreshStatus()
+        guard canSyncToRelay() else { return }
+        await syncToRelay()
+    }
+}
+
 struct MusicAmbienceSettingsView: View {
     @Bindable var store: HueAmbienceStore
     @Bindable var manager: MusicAmbienceManager
@@ -70,8 +83,28 @@ struct MusicAmbienceSettingsView: View {
             Text("Uses album artwork colors for Hue ambience. Without a NAS, continuous background syncing is limited by iOS.")
         }
         .onChange(of: store.isEnabled) {
-            manager.refreshStatus()
+            let actions = syncActions
+            Task {
+                await actions.enabledChanged()
+            }
         }
+    }
+
+    private var syncActions: MusicAmbienceSettingsSyncActions {
+        MusicAmbienceSettingsSyncActions(
+            refreshStatus: {
+                manager.refreshStatus()
+            },
+            canSyncToRelay: {
+                canSyncToRelay
+            },
+            syncToRelay: {
+                await relay.pushHueAmbienceConfig(
+                    store: store,
+                    sonosSpeakers: sonosSpeakers
+                )
+            }
+        )
     }
 
     private var canSyncToRelay: Bool {
