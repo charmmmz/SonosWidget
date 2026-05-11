@@ -24,6 +24,21 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertEqual(decoded.capability, .liveEntertainment)
     }
 
+    func testMappingSupportsDirectLightTarget() throws {
+        let mapping = HueSonosMapping(
+            sonosID: "RINCON_desk",
+            sonosName: "Desk",
+            preferredTarget: .light("light-1"),
+            capability: .gradientReady
+        )
+
+        let data = try JSONEncoder().encode(mapping)
+        let decoded = try JSONDecoder().decode(HueSonosMapping.self, from: data)
+
+        XCTAssertEqual(decoded.preferredTarget, .light("light-1"))
+        XCTAssertEqual(decoded.preferredTarget?.id, "light-1")
+    }
+
     func testOlderMappingPayloadDefaultsIncludedLightsToEmpty() throws {
         let data = """
         {
@@ -347,6 +362,57 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertFalse(didUpdate)
         XCTAssertTrue(store.hueLights.isEmpty)
         XCTAssertTrue(store.hueAreas.isEmpty)
+    }
+
+    func testUpdatingResourcesRemovesStaleMappingTargetsAndLightOverrides() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+        store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue")
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "study",
+            sonosName: "Study",
+            preferredTarget: .room("study-room"),
+            fallbackTarget: .zone("old-zone"),
+            includedLightIDs: ["study-lamp", "old-lamp"],
+            excludedLightIDs: ["old-lamp"]
+        ))
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "old",
+            sonosName: "Old Room",
+            preferredTarget: .room("old-room")
+        ))
+
+        store.updateResources(HueBridgeResources(
+            lights: [
+                HueLightResource(
+                    id: "study-lamp",
+                    name: "台灯",
+                    ownerID: "study-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true
+                )
+            ],
+            areas: [
+                HueAreaResource(
+                    id: "study-room",
+                    name: "Study",
+                    kind: .room,
+                    childLightIDs: ["study-lamp", "old-lamp"],
+                    childDeviceIDs: ["study-device"]
+                )
+            ]
+        ))
+
+        XCTAssertEqual(store.mappings.map(\.sonosID), ["study"])
+        XCTAssertEqual(store.mappings.first?.fallbackTarget, nil)
+        XCTAssertEqual(store.mappings.first?.includedLightIDs, ["study-lamp"])
+        XCTAssertEqual(store.mappings.first?.excludedLightIDs, [])
+        XCTAssertEqual(store.hueAreas.first?.childLightIDs, ["study-lamp"])
     }
 
     func testRemovingBridgeClearsMappingsAndDisablesSync() {

@@ -95,6 +95,65 @@ test('target resolution matches relay group id and keeps exclusions winning over
   assert.deepEqual(targets[0]!.lights.map(l => l.id), ['decor-gradient', 'old-cache']);
 });
 
+test('target resolution supports direct light targets by id', () => {
+  const directLightConfig: HueAmbienceRuntimeConfig = {
+    ...config,
+    resources: {
+      lights: [
+        {
+          id: 'study-lamp',
+          name: '台灯',
+          ownerID: 'study-device',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'functional',
+          functionMetadataResolved: true,
+        },
+        {
+          id: 'bedroom-lamp',
+          name: '台灯',
+          ownerID: 'bedroom-device',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'decorative',
+          functionMetadataResolved: true,
+        },
+      ],
+      areas: [],
+    },
+    mappings: [
+      {
+        sonosID: 'study',
+        sonosName: 'Study',
+        relayGroupID: '192.168.50.25',
+        preferredTarget: { kind: 'light', id: 'study-lamp' },
+        fallbackTarget: null,
+        includedLightIDs: [],
+        excludedLightIDs: [],
+        capability: 'basic',
+      },
+    ],
+  };
+
+  const targets = resolveHueTargets(directLightConfig, {
+    groupId: '192.168.50.25',
+    speakerName: 'Study',
+    trackTitle: 'A',
+    artist: 'B',
+    album: 'C',
+    isPlaying: true,
+    positionSeconds: 1,
+    durationSeconds: 120,
+    groupMemberCount: 1,
+    sampledAt: new Date('2026-05-11T00:00:00Z'),
+  });
+
+  assert.deepEqual(targets.map(t => t.area.id), ['study-lamp']);
+  assert.deepEqual(targets[0]!.lights.map(l => l.id), ['study-lamp']);
+});
+
 test('target resolution scopes duplicate named lights to area devices', () => {
   const duplicateNameConfig: HueAmbienceRuntimeConfig = {
     ...config,
@@ -139,6 +198,138 @@ test('target resolution scopes duplicate named lights to area devices', () => {
         preferredTarget: { kind: 'room', id: 'room-1' },
         fallbackTarget: null,
         includedLightIDs: [],
+        excludedLightIDs: [],
+        capability: 'basic',
+      },
+    ],
+  };
+
+  const targets = resolveHueTargets(duplicateNameConfig, {
+    groupId: '192.168.50.25',
+    speakerName: 'Study',
+    trackTitle: 'A',
+    artist: 'B',
+    album: 'C',
+    isPlaying: true,
+    positionSeconds: 1,
+    durationSeconds: 120,
+    groupMemberCount: 1,
+    sampledAt: new Date('2026-05-11T00:00:00Z'),
+  });
+
+  assert.deepEqual(targets[0]!.lights.map(l => l.id), ['study-lamp']);
+});
+
+test('target resolution does not fallback to duplicate decorative lights when area ownership is unknown', () => {
+  const duplicateNameConfig: HueAmbienceRuntimeConfig = {
+    ...config,
+    resources: {
+      lights: [
+        {
+          id: 'study-lamp',
+          name: '台灯',
+          ownerID: 'study-device',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'functional',
+          functionMetadataResolved: true,
+        },
+        {
+          id: 'bedroom-lamp',
+          name: '台灯',
+          ownerID: 'bedroom-device',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'decorative',
+          functionMetadataResolved: true,
+        },
+      ],
+      areas: [
+        {
+          id: 'room-1',
+          name: 'Study',
+          kind: 'room',
+          childLightIDs: ['study-lamp', 'bedroom-lamp'],
+          childDeviceIDs: [],
+        },
+      ],
+    },
+    mappings: [
+      {
+        sonosID: 'study',
+        sonosName: 'Study',
+        relayGroupID: '192.168.50.25',
+        preferredTarget: { kind: 'room', id: 'room-1' },
+        fallbackTarget: null,
+        includedLightIDs: [],
+        excludedLightIDs: [],
+        capability: 'basic',
+      },
+    ],
+  };
+
+  const targets = resolveHueTargets(duplicateNameConfig, {
+    groupId: '192.168.50.25',
+    speakerName: 'Study',
+    trackTitle: 'A',
+    artist: 'B',
+    album: 'C',
+    isPlaying: true,
+    positionSeconds: 1,
+    durationSeconds: 120,
+    groupMemberCount: 1,
+    sampledAt: new Date('2026-05-11T00:00:00Z'),
+  });
+
+  assert.deepEqual(targets, []);
+});
+
+test('target resolution uses only explicit lights when area ownership is unknown', () => {
+  const duplicateNameConfig: HueAmbienceRuntimeConfig = {
+    ...config,
+    resources: {
+      lights: [
+        {
+          id: 'study-lamp',
+          name: '台灯',
+          ownerID: 'study-device',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'functional',
+          functionMetadataResolved: true,
+        },
+        {
+          id: 'bedroom-lamp',
+          name: '台灯',
+          ownerID: 'bedroom-device',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'decorative',
+          functionMetadataResolved: true,
+        },
+      ],
+      areas: [
+        {
+          id: 'room-1',
+          name: 'Study',
+          kind: 'room',
+          childLightIDs: ['study-lamp', 'bedroom-lamp'],
+          childDeviceIDs: [],
+        },
+      ],
+    },
+    mappings: [
+      {
+        sonosID: 'study',
+        sonosName: 'Study',
+        relayGroupID: '192.168.50.25',
+        preferredTarget: { kind: 'room', id: 'room-1' },
+        fallbackTarget: null,
+        includedLightIDs: ['study-lamp'],
         excludedLightIDs: [],
         capability: 'basic',
       },

@@ -14,10 +14,11 @@ enum HueAmbienceTarget: Codable, Equatable, Hashable, Sendable {
     case entertainmentArea(String)
     case room(String)
     case zone(String)
+    case light(String)
 
     var id: String {
         switch self {
-        case .entertainmentArea(let id), .room(let id), .zone(let id):
+        case .entertainmentArea(let id), .room(let id), .zone(let id), .light(let id):
             return id
         }
     }
@@ -326,6 +327,7 @@ struct HueAreaResource: Codable, Equatable, Identifiable, Sendable {
         case entertainmentArea
         case room
         case zone
+        case light
 
         var label: String {
             switch self {
@@ -335,6 +337,8 @@ struct HueAreaResource: Codable, Equatable, Identifiable, Sendable {
                 return "Room"
             case .zone:
                 return "Zone"
+            case .light:
+                return "Light"
             }
         }
     }
@@ -384,18 +388,38 @@ struct HueAreaResource: Codable, Equatable, Identifiable, Sendable {
             return .room(id)
         case .zone:
             return .zone(id)
+        case .light:
+            return .light(id)
         }
     }
 }
 
 enum HueAmbienceAreaOptions {
     static func displayAreas(from areas: [HueAreaResource]) -> [HueAreaResource] {
-        let entertainmentAreas = areas.filter { $0.kind == .entertainmentArea }
-        if !entertainmentAreas.isEmpty {
-            return entertainmentAreas
-        }
+        displayAreas(from: areas, lights: [])
+    }
 
-        return areas.filter { $0.kind == .room || $0.kind == .zone }
+    static func displayAreas(from areas: [HueAreaResource], lights: [HueLightResource]) -> [HueAreaResource] {
+        let lightTargets = lights
+            .filter(\.supportsColor)
+            .map { light in
+                HueAreaResource(
+                    id: light.id,
+                    name: light.name,
+                    kind: .light,
+                    childLightIDs: [light.id],
+                    childDeviceIDs: light.ownerID.map { [$0] } ?? []
+                )
+            }
+
+        return (areas + lightTargets).sorted { lhs, rhs in
+            let lhsRank = sortRank(lhs.kind)
+            let rhsRank = sortRank(rhs.kind)
+            if lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
     }
 
     static func mapping(
@@ -424,5 +448,18 @@ enum HueAmbienceAreaOptions {
         let childLightIDs = Set(area.childLightIDs)
         let hasGradientLight = lights.contains { childLightIDs.contains($0.id) && $0.supportsGradient }
         return hasGradientLight ? .gradientReady : .basic
+    }
+
+    private static func sortRank(_ kind: HueAreaResource.Kind) -> Int {
+        switch kind {
+        case .entertainmentArea:
+            return 0
+        case .room:
+            return 1
+        case .zone:
+            return 2
+        case .light:
+            return 3
+        }
     }
 }

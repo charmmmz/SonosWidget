@@ -1,6 +1,6 @@
 import type { SonosGroupSnapshot } from './types.js';
 
-export type HueAmbienceTargetKind = 'entertainmentArea' | 'room' | 'zone';
+export type HueAmbienceTargetKind = 'entertainmentArea' | 'room' | 'zone' | 'light';
 export type HueAmbienceCapability = 'basic' | 'gradientReady' | 'liveEntertainment';
 export type HueGroupSyncStrategy = 'allMappedRooms' | 'coordinatorOnly';
 export type HueAmbienceStopBehavior = 'leaveCurrent' | 'turnOff';

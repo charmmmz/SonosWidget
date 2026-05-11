@@ -1,7 +1,12 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import type { HueAmbienceRuntimeConfig, HueAmbienceStatus } from './hueTypes.js';
+import type {
+  HueAmbienceRuntimeConfig,
+  HueAmbienceStatus,
+  HueAmbienceTarget,
+  HueSonosMapping,
+} from './hueTypes.js';
 
 const DEFAULT_FILE_NAME = 'hue-ambience-config.json';
 
@@ -69,6 +74,29 @@ export class HueAmbienceConfigStore {
 
 function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeConfig {
   const flowIntervalSeconds = intervalOverride() ?? config.flowIntervalSeconds ?? 8;
+  const validLightIDs = new Set((config.resources?.lights ?? []).map(light => light.id));
+  const validAreaTargets = new Set((config.resources?.areas ?? []).map(area => `${area.kind}:${area.id}`));
+  const isValidTarget = (target?: HueAmbienceTarget | null): target is HueAmbienceTarget => {
+    if (!target) return false;
+    if (target.kind === 'light') return validLightIDs.has(target.id);
+    return validAreaTargets.has(`${target.kind}:${target.id}`);
+  };
+  const mappings: HueSonosMapping[] = [];
+  for (const mapping of config.mappings ?? []) {
+    const preferredTarget = isValidTarget(mapping.preferredTarget) ? mapping.preferredTarget : null;
+    const fallbackTarget = isValidTarget(mapping.fallbackTarget) ? mapping.fallbackTarget : null;
+    const resolvedPreferredTarget = preferredTarget ?? fallbackTarget;
+    if (!resolvedPreferredTarget) continue;
+
+    mappings.push({
+      ...mapping,
+      preferredTarget: resolvedPreferredTarget,
+      fallbackTarget: preferredTarget ? fallbackTarget : null,
+      includedLightIDs: (mapping.includedLightIDs ?? []).filter(id => validLightIDs.has(id)),
+      excludedLightIDs: (mapping.excludedLightIDs ?? []).filter(id => validLightIDs.has(id)),
+    });
+  }
+
   return {
     ...config,
     enabled: config.enabled && (process.env.HUE_AMBIENCE_ENABLED ?? 'true') !== 'false',
@@ -76,15 +104,11 @@ function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeCo
       lights: config.resources?.lights ?? [],
       areas: (config.resources?.areas ?? []).map(area => ({
         ...area,
-        childLightIDs: area.childLightIDs ?? [],
+        childLightIDs: (area.childLightIDs ?? []).filter(id => validLightIDs.has(id)),
         childDeviceIDs: area.childDeviceIDs ?? [],
       })),
     },
-    mappings: (config.mappings ?? []).map(mapping => ({
-      ...mapping,
-      includedLightIDs: mapping.includedLightIDs ?? [],
-      excludedLightIDs: mapping.excludedLightIDs ?? [],
-    })),
+    mappings,
     groupStrategy: config.groupStrategy ?? 'allMappedRooms',
     stopBehavior: config.stopBehavior ?? 'leaveCurrent',
     motionStyle: config.motionStyle ?? 'flowing',

@@ -57,6 +57,66 @@ test('config store status redacts application key', async () => {
   }
 });
 
+test('config store drops stale Hue targets and light overrides', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hue-config-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save({
+      ...config,
+      resources: {
+        lights: [
+          {
+            id: 'study-lamp',
+            name: '台灯',
+            supportsColor: true,
+            supportsGradient: false,
+            supportsEntertainment: true,
+            function: 'decorative',
+            functionMetadataResolved: true,
+          },
+        ],
+        areas: [
+          {
+            id: 'study-room',
+            name: 'Study',
+            kind: 'room',
+            childLightIDs: ['study-lamp', 'old-lamp'],
+            childDeviceIDs: ['study-device'],
+          },
+        ],
+      },
+      mappings: [
+        {
+          sonosID: 'study',
+          sonosName: 'Study',
+          preferredTarget: { kind: 'room', id: 'study-room' },
+          fallbackTarget: { kind: 'zone', id: 'old-zone' },
+          includedLightIDs: ['study-lamp', 'old-lamp'],
+          excludedLightIDs: ['old-lamp'],
+          capability: 'basic',
+        },
+        {
+          sonosID: 'old',
+          sonosName: 'Old Room',
+          preferredTarget: { kind: 'room', id: 'old-room' },
+          fallbackTarget: null,
+          includedLightIDs: [],
+          excludedLightIDs: [],
+          capability: 'basic',
+        },
+      ],
+    });
+
+    assert.deepEqual(store.current?.resources.areas[0]?.childLightIDs, ['study-lamp']);
+    assert.deepEqual(store.current?.mappings.map(mapping => mapping.sonosID), ['study']);
+    assert.equal(store.current?.mappings[0]?.fallbackTarget, null);
+    assert.deepEqual(store.current?.mappings[0]?.includedLightIDs, ['study-lamp']);
+    assert.deepEqual(store.current?.mappings[0]?.excludedLightIDs, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('config store uses flow interval environment override', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'hue-config-'));
   const previous = process.env.HUE_FLOW_INTERVAL_SECONDS;

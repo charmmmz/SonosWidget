@@ -111,16 +111,28 @@ final class MusicAmbienceManagerTests: XCTestCase {
         XCTAssertEqual(snapshot.albumArtImage, Data([1, 2, 3]))
     }
 
-    func testAreaOptionsPreferEntertainmentAreasOverRoomsAndZones() {
+    func testAreaOptionsListEveryTargetTypeWithEntertainmentFirst() {
         let areas = [
             HueAreaResource(id: "room-1", name: "Living Room", kind: .room, childLightIDs: ["light-1"]),
             HueAreaResource(id: "ent-1", name: "Living Sync", kind: .entertainmentArea, childLightIDs: ["light-1"]),
             HueAreaResource(id: "zone-1", name: "Downstairs", kind: .zone, childLightIDs: ["light-2"])
         ]
+        let lights = [
+            HueLightResource(
+                id: "light-3",
+                name: "Desk Lamp",
+                ownerID: "device-3",
+                supportsColor: true,
+                supportsGradient: false,
+                supportsEntertainment: true
+            )
+        ]
 
-        let options = HueAmbienceAreaOptions.displayAreas(from: areas)
+        let options = HueAmbienceAreaOptions.displayAreas(from: areas, lights: lights)
 
-        XCTAssertEqual(options.map(\.id), ["ent-1"])
+        XCTAssertEqual(options.map(\.id), ["ent-1", "room-1", "zone-1", "light-3"])
+        XCTAssertEqual(options.last?.kind, .light)
+        XCTAssertEqual(options.last?.childLightIDs, ["light-3"])
     }
 
     func testAreaOptionsCreateRoomMappingWithGradientCapability() {
@@ -401,7 +413,8 @@ final class MusicAmbienceManagerTests: XCTestCase {
                     id: "room-1",
                     name: "Living Room",
                     kind: .room,
-                    childLightIDs: ["light-1", "light-2"]
+                    childLightIDs: ["light-1", "light-2"],
+                    childDeviceIDs: ["room-1"]
                 )
             ],
             lights: [
@@ -435,6 +448,42 @@ final class MusicAmbienceManagerTests: XCTestCase {
         XCTAssertEqual(targets.map(\.areaID), ["room-1"])
         XCTAssertEqual(targets.first?.lightIDs, ["light-1"])
         XCTAssertEqual(targets.first?.lightsByID["light-1"]?.supportsGradient, true)
+    }
+
+    func testStoredResolverSupportsDirectLightTarget() {
+        let resolver = StoredHueTargetResolver(
+            areas: [],
+            lights: [
+                HueLightResource(
+                    id: "study-lamp",
+                    name: "台灯",
+                    ownerID: "study-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .functional
+                ),
+                HueLightResource(
+                    id: "bedroom-lamp",
+                    name: "台灯",
+                    ownerID: "bedroom-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .decorative
+                )
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "study",
+            sonosName: "Study",
+            preferredTarget: .light("study-lamp")
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertEqual(targets.map(\.areaID), ["study-lamp"])
+        XCTAssertEqual(targets.first?.lightIDs, ["study-lamp"])
     }
 
     func testStoredResolverSkipsFunctionalLightsByDefault() {
@@ -610,6 +659,144 @@ final class MusicAmbienceManagerTests: XCTestCase {
         let targets = resolver.resolveTargets(for: [mapping])
 
         XCTAssertEqual(targets.first?.lightIDs, ["study-lamp"])
+    }
+
+    func testStoredResolverDoesNotFallbackToDuplicateDecorativeLightWhenAreaOwnershipIsUnknown() {
+        let resolver = StoredHueTargetResolver(
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Study",
+                    kind: .room,
+                    childLightIDs: ["study-lamp", "bedroom-lamp"],
+                    childDeviceIDs: []
+                )
+            ],
+            lights: [
+                HueLightResource(
+                    id: "study-lamp",
+                    name: "台灯",
+                    ownerID: "study-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .functional
+                ),
+                HueLightResource(
+                    id: "bedroom-lamp",
+                    name: "台灯",
+                    ownerID: "bedroom-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .decorative
+                )
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "study",
+            sonosName: "Study",
+            preferredTarget: .room("room-1")
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertTrue(targets.isEmpty)
+    }
+
+    func testStoredResolverUsesOnlyExplicitLightsWhenAreaOwnershipIsUnknown() {
+        let resolver = StoredHueTargetResolver(
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Study",
+                    kind: .room,
+                    childLightIDs: ["study-lamp", "bedroom-lamp"],
+                    childDeviceIDs: []
+                )
+            ],
+            lights: [
+                HueLightResource(
+                    id: "study-lamp",
+                    name: "台灯",
+                    ownerID: "study-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .functional
+                ),
+                HueLightResource(
+                    id: "bedroom-lamp",
+                    name: "台灯",
+                    ownerID: "bedroom-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .decorative
+                )
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "study",
+            sonosName: "Study",
+            preferredTarget: .room("room-1"),
+            includedLightIDs: ["study-lamp"]
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertEqual(targets.first?.lightIDs, ["study-lamp"])
+    }
+
+    func testStoredResolverDoesNotUseFallbackWhenPreferredAreaHasNoEligibleLights() {
+        let resolver = StoredHueTargetResolver(
+            areas: [
+                HueAreaResource(
+                    id: "study-room",
+                    name: "Study",
+                    kind: .room,
+                    childLightIDs: ["study-lamp"],
+                    childDeviceIDs: ["study-device"]
+                ),
+                HueAreaResource(
+                    id: "bedroom-zone",
+                    name: "Bedroom",
+                    kind: .zone,
+                    childLightIDs: ["bedroom-lamp"],
+                    childDeviceIDs: ["bedroom-device"]
+                )
+            ],
+            lights: [
+                HueLightResource(
+                    id: "study-lamp",
+                    name: "台灯",
+                    ownerID: "study-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .functional
+                ),
+                HueLightResource(
+                    id: "bedroom-lamp",
+                    name: "台灯",
+                    ownerID: "bedroom-device",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .decorative
+                )
+            ]
+        )
+        let mapping = HueSonosMapping(
+            sonosID: "study",
+            sonosName: "Study",
+            preferredTarget: .room("study-room"),
+            fallbackTarget: .zone("bedroom-zone")
+        )
+
+        let targets = resolver.resolveTargets(for: [mapping])
+
+        XCTAssertTrue(targets.isEmpty)
     }
 
     private func makeTarget() -> HueResolvedAmbienceTarget {

@@ -303,7 +303,9 @@ final class HueAmbienceStore {
     }
 
     func updateResources(_ resources: HueBridgeResources) {
-        hueResources = resources
+        let sanitizedResources = resources.sanitizedForAmbience()
+        hueResources = sanitizedResources
+        mappings = mappings.compactMap { $0.sanitized(for: sanitizedResources) }
     }
 
     func updateResources(_ resources: HueBridgeResources, forBridgeID bridgeID: String) -> Bool {
@@ -342,5 +344,55 @@ final class HueAmbienceStore {
     private static func decode<T: Decodable>(_ type: T.Type, from data: Data?) -> T? {
         guard let data else { return nil }
         return try? JSONDecoder().decode(type, from: data)
+    }
+}
+
+private extension HueBridgeResources {
+    func sanitizedForAmbience() -> HueBridgeResources {
+        let validLightIDs = Set(lights.map(\.id))
+        return HueBridgeResources(
+            lights: lights,
+            areas: areas.map { area in
+                HueAreaResource(
+                    id: area.id,
+                    name: area.name,
+                    kind: area.kind,
+                    childLightIDs: area.childLightIDs.filter { validLightIDs.contains($0) },
+                    childDeviceIDs: area.childDeviceIDs
+                )
+            }
+        )
+    }
+
+    func containsTarget(_ target: HueAmbienceTarget?) -> Bool {
+        guard let target else {
+            return false
+        }
+
+        switch target {
+        case .light(let id):
+            return lights.contains { $0.id == id }
+        case .entertainmentArea, .room, .zone:
+            return areas.contains { $0.id == target.id && $0.ambienceTarget == target }
+        }
+    }
+}
+
+private extension HueSonosMapping {
+    func sanitized(for resources: HueBridgeResources) -> HueSonosMapping? {
+        let validLightIDs = Set(resources.lights.map(\.id))
+        let resolvedPreferred = resources.containsTarget(preferredTarget) ? preferredTarget : nil
+        let resolvedFallback = resources.containsTarget(fallbackTarget) ? fallbackTarget : nil
+
+        guard let target = resolvedPreferred ?? resolvedFallback else {
+            return nil
+        }
+
+        var mapping = self
+        mapping.preferredTarget = target
+        mapping.fallbackTarget = resolvedPreferred == nil ? nil : resolvedFallback
+        mapping.includedLightIDs = includedLightIDs.intersection(validLightIDs)
+        mapping.excludedLightIDs = excludedLightIDs.intersection(validLightIDs)
+        return mapping
     }
 }

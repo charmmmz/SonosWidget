@@ -47,9 +47,9 @@ export function resolveHueTargets(
       const lights = area.childLightIDs
         .map(id => lightsByID.get(id))
         .filter((light): light is HueLightResource => Boolean(light))
-        .filter(light => lightBelongsToAreaDevice(light, area))
+        .filter(light => lightBelongsToAreaDevice(light, area, mapping))
         .filter(light => light.supportsColor)
-        .filter(light => shouldUseLightForAmbience(light, mapping));
+        .filter(light => area.kind === 'light' || shouldUseLightForAmbience(light, mapping));
 
       if (lights.length === 0) return [];
       return [{ area, mapping, lights }];
@@ -121,13 +121,33 @@ function resolveArea(
   target: HueSonosMapping['preferredTarget'],
 ) {
   if (!target) return undefined;
+  if (target.kind === 'light') {
+    const light = config.resources.lights.find(candidate => candidate.id === target.id);
+    if (!light) return undefined;
+    return {
+      id: light.id,
+      name: light.name,
+      kind: 'light' as const,
+      childLightIDs: [light.id],
+      childDeviceIDs: light.ownerID ? [light.ownerID] : [],
+    };
+  }
   return config.resources.areas.find(area => area.id === target.id && area.kind === target.kind)
     ?? config.resources.areas.find(area => area.id === target.id);
 }
 
-function lightBelongsToAreaDevice(light: HueLightResource, area: { childDeviceIDs?: string[] }): boolean {
+function lightBelongsToAreaDevice(
+  light: HueLightResource,
+  area: { kind?: string; childDeviceIDs?: string[] },
+  mapping: HueSonosMapping,
+): boolean {
+  if (area.kind === 'light' || mapping.includedLightIDs.includes(light.id)) {
+    return true;
+  }
+
   const childDeviceIDs = area.childDeviceIDs ?? [];
-  if (childDeviceIDs.length === 0 || !light.ownerID) return true;
+  if (childDeviceIDs.length === 0) return !light.ownerID;
+  if (!light.ownerID) return false;
   return childDeviceIDs.includes(light.ownerID);
 }
 

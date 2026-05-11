@@ -38,18 +38,19 @@ struct StoredHueTargetResolver: HueTargetResolving {
                           let light = lightsByID[lightID] else {
                         return false
                     }
-                    guard Self.area(area, contains: light) else {
+                    guard Self.area(area, canUse: light, mapping: mapping) else {
                         return false
                     }
 
-                    return light.participatesInAmbienceByDefault
+                    return area.kind == .light
+                        || light.participatesInAmbienceByDefault
                         || mapping.includedLightIDs.contains(lightID)
                 }
                 guard !lightIDs.isEmpty else {
-                    continue
+                    return nil
                 }
                 guard seenAreaIDs.insert(area.id).inserted else {
-                    continue
+                    return nil
                 }
 
                 return HueResolvedAmbienceTarget(
@@ -63,17 +64,38 @@ struct StoredHueTargetResolver: HueTargetResolving {
         }
     }
 
-    private static func area(_ area: HueAreaResource, contains light: HueLightResource) -> Bool {
-        guard !area.childDeviceIDs.isEmpty,
-              let ownerID = light.ownerID else {
+    private static func area(
+        _ area: HueAreaResource,
+        canUse light: HueLightResource,
+        mapping: HueSonosMapping
+    ) -> Bool {
+        if area.kind == .light || mapping.includedLightIDs.contains(light.id) {
             return true
+        }
+
+        guard !area.childDeviceIDs.isEmpty else {
+            return light.ownerID == nil
+        }
+
+        guard let ownerID = light.ownerID else {
+            return false
         }
 
         return area.childDeviceIDs.contains(ownerID)
     }
 
     private func area(for target: HueAmbienceTarget) -> HueAreaResource? {
-        areas.first { area in
+        if case .light(let id) = target, let light = lights.first(where: { $0.id == id }) {
+            return HueAreaResource(
+                id: light.id,
+                name: light.name,
+                kind: .light,
+                childLightIDs: [light.id],
+                childDeviceIDs: light.ownerID.map { [$0] } ?? []
+            )
+        }
+
+        return areas.first { area in
             area.id == target.id && area.kind.matches(target)
         } ?? areas.first { area in
             area.id == target.id
@@ -203,7 +225,8 @@ private extension HueAreaResource.Kind {
         switch (self, target) {
         case (.entertainmentArea, .entertainmentArea),
              (.room, .room),
-             (.zone, .zone):
+             (.zone, .zone),
+             (.light, .light):
             return true
         default:
             return false

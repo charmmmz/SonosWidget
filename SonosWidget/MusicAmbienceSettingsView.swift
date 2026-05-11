@@ -216,7 +216,7 @@ struct MusicAmbienceSettingsView: View {
         if let bridge = store.bridge {
             return "\(bridge.name) · \(store.mappings.count) assignment\(store.mappings.count == 1 ? "" : "s")"
         }
-        return "Pair a Hue Bridge and assign Entertainment Areas to Sonos rooms."
+        return "Pair a Hue Bridge and assign Hue targets to Sonos rooms."
     }
 }
 
@@ -226,6 +226,7 @@ struct HueAmbienceSetupSheet: View {
     let sonosSpeakers: [SonosPlayer]
 
     @Environment(\.dismiss) private var dismiss
+    @Bindable private var relay = RelayManager.shared
     @State private var bridgeIP = ""
     @State private var bridgeName = "Hue Bridge"
     @State private var discoveredBridges: [HueBridgeInfo] = []
@@ -235,6 +236,7 @@ struct HueAmbienceSetupSheet: View {
     @State private var setupError: String?
     @State private var isBusy = false
     @State private var isManualBridgeExpanded = false
+    @State private var isResetConfirmationPresented = false
 
     var body: some View {
         NavigationStack {
@@ -256,6 +258,13 @@ struct HueAmbienceSetupSheet: View {
             .onAppear {
                 loadStoredBridgeState()
             }
+            .confirmationDialog("Reset Music Ambience?", isPresented: $isResetConfirmationPresented) {
+                Button("Reset Music Ambience", role: .destructive) {
+                    Task { await resetMusicAmbience() }
+                }
+            } message: {
+                Text("This clears the paired Hue Bridge, assignments, cached Hue resources, and the NAS relay Music Ambience config.")
+            }
         }
     }
 
@@ -263,7 +272,7 @@ struct HueAmbienceSetupSheet: View {
         Section {
             if let bridge = store.bridge {
                 LabeledContent("Bridge", value: "\(bridge.name) · \(bridge.ipAddress)")
-                LabeledContent("Hue Areas", value: "\(assignmentAreas.count)")
+                LabeledContent("Hue Targets", value: "\(assignmentAreas.count)")
             }
 
             HStack {
@@ -281,7 +290,15 @@ struct HueAmbienceSetupSheet: View {
                     Button {
                         Task { await refreshHueResources() }
                     } label: {
-                        Label("Refresh Areas", systemImage: "arrow.clockwise")
+                        Label("Refresh Hue Data", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(isBusy)
+
+                    Button(role: .destructive) {
+                        isResetConfirmationPresented = true
+                    } label: {
+                        Label("Reset", systemImage: "trash")
                     }
                     .buttonStyle(.borderless)
                     .disabled(isBusy)
@@ -329,7 +346,7 @@ struct HueAmbienceSetupSheet: View {
         } header: {
             Text("Connection")
         } footer: {
-            Text("Use Find on the same Wi-Fi network, or expand Manual IP. Press the Hue Bridge link button before pairing.")
+            Text("Refresh Hue Data reloads Bridge resources and cleans stale assignments. Reset clears local and NAS Music Ambience data.")
         }
     }
 
@@ -342,12 +359,6 @@ struct HueAmbienceSetupSheet: View {
                 Text("Pair or refresh the Hue Bridge to load assignable areas.")
                     .foregroundStyle(.secondary)
             } else {
-                if !hueAreas.contains(where: { $0.kind == .entertainmentArea }) {
-                    Text("No Entertainment Areas found. Rooms and Zones are available as fallback targets.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
                 ForEach(sonosSpeakers) { speaker in
                     HueMappingRow(
                         store: store,
@@ -361,7 +372,7 @@ struct HueAmbienceSetupSheet: View {
         } header: {
             Text("Speaker Assignments")
         } footer: {
-            Text("Choosing an area saves immediately. Entertainment Areas are preferred; Rooms and Zones appear only when no Entertainment Area exists.")
+            Text("Choose an Entertainment Area, Room, Zone, or individual Light. Names are only labels; assignments are saved by Hue ID.")
         }
     }
 
@@ -389,7 +400,7 @@ struct HueAmbienceSetupSheet: View {
     }
 
     private var assignmentAreas: [HueAreaResource] {
-        HueAmbienceAreaOptions.displayAreas(from: hueAreas)
+        HueAmbienceAreaOptions.displayAreas(from: hueAreas, lights: hueLights)
     }
 
     private var manualBridge: HueBridgeInfo? {
@@ -480,9 +491,10 @@ struct HueAmbienceSetupSheet: View {
             guard store.updateResources(resources, forBridgeID: bridge.id) else {
                 return
             }
-            hueAreas = resources.areas
-            hueLights = resources.lights
+            hueAreas = store.hueAreas
+            hueLights = store.hueLights
             manager.refreshStatus()
+            await syncRelayIfPossible()
         } catch {
             setupError = error.localizedDescription
             manager.refreshStatus()
@@ -503,11 +515,39 @@ struct HueAmbienceSetupSheet: View {
             guard store.updateResources(resources, forBridgeID: bridge.id) else {
                 return
             }
-            hueAreas = resources.areas
-            hueLights = resources.lights
+            hueAreas = store.hueAreas
+            hueLights = store.hueLights
+            manager.refreshStatus()
+            await syncRelayIfPossible()
         } catch {
             setupError = error.localizedDescription
         }
+    }
+
+    private func resetMusicAmbience() async {
+        setupError = nil
+        isBusy = true
+        defer { isBusy = false }
+
+        await relay.clearHueAmbienceConfig()
+        store.disconnectBridge()
+        hueAreas = []
+        hueLights = []
+        selectedBridgeID = ""
+        manager.refreshStatus()
+    }
+
+    private func syncRelayIfPossible() async {
+        guard relay.url != nil,
+              store.bridge != nil,
+              !store.mappings.isEmpty else {
+            return
+        }
+
+        await relay.pushHueAmbienceConfig(
+            store: store,
+            sonosSpeakers: sonosSpeakers
+        )
     }
 
     private func mergeDiscoveredBridge(_ bridge: HueBridgeInfo) {
@@ -709,6 +749,8 @@ private struct HueMappingRow: View {
             return "Room \(id)"
         case .zone(let id):
             return "Zone \(id)"
+        case .light(let id):
+            return "Light \(id)"
         case nil:
             return "None"
         }

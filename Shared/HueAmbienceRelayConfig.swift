@@ -100,6 +100,9 @@ struct HueAmbienceRelayTarget: Encodable, Equatable, Sendable {
         case .zone(let id):
             self.kind = "zone"
             self.id = id
+        case .light(let id):
+            self.kind = "light"
+            self.id = id
         }
     }
 }
