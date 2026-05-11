@@ -170,6 +170,12 @@ final class RelayManager {
             return
         }
 
+        guard enabled else {
+            hueAmbienceRuntimeStatus = .ready("Music Ambience disabled")
+            hueAmbienceRuntimeDetail = "Enable Music Ambience to let NAS control your lights."
+            return
+        }
+
         let trimmedError = lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmedError.isEmpty {
             hueAmbienceRuntimeStatus = .error(trimmedError)

@@ -52,6 +52,7 @@ export function buildHueAmbienceFrame(input: BuildHueAmbienceFrameInput): HueAmb
     : 'clipFallback';
   const targetFrames = input.targets.map((target, targetIndex) => {
     const metadataComplete = entertainmentMetadataComplete(target.area);
+    const spatialRanks = entertainmentSpatialRanks(target);
     return {
       area: target.area,
       lights: target.lights.map((light, lightIndex) =>
@@ -59,7 +60,7 @@ export function buildHueAmbienceFrame(input: BuildHueAmbienceFrameInput): HueAmb
           light,
           target.area,
           palette,
-          input.phase + progressOffset + targetIndex + lightIndex,
+          input.phase + progressOffset + targetIndex + (spatialRanks?.get(light.id) ?? lightIndex),
         ),
       ),
       metadataComplete,
@@ -89,6 +90,44 @@ export function entertainmentMetadataComplete(area: HueAreaResource): boolean {
   );
 
   return area.childLightIDs.length > 0 && area.childLightIDs.every(lightID => channelLightIDs.has(lightID));
+}
+
+function entertainmentSpatialRanks(target: HueResolvedAmbienceTarget): Map<string, number> | null {
+  if (target.area.kind !== 'entertainmentArea') return null;
+
+  const channelsByLightID = new Map(
+    (target.area.entertainmentChannels ?? [])
+      .filter(channel => channel.lightID)
+      .map(channel => [channel.lightID!, channel]),
+  );
+  const positionedLights = target.lights.map(light => {
+    const channel = channelsByLightID.get(light.id);
+    const position = channel?.position;
+    if (
+      !position
+      || !Number.isFinite(position.x)
+      || !Number.isFinite(position.y)
+      || !Number.isFinite(position.z)
+    ) {
+      return null;
+    }
+
+    return { lightID: light.id, position };
+  });
+
+  if (positionedLights.some(light => light === null)) return null;
+
+  return new Map(
+    positionedLights
+      .filter((light): light is NonNullable<typeof light> => light !== null)
+      .sort((a, b) =>
+        a.position.x - b.position.x
+        || a.position.z - b.position.z
+        || a.position.y - b.position.y
+        || a.lightID.localeCompare(b.lightID),
+      )
+      .map((light, index) => [light.lightID, index]),
+  );
 }
 
 function buildLightFrame(

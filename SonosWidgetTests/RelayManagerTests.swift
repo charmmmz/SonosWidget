@@ -65,12 +65,26 @@ final class RelayManagerTests: XCTestCase {
         relay.setURL("")
         defer { relay.setURL("") }
 
-        relay.updateHueAmbienceRuntimeStatus(configured: true, enabled: false)
+        relay.updateHueAmbienceRuntimeStatus(
+            configured: true,
+            enabled: false,
+            lastError: "stale runtime failure"
+        )
 
         XCTAssertTrue(relay.isHueAmbienceRelayConfigured)
+        XCTAssertFalse(relay.isHueAmbienceRelayEnabled)
         guard case .synced = relay.hueAmbienceSyncStatus else {
             return XCTFail("Disabled Hue config should still be marked as synced to NAS")
         }
+        XCTAssertEqual(
+            relay.hueAmbienceRuntimeStatus,
+            .ready("Music Ambience disabled")
+        )
+        XCTAssertEqual(
+            relay.hueAmbienceRuntimeDetail,
+            "Enable Music Ambience to let NAS control your lights."
+        )
+        XCTAssertFalse(relay.shouldDeferLocalHueAmbience)
     }
 
     func testStreamingReadyRuntimeReportsClipFallbackDetail() {

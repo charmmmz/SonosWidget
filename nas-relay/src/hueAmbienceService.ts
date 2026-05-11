@@ -110,7 +110,7 @@ export class HueAmbienceService {
     if (snapshot.musicAmbienceEligible === false) {
       if (this.snapshotIsUnrelatedToActiveGroup(snapshot)) return;
       this.scheduleStopActive();
-      this.lastError = 'Active Sonos source is not eligible for Music Ambience';
+      this.lastError = null;
       return;
     }
 
@@ -118,7 +118,7 @@ export class HueAmbienceService {
     if (targets.length === 0) {
       if (this.snapshotIsUnrelatedToActiveGroup(snapshot)) return;
       this.scheduleStopActive();
-      this.lastError = 'No Hue area mapped for the active Sonos group';
+      this.lastError = null;
       return;
     }
 
@@ -193,7 +193,7 @@ export class HueAmbienceService {
     const initialRenderSucceeded = await apply();
     if (!this.isCurrentRun(runID)) return;
     if (!initialRenderSucceeded) {
-      this.clearActiveState();
+      await this.stopActive();
       return;
     }
 

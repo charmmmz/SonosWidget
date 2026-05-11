@@ -121,6 +121,36 @@ test('frame engine distributes a 3-color album palette across two entertainment 
   ]);
 });
 
+test('frame engine uses entertainment channel position for spatial palette ordering', () => {
+  const frame = buildHueAmbienceFrame({
+    targets: [
+      {
+        ...target({
+          entertainmentChannels: [
+            { id: 'channel-gradient', lightID: 'gradient-strip', position: { x: 1, y: 0, z: 0 } },
+            { id: 'channel-desk', lightID: 'desk-lamp', position: { x: 0, y: 0, z: 0 } },
+          ],
+        }),
+      },
+    ],
+    snapshot: snapshot(),
+    palette,
+    reason: 'steady',
+    phase: 0,
+    transitionSeconds: 4,
+    now,
+  });
+
+  assert.deepEqual(frame.targets[0]!.lights.map(light => light.light.id), [
+    'gradient-strip',
+    'desk-lamp',
+  ]);
+  assert.deepEqual(frame.targets[0]!.lights.map(light => light.colors[0]), [
+    palette[1],
+    palette[0],
+  ]);
+});
+
 test('frame engine advances palette phase from playback progress', () => {
   const frame = buildHueAmbienceFrame({
     targets: [target()],

@@ -208,7 +208,7 @@ test('idle snapshots from other Sonos groups do not stop the active Hue ambience
   }
 });
 
-test('non-music playing snapshots do not start Hue ambience', async () => {
+test('non-music playing snapshots do not start Hue ambience or set lastError', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'hue-service-'));
   try {
     const store = new HueAmbienceConfigStore(dir);
@@ -232,6 +232,66 @@ test('non-music playing snapshots do not start Hue ambience', async () => {
 
     assert.equal(client.updates.length, 0);
     assert.equal(service.status().runtimeActive, false);
+    assert.equal(service.status().lastError, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('unmapped playing groups do not set lastError', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hue-service-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const client = new RecordingHueLightClient();
+    const service = new HueAmbienceService(
+      store,
+      pino({ enabled: false }),
+      () => client,
+      () => [{ r: 1, g: 0, b: 0 }],
+      1,
+    );
+    await service.load();
+
+    service.receiveSnapshot({
+      ...snapshot('/unmapped-art.jpg'),
+      groupId: '192.168.50.99',
+      speakerName: 'Kitchen',
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(client.updates.length, 0);
+    assert.equal(service.status().runtimeActive, false);
+    assert.equal(service.status().lastError, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('partial initial render failure turns off pending frame lights when configured', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hue-service-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(twoLightConfig({ stopBehavior: 'turnOff' }));
+    const client = new FailOnSecondUpdateHueLightClient();
+    const service = new HueAmbienceService(
+      store,
+      pino({ enabled: false }),
+      () => client,
+      () => [{ r: 1, g: 0, b: 0 }, { r: 0, g: 0, b: 1 }],
+      1,
+    );
+    await service.load();
+
+    service.receiveSnapshot(snapshot('/partial-art.jpg'));
+    await waitFor(() => client.updates.some(update => isLightOffBody(update.body)));
+
+    assert.deepEqual(
+      client.updates.filter(update => isLightOffBody(update.body)).map(update => update.id),
+      ['light-1', 'light-2'],
+    );
+    assert.equal(service.status().runtimeActive, false);
+    assert.match(service.status().lastError ?? '', /partial render failed/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -333,6 +393,35 @@ const config: HueAmbienceRuntimeConfig = {
   flowIntervalSeconds: 8,
 };
 
+function twoLightConfig(
+  overrides: Partial<HueAmbienceRuntimeConfig> = {},
+): HueAmbienceRuntimeConfig {
+  return {
+    ...config,
+    ...overrides,
+    resources: {
+      lights: [
+        ...config.resources.lights,
+        {
+          id: 'light-2',
+          name: 'Lamp 2',
+          supportsColor: true,
+          supportsGradient: false,
+          supportsEntertainment: true,
+          function: 'decorative',
+          functionMetadataResolved: true,
+        },
+      ],
+      areas: [
+        {
+          ...config.resources.areas[0]!,
+          childLightIDs: ['light-1', 'light-2'],
+        },
+      ],
+    },
+  };
+}
+
 function entertainmentConfig(
   areaOverrides: Partial<HueAmbienceRuntimeConfig['resources']['areas'][number]> = {},
 ): HueAmbienceRuntimeConfig {
@@ -409,6 +498,18 @@ class RecordingHueLightClient implements HueLightClient {
   }
 }
 
+class FailOnSecondUpdateHueLightClient extends RecordingHueLightClient {
+  private attemptCount = 0;
+
+  override async updateLight(id: string, body: unknown): Promise<void> {
+    this.attemptCount += 1;
+    if (this.attemptCount === 2) {
+      throw new Error('partial render failed');
+    }
+    await super.updateLight(id, body);
+  }
+}
+
 class FailingOnceHueAmbienceRenderer implements HueAmbienceRenderer {
   renderAttempts = 0;
   renderedFrames: HueAmbienceFrame[] = [];
@@ -425,6 +526,16 @@ class FailingOnceHueAmbienceRenderer implements HueAmbienceRenderer {
   async stop(frame: HueAmbienceFrame): Promise<void> {
     this.stoppedFrames.push(frame);
   }
+}
+
+function isLightOffBody(body: unknown): boolean {
+  return typeof body === 'object'
+    && body !== null
+    && 'on' in body
+    && typeof body.on === 'object'
+    && body.on !== null
+    && 'on' in body.on
+    && body.on.on === false;
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
