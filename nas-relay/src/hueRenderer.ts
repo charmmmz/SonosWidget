@@ -20,7 +20,11 @@ export interface HueLightUpdateBody {
 export function shouldUseLightForAmbience(
   light: HueLightResource,
   mapping: HueSonosMapping,
+  areaKind?: string,
 ): boolean {
+  if (areaKind === 'entertainmentArea') {
+    return true;
+  }
   if (mapping.excludedLightIDs.includes(light.id)) {
     return false;
   }
@@ -47,9 +51,9 @@ export function resolveHueTargets(
       const lights = area.childLightIDs
         .map(id => lightsByID.get(id))
         .filter((light): light is HueLightResource => Boolean(light))
-        .filter(light => lightBelongsToAreaDevice(light, area, mapping))
+        .filter(light => area.kind === 'entertainmentArea' || lightBelongsToAreaDevice(light, area, mapping))
         .filter(light => light.supportsColor)
-        .filter(light => area.kind === 'light' || shouldUseLightForAmbience(light, mapping));
+        .filter(light => area.kind === 'light' || shouldUseLightForAmbience(light, mapping, area.kind));
 
       if (lights.length === 0) return [];
       return [{ area, mapping, lights }];
@@ -145,7 +149,7 @@ function lightBelongsToAreaDevice(
   area: { kind?: string; childDeviceIDs?: string[] },
   mapping: HueSonosMapping,
 ): boolean {
-  if (area.kind === 'light' || mapping.includedLightIDs.includes(light.id)) {
+  if (area.kind === 'light' || (area.kind !== 'entertainmentArea' && mapping.includedLightIDs.includes(light.id))) {
     return true;
   }
 

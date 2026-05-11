@@ -19,6 +19,26 @@ const config: HueAmbienceRuntimeConfig = {
   flowIntervalSeconds: 8,
 };
 
+const runtimeConfig = (overrides: Partial<HueAmbienceRuntimeConfig>): HueAmbienceRuntimeConfig => ({
+  ...config,
+  ...overrides,
+  resources: overrides.resources ?? config.resources,
+  mappings: overrides.mappings ?? config.mappings,
+});
+
+const light = (
+  overrides: Partial<HueAmbienceRuntimeConfig['resources']['lights'][number]> &
+    Pick<HueAmbienceRuntimeConfig['resources']['lights'][number], 'id'>,
+): HueAmbienceRuntimeConfig['resources']['lights'][number] => ({
+  name: overrides.id,
+  supportsColor: true,
+  supportsGradient: false,
+  supportsEntertainment: true,
+  function: 'decorative',
+  functionMetadataResolved: true,
+  ...overrides,
+});
+
 test('config store persists runtime config without redacting the saved application key', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'hue-config-'));
   try {
@@ -117,6 +137,85 @@ test('config store drops stale Hue targets and light overrides', async () => {
     assert.equal(store.current?.mappings[0]?.fallbackTarget, null);
     assert.deepEqual(store.current?.mappings[0]?.includedLightIDs, ['study-lamp']);
     assert.deepEqual(store.current?.mappings[0]?.excludedLightIDs, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('config store clears light overrides for entertainment mappings', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hue-config-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(runtimeConfig({
+      resources: {
+        lights: [
+          light({ id: 'task-light', ownerID: 'device-1', function: 'functional' }),
+        ],
+        areas: [
+          {
+            id: 'ent-1',
+            name: 'Playroom Area',
+            kind: 'entertainmentArea',
+            childLightIDs: ['task-light'],
+            childDeviceIDs: ['device-1'],
+          },
+        ],
+      },
+      mappings: [
+        {
+          sonosID: 'playroom',
+          sonosName: 'Playroom',
+          relayGroupID: '192.168.50.25',
+          preferredTarget: { kind: 'entertainmentArea', id: 'ent-1' },
+          fallbackTarget: null,
+          includedLightIDs: ['task-light'],
+          excludedLightIDs: ['task-light'],
+          capability: 'liveEntertainment',
+        },
+      ],
+    }));
+
+    assert.deepEqual(store.current?.mappings[0]?.includedLightIDs, []);
+    assert.deepEqual(store.current?.mappings[0]?.excludedLightIDs, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('config store removes legacy direct light mappings', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hue-config-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(runtimeConfig({
+      resources: {
+        lights: [
+          light({ id: 'light-1', ownerID: 'device-1' }),
+        ],
+        areas: [
+          {
+            id: 'room-1',
+            name: 'Playroom',
+            kind: 'room',
+            childLightIDs: ['light-1'],
+            childDeviceIDs: ['device-1'],
+          },
+        ],
+      },
+      mappings: [
+        {
+          sonosID: 'playroom',
+          sonosName: 'Playroom',
+          relayGroupID: '192.168.50.25',
+          preferredTarget: { kind: 'light', id: 'light-1' },
+          fallbackTarget: null,
+          includedLightIDs: [],
+          excludedLightIDs: [],
+          capability: 'gradientReady',
+        },
+      ],
+    }));
+
+    assert.deepEqual(store.current?.mappings, []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -378,7 +477,7 @@ test('config store load drops malformed array elements while preserving valid en
       },
     ]);
     assert.deepEqual(loaded?.mappings.map(mapping => mapping.sonosID), ['study']);
-    assert.deepEqual(loaded?.mappings[0]?.includedLightIDs, ['light-1']);
+    assert.deepEqual(loaded?.mappings[0]?.includedLightIDs, []);
     assert.deepEqual(loaded?.mappings[0]?.excludedLightIDs, []);
   } finally {
     await rm(dir, { recursive: true, force: true });

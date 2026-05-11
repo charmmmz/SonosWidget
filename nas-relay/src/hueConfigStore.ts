@@ -91,19 +91,27 @@ function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeCo
     if (target.kind === 'light') return validLightIDs.has(target.id);
     return validAreaTargets.has(`${target.kind}:${target.id}`);
   };
+  const isAssignableTarget = (target?: HueAmbienceTarget | null): target is HueAmbienceTarget => {
+    return isValidTarget(target) && target.kind !== 'light';
+  };
   const mappings: HueSonosMapping[] = [];
   for (const mapping of recordArray<HueSonosMapping>(config.mappings)) {
-    const preferredTarget = isValidTarget(mapping.preferredTarget) ? mapping.preferredTarget : null;
-    const fallbackTarget = isValidTarget(mapping.fallbackTarget) ? mapping.fallbackTarget : null;
+    const preferredTarget = isAssignableTarget(mapping.preferredTarget) ? mapping.preferredTarget : null;
+    const fallbackTarget = isAssignableTarget(mapping.fallbackTarget) ? mapping.fallbackTarget : null;
     const resolvedPreferredTarget = preferredTarget ?? fallbackTarget;
     if (!resolvedPreferredTarget) continue;
+    const isEntertainmentTarget = resolvedPreferredTarget.kind === 'entertainmentArea';
 
     mappings.push({
       ...mapping,
       preferredTarget: resolvedPreferredTarget,
       fallbackTarget: preferredTarget ? fallbackTarget : null,
-      includedLightIDs: stringArray(mapping.includedLightIDs).filter(id => validLightIDs.has(id)),
-      excludedLightIDs: stringArray(mapping.excludedLightIDs).filter(id => validLightIDs.has(id)),
+      includedLightIDs: isEntertainmentTarget
+        ? []
+        : stringArray(mapping.includedLightIDs).filter(id => validLightIDs.has(id)),
+      excludedLightIDs: isEntertainmentTarget
+        ? []
+        : stringArray(mapping.excludedLightIDs).filter(id => validLightIDs.has(id)),
     });
   }
 
