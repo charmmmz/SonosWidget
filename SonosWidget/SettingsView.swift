@@ -29,37 +29,20 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                sonosAccountSection
-                speakersSection
-                musicServicesSection
-                MusicAmbienceSettingsView(
-                    store: hueStore,
-                    manager: musicAmbience,
-                    sonosSpeakers: displayedSpeakers,
-                    presentSetup: {
-                        musicAmbienceSetupPresentation.present()
-                    }
-                )
-                relaySection
-                agentSection
+                settingsHubSection
                 aboutSection
             }
             .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") {
-                        finishEditingFocusedInput()
-                    }
-                }
-            }
             .scrollContentBackground(.hidden)
             .background {
                 backgroundLayer.ignoresSafeArea()
             }
             .preferredColorScheme(.dark)
+            .navigationDestination(for: SettingsHubDestination.self) { destination in
+                settingsDestinationView(for: destination)
+            }
             .onAppear {
                 relayURLDraft = relay.urlString
                 agentURLDraft = agent.urlString
@@ -69,6 +52,14 @@ struct SettingsView: View {
                 musicAmbience.refreshStatus()
             }
         }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    finishEditingFocusedInput()
+                }
+            }
+        }
         .sheet(isPresented: musicAmbienceSetupBinding) {
             HueAmbienceSetupSheet(
                 store: hueStore,
@@ -76,6 +67,112 @@ struct SettingsView: View {
                 sonosSpeakers: displayedSpeakers
             )
         }
+    }
+
+    // MARK: - Settings Hub
+
+    private var settingsHubSection: some View {
+        Section {
+            ForEach(SettingsHubDestination.primary) { destination in
+                NavigationLink(value: destination) {
+                    SettingsHubDestinationRow(
+                        destination: destination,
+                        status: settingsHubStatus(for: destination)
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func settingsDestinationView(for destination: SettingsHubDestination) -> some View {
+        switch destination {
+        case .sonos:
+            settingsDetailForm(title: destination.title) {
+                sonosAccountSection
+                speakersSection
+                musicServicesSection
+            }
+        case .musicAmbience:
+            settingsDetailForm(title: destination.title) {
+                MusicAmbienceSettingsView(
+                    store: hueStore,
+                    manager: musicAmbience,
+                    sonosSpeakers: displayedSpeakers,
+                    presentSetup: {
+                        musicAmbienceSetupPresentation.present()
+                    }
+                )
+            }
+        case .localServer:
+            settingsDetailForm(title: destination.title) {
+                relaySection
+                agentSection
+            }
+        }
+    }
+
+    private func settingsDetailForm<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Form {
+            content()
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .scrollContentBackground(.hidden)
+        .background {
+            backgroundLayer.ignoresSafeArea()
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func settingsHubStatus(for destination: SettingsHubDestination) -> String? {
+        switch destination {
+        case .sonos:
+            return "\(sonosAccountStatusSummary) · \(speakersStatusSummary)"
+        case .musicAmbience:
+            return musicAmbienceStatusSummary
+        case .localServer:
+            return "Relay \(relayStatusTitle) · Agent \(agentStatusTitle)"
+        }
+    }
+
+    private var sonosAccountStatusSummary: String {
+        switch auth.sessionState {
+        case .connected:
+            return "Account connected"
+        case .expired:
+            return "Session expired"
+        case .checking:
+            return "Checking account"
+        case .disconnected:
+            return "Account disconnected"
+        }
+    }
+
+    private var speakersStatusSummary: String {
+        let count = displayedSpeakers.count
+        switch count {
+        case 0:
+            return "No speakers"
+        case 1:
+            return "1 speaker"
+        default:
+            return "\(count) speakers"
+        }
+    }
+
+    private var musicAmbienceStatusSummary: String {
+        guard hueStore.bridge != nil else {
+            return musicAmbience.status.title
+        }
+
+        let assignmentCount = hueStore.mappings.count
+        let assignments = assignmentCount == 1 ? "1 assignment" : "\(assignmentCount) assignments"
+        return "\(musicAmbience.status.title) · \(assignments)"
     }
 
     private var musicAmbienceSetupBinding: Binding<Bool> {
@@ -451,11 +548,11 @@ struct SettingsView: View {
     @ViewBuilder
     private var relayStatusRow: some View {
         HStack(spacing: 12) {
-            statusIndicator
+            relayStatusIndicator
             VStack(alignment: .leading, spacing: 2) {
-                Text(statusTitle)
+                Text(relayStatusTitle)
                     .font(.subheadline.weight(.semibold))
-                if let detail = statusDetail {
+                if let detail = relayStatusDetail {
                     Text(detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -465,7 +562,7 @@ struct SettingsView: View {
         }
     }
 
-    private var statusIndicator: some View {
+    private var relayStatusIndicator: some View {
         let color: Color
         switch relay.status {
         case .connected: color = .green
@@ -484,7 +581,7 @@ struct SettingsView: View {
             }
     }
 
-    private var statusTitle: String {
+    private var relayStatusTitle: String {
         switch relay.status {
         case .disabled:                       return "Disabled"
         case .probing:                        return "Probing…"
@@ -494,7 +591,7 @@ struct SettingsView: View {
         }
     }
 
-    private var statusDetail: String? {
+    private var relayStatusDetail: String? {
         switch relay.status {
         case .disabled:                return "Enter a URL to enable APNs-driven Live Activity updates."
         case .probing:                 return nil
@@ -621,6 +718,36 @@ struct SettingsView: View {
         let v = info?["CFBundleShortVersionString"] as? String ?? "—"
         let b = info?["CFBundleVersion"] as? String ?? "—"
         return "\(v) (\(b))"
+    }
+}
+
+private struct SettingsHubDestinationRow: View {
+    let destination: SettingsHubDestination
+    let status: String?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: destination.systemImage)
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(destination.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(destination.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let status {
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 
