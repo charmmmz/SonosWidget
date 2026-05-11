@@ -2,9 +2,12 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import type {
+  HueAreaResource,
   HueAmbienceRuntimeConfig,
   HueAmbienceStatus,
   HueAmbienceTarget,
+  HueEntertainmentChannelResource,
+  HueLightResource,
   HueSonosMapping,
 } from './hueTypes.js';
 
@@ -68,21 +71,28 @@ export class HueAmbienceConfigStore {
       areas: this.currentConfig.resources.areas.length,
       motionStyle: this.currentConfig.motionStyle,
       stopBehavior: this.currentConfig.stopBehavior,
+      renderMode: null,
+      activeTargetIds: [],
+      entertainmentTargetActive: false,
+      entertainmentMetadataComplete: false,
+      lastFrameAt: null,
     };
   }
 }
 
 function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeConfig {
   const flowIntervalSeconds = intervalOverride() ?? config.flowIntervalSeconds ?? 8;
-  const validLightIDs = new Set((config.resources?.lights ?? []).map(light => light.id));
-  const validAreaTargets = new Set((config.resources?.areas ?? []).map(area => `${area.kind}:${area.id}`));
+  const lights = recordArray<HueLightResource>(config.resources?.lights);
+  const areas = recordArray<HueAreaResource>(config.resources?.areas);
+  const validLightIDs = new Set(lights.map(light => light.id));
+  const validAreaTargets = new Set(areas.map(area => `${area.kind}:${area.id}`));
   const isValidTarget = (target?: HueAmbienceTarget | null): target is HueAmbienceTarget => {
     if (!target) return false;
     if (target.kind === 'light') return validLightIDs.has(target.id);
     return validAreaTargets.has(`${target.kind}:${target.id}`);
   };
   const mappings: HueSonosMapping[] = [];
-  for (const mapping of config.mappings ?? []) {
+  for (const mapping of recordArray<HueSonosMapping>(config.mappings)) {
     const preferredTarget = isValidTarget(mapping.preferredTarget) ? mapping.preferredTarget : null;
     const fallbackTarget = isValidTarget(mapping.fallbackTarget) ? mapping.fallbackTarget : null;
     const resolvedPreferredTarget = preferredTarget ?? fallbackTarget;
@@ -92,8 +102,8 @@ function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeCo
       ...mapping,
       preferredTarget: resolvedPreferredTarget,
       fallbackTarget: preferredTarget ? fallbackTarget : null,
-      includedLightIDs: (mapping.includedLightIDs ?? []).filter(id => validLightIDs.has(id)),
-      excludedLightIDs: (mapping.excludedLightIDs ?? []).filter(id => validLightIDs.has(id)),
+      includedLightIDs: stringArray(mapping.includedLightIDs).filter(id => validLightIDs.has(id)),
+      excludedLightIDs: stringArray(mapping.excludedLightIDs).filter(id => validLightIDs.has(id)),
     });
   }
 
@@ -101,12 +111,29 @@ function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeCo
     ...config,
     enabled: config.enabled && (process.env.HUE_AMBIENCE_ENABLED ?? 'true') !== 'false',
     resources: {
-      lights: config.resources?.lights ?? [],
-      areas: (config.resources?.areas ?? []).map(area => ({
-        ...area,
-        childLightIDs: (area.childLightIDs ?? []).filter(id => validLightIDs.has(id)),
-        childDeviceIDs: area.childDeviceIDs ?? [],
-      })),
+      lights,
+      areas: areas.map(area => {
+        const childLightIDs = stringArray(area.childLightIDs).filter(id => validLightIDs.has(id));
+        const childLightIDSet = new Set(childLightIDs);
+        return {
+          ...area,
+          childLightIDs,
+          childDeviceIDs: stringArray(area.childDeviceIDs),
+          entertainmentChannels: recordArray<HueEntertainmentChannelResource>(area.entertainmentChannels)
+            .filter(channel => !channel.lightID || childLightIDSet.has(channel.lightID))
+            .flatMap(channel => {
+              const id = normalizeChannelID(channel.id);
+              if (!id) return [];
+
+              return [{
+                id,
+                lightID: channel.lightID ?? null,
+                serviceID: channel.serviceID ?? null,
+                position: channel.position ?? null,
+              }];
+            }),
+        };
+      }),
     },
     mappings,
     groupStrategy: config.groupStrategy ?? 'allMappedRooms',
@@ -114,6 +141,29 @@ function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeCo
     motionStyle: config.motionStyle ?? 'flowing',
     flowIntervalSeconds: Math.max(flowIntervalSeconds, 1),
   };
+}
+
+function asArray<T>(value: T[] | unknown): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringArray(value: unknown): string[] {
+  return asArray<unknown>(value).filter((item): item is string => typeof item === 'string');
+}
+
+function recordArray<T>(value: T[] | unknown): T[] {
+  return asArray<unknown>(value).filter(isRecord) as T[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeChannelID(value: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+
+  const id = String(value);
+  return id.length > 0 ? id : null;
 }
 
 function intervalOverride(): number | undefined {
