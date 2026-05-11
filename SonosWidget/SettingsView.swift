@@ -195,7 +195,13 @@ struct SettingsView: View {
         } header: {
             Text("Sonos Account")
         } footer: {
-            Text("Sign in with your Sonos account to enable cloud-powered search, artist / album browsing, and richer playback metadata.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Sign in with your Sonos account to enable cloud-powered search, artist / album browsing, and richer playback metadata.")
+                if let error = auth.lastErrorMessage {
+                    Text(error)
+                        .foregroundStyle(.orange)
+                }
+            }
         }
     }
 
@@ -218,9 +224,7 @@ struct SettingsView: View {
     private func connectSonos(reconnect: Bool = false) {
         isConnectingSonos = true
         Task {
-            let window = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first?.windows.first
+            let window = await UIApplication.shared.sonosPresentationWindow
             let success = if reconnect {
                 await auth.reconnect(from: window)
             } else {

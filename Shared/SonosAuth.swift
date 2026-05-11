@@ -28,6 +28,7 @@ final class SonosAuth: NSObject {
     var sessionState: SessionState = .disconnected {
         didSet { persistSessionState() }
     }
+    var lastErrorMessage: String?
     var hasStoredCredentials: Bool {
         readKeychain(.accessToken) != nil || readKeychain(.refreshToken) != nil
     }
@@ -55,10 +56,16 @@ final class SonosAuth: NSObject {
 
     @MainActor
     func startLogin(from window: UIWindow?) async -> Bool {
-        guard !Self.clientID.isEmpty else {
-            SonosLog.error(.sonosAuth, "clientID not configured")
+        lastErrorMessage = nil
+        if let configurationFailure = Self.oauthConfigurationFailureMessage() {
+            recordFailure(configurationFailure)
             return false
         }
+        guard let window else {
+            recordFailure("Could not find an active app window to present Sonos sign-in. Try again with the app in the foreground.")
+            return false
+        }
+
         SonosLog.info(.sonosAuth, "startLogin")
         let stateBeforeLogin = sessionState
         sessionState = .checking
@@ -73,11 +80,12 @@ final class SonosAuth: NSObject {
         ]
 
         guard let authURL = components.url else {
-            SonosLog.error(.sonosAuth, "could not build authorization URL")
+            recordFailure("Could not build the Sonos authorization URL. Check Config/SonosSecrets.xcconfig.")
             restoreStateAfterLoginCancellation(previousState: stateBeforeLogin)
             return false
         }
         presentationAnchor = window
+        SonosLog.info(.sonosAuth, "opening OAuth session; redirect host=\(URL(string: Self.redirectURI)?.host ?? "unknown")")
 
         return await withCheckedContinuation { continuation in
             let session = ASWebAuthenticationSession(
@@ -90,7 +98,9 @@ final class SonosAuth: NSObject {
                 }
                 self.authSession = nil
                 guard let callbackURL, error == nil else {
-                    SonosLog.info(.sonosAuth, "login cancelled or failed: \(error?.localizedDescription ?? "missing callback URL")")
+                    let detail = error?.localizedDescription ?? "missing callback URL"
+                    SonosLog.info(.sonosAuth, "login cancelled or failed: \(detail)")
+                    self.lastErrorMessage = Self.loginFailureMessage(error: error)
                     self.restoreStateAfterLoginCancellation(previousState: stateBeforeLogin)
                     continuation.resume(returning: false)
                     return
@@ -105,7 +115,7 @@ final class SonosAuth: NSObject {
             session.prefersEphemeralWebBrowserSession = true
             authSession = session
             guard session.start() else {
-                SonosLog.error(.sonosAuth, "ASWebAuthenticationSession did not start")
+                recordFailure("Could not open Sonos sign-in. Try again from the foreground app window.")
                 authSession = nil
                 restoreStateAfterLoginCancellation(previousState: stateBeforeLogin)
                 continuation.resume(returning: false)
@@ -125,6 +135,8 @@ final class SonosAuth: NSObject {
     func handleCallback(url: URL) async -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
+            lastErrorMessage = "Sonos sign-in returned without an authorization code. Check the redirect page and try reconnecting."
+            SonosLog.error(.sonosAuth, lastErrorMessage ?? "OAuth callback missing code")
             restoreStateAfterFailedTokenRequest()
             return false
         }
@@ -148,6 +160,8 @@ final class SonosAuth: NSObject {
 
     func refreshAccessToken() async -> Bool {
         guard let refreshToken = readKeychain(.refreshToken) else {
+            lastErrorMessage = "Sonos refresh token is missing. Reconnect your Sonos account."
+            SonosLog.error(.sonosAuth, lastErrorMessage ?? "refresh token missing")
             markSessionExpired()
             return false
         }
@@ -182,6 +196,7 @@ final class SonosAuth: NSObject {
                 let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                 let body = String(data: data, encoding: .utf8) ?? ""
                 SonosLog.error(.sonosAuth, "token request HTTP \(status): \(body.prefix(500))")
+                lastErrorMessage = "Sonos token exchange failed (HTTP \(status)). Check the OAuth redirect URI and client secret, then reconnect."
                 return false
             }
 
@@ -194,10 +209,12 @@ final class SonosAuth: NSObject {
             SharedStorage.cloudAccessToken = json.access_token
             SharedStorage.cloudTokenExpiry = expiry
             sessionState = .connected
+            lastErrorMessage = nil
             SonosLog.info(.sonosAuth, "token request succeeded; expires in \(json.expires_in)s")
             return true
         } catch {
             SonosLog.error(.sonosAuth, "token request failed: \(error)")
+            lastErrorMessage = "Sonos token exchange failed: \(error.localizedDescription)"
             return false
         }
     }
@@ -219,6 +236,7 @@ final class SonosAuth: NSObject {
             SharedStorage.cloudAccessToken = token
             SharedStorage.cloudTokenExpiry = Date(timeIntervalSince1970: expiry)
             sessionState = .connected
+            lastErrorMessage = nil
             return token
         }
 
@@ -233,16 +251,19 @@ final class SonosAuth: NSObject {
         SharedStorage.cloudAccessToken = nil
         SharedStorage.cloudTokenExpiry = .distantPast
         sessionState = .disconnected
+        lastErrorMessage = nil
     }
 
     func markSessionExpired() {
         guard hasStoredCredentials else {
             sessionState = .disconnected
+            lastErrorMessage = nil
             return
         }
         SharedStorage.cloudAccessToken = nil
         SharedStorage.cloudTokenExpiry = .distantPast
         sessionState = .expired
+        lastErrorMessage = "Sonos Cloud session expired. Reconnect your Sonos account."
     }
 
     private func restoreStateAfterLoginCancellation(previousState: SessionState) {
@@ -268,6 +289,55 @@ final class SonosAuth: NSObject {
 
     private func persistSessionState() {
         UserDefaults.standard.set(sessionState.rawValue, forKey: Self.sessionStateKey)
+    }
+
+    static func oauthConfigurationFailureMessage(
+        clientID: String = SonosAuth.clientID,
+        clientSecret: String = SonosAuth.clientSecret,
+        redirectURI: String = SonosAuth.redirectURI
+    ) -> String? {
+        let trimmedClientID = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedClientSecret = clientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedRedirectURI = redirectURI.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmedClientID.isEmpty {
+            return "Sonos OAuth client ID is missing. Check Config/SonosSecrets.xcconfig."
+        }
+        if trimmedClientSecret.isEmpty {
+            return "Sonos OAuth client secret is missing. Check Config/SonosSecrets.xcconfig."
+        }
+        if trimmedRedirectURI.isEmpty {
+            return "Sonos OAuth redirect URI is missing. Check Config/SonosSecrets.xcconfig."
+        }
+        guard let url = URL(string: trimmedRedirectURI),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host?.isEmpty == false else {
+            return "Sonos OAuth redirect URI is not a valid URL. Check Config/SonosSecrets.xcconfig."
+        }
+        return nil
+    }
+
+    private static func loginFailureMessage(error: Error?) -> String {
+        guard let error else {
+            return "Sonos sign-in did not return to the app. Check that the OAuth redirect page opens sonoswidget://callback."
+        }
+        if let authError = error as? ASWebAuthenticationSessionError {
+            switch authError.code {
+            case .canceledLogin:
+                return "Sonos sign-in was cancelled before the app received a callback."
+            case .presentationContextInvalid, .presentationContextNotProvided:
+                return "Could not present Sonos sign-in. Try again from the foreground app window."
+            @unknown default:
+                break
+            }
+        }
+        return "Sonos sign-in failed: \(error.localizedDescription)"
+    }
+
+    private func recordFailure(_ message: String) {
+        lastErrorMessage = message
+        SonosLog.error(.sonosAuth, message)
     }
 
     // MARK: - Keychain

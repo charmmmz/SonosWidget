@@ -145,9 +145,7 @@ struct SearchView: View {
     private func reconnectSonos() {
         isReconnectingSonos = true
         Task {
-            let window = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first?.windows.first
+            let window = await UIApplication.shared.sonosPresentationWindow
             let success = await auth.reconnect(from: window)
             if success {
                 searchManager.errorMessage = nil
@@ -159,6 +157,8 @@ struct SearchView: View {
                 } else {
                     searchManager.search(query: searchText)
                 }
+            } else if let authError = auth.lastErrorMessage {
+                searchManager.errorMessage = authError
             }
             isReconnectingSonos = false
         }
