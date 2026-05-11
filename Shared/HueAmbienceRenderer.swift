@@ -33,7 +33,7 @@ struct StoredHueTargetResolver: HueTargetResolving {
                     continue
                 }
 
-                let bypassesFiltering = target.bypassesFunctionFiltering
+                let usesEntertainmentPolicy = target.usesEntertainmentAreaTargetPolicy
                 let lightIDs = area.childLightIDs.filter { lightID in
                     guard let light = lightsByID[lightID], light.supportsColor else {
                         return false
@@ -42,11 +42,11 @@ struct StoredHueTargetResolver: HueTargetResolving {
                         area,
                         canUse: light,
                         mapping: mapping,
-                        bypassesManualOverrides: bypassesFiltering
+                        usesEntertainmentPolicy: usesEntertainmentPolicy
                     ) else {
                         return false
                     }
-                    if bypassesFiltering {
+                    if usesEntertainmentPolicy {
                         return true
                     }
                     guard !mapping.excludedLightIDs.contains(lightID) else {
@@ -79,9 +79,9 @@ struct StoredHueTargetResolver: HueTargetResolving {
         _ area: HueAreaResource,
         canUse light: HueLightResource,
         mapping: HueSonosMapping,
-        bypassesManualOverrides: Bool
+        usesEntertainmentPolicy: Bool
     ) -> Bool {
-        if bypassesManualOverrides {
+        if usesEntertainmentPolicy {
             return true
         }
 

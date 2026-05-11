@@ -37,7 +37,7 @@ enum HueAmbienceTarget: Codable, Equatable, Hashable, Sendable {
         }
     }
 
-    var bypassesFunctionFiltering: Bool {
+    var usesEntertainmentAreaTargetPolicy: Bool {
         if case .entertainmentArea = self { return true }
         return false
     }

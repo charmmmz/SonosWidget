@@ -111,7 +111,7 @@ final class MusicAmbienceManagerTests: XCTestCase {
         XCTAssertEqual(snapshot.albumArtImage, Data([1, 2, 3]))
     }
 
-    func testAreaOptionsListEveryTargetTypeWithEntertainmentFirst() {
+    func testAreaOptionsListAssignableTargetsWithEntertainmentFirst() {
         let areas = [
             HueAreaResource(id: "room-1", name: "Living Room", kind: .room, childLightIDs: ["light-1"]),
             HueAreaResource(id: "ent-1", name: "Living Sync", kind: .entertainmentArea, childLightIDs: ["light-1"]),
@@ -130,9 +130,8 @@ final class MusicAmbienceManagerTests: XCTestCase {
 
         let options = HueAmbienceAreaOptions.displayAreas(from: areas, lights: lights)
 
-        XCTAssertEqual(options.map(\.id), ["ent-1", "room-1", "zone-1", "light-3"])
-        XCTAssertEqual(options.last?.kind, .light)
-        XCTAssertEqual(options.last?.childLightIDs, ["light-3"])
+        XCTAssertEqual(options.map(\.id), ["ent-1", "room-1", "zone-1"])
+        XCTAssertFalse(options.contains { $0.kind == .light })
     }
 
     func testAreaOptionsCreateRoomMappingWithGradientCapability() {
@@ -625,13 +624,22 @@ final class MusicAmbienceManagerTests: XCTestCase {
                     id: "ent-1",
                     name: "Playroom Area",
                     kind: .entertainmentArea,
-                    childLightIDs: ["decorative", "task"],
+                    childLightIDs: ["decorative", "task", "white"],
                     childDeviceIDs: ["device-decorative"]
                 )
             ],
             lights: [
                 makeLight(id: "decorative", ownerID: "device-decorative", function: .decorative),
-                makeLight(id: "task", ownerID: "device-task", function: .functional)
+                makeLight(id: "task", ownerID: "device-task", function: .functional),
+                HueLightResource(
+                    id: "white",
+                    name: "White",
+                    ownerID: "device-white",
+                    supportsColor: false,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .decorative
+                )
             ]
         )
 
