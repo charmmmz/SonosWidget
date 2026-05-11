@@ -388,8 +388,8 @@ struct HueAmbienceSetupSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            LabeledContent("Live Entertainment", value: HueLiveEntertainmentRuntimeStatus.unavailable.reason)
-            Text("Beat-synced Entertainment streaming still needs the NAS runtime. App-only mode uses slow Hue transitions while Charm Player is active.")
+            LabeledContent("Live Entertainment", value: relay.hueAmbienceRuntimeStatus.reason)
+            Text(relay.hueAmbienceRuntimeDetail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

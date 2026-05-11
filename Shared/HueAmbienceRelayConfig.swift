@@ -124,7 +124,49 @@ extension RelayClient {
             let areas: Int?
             let runtimeActive: Bool?
             let activeGroupId: String?
+            let renderMode: HueAmbienceRelayRenderMode?
+            let activeTargetIds: [String]?
+            let entertainmentTargetActive: Bool?
+            let entertainmentMetadataComplete: Bool?
+            let lastFrameAt: String?
             let lastError: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case configured
+                case enabled
+                case bridge
+                case mappings
+                case lights
+                case areas
+                case runtimeActive
+                case activeGroupId
+                case renderMode
+                case activeTargetIds
+                case entertainmentTargetActive
+                case entertainmentMetadataComplete
+                case lastFrameAt
+                case lastError
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                configured = try container.decode(Bool.self, forKey: .configured)
+                enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+                bridge = try container.decodeIfPresent(Bridge.self, forKey: .bridge)
+                mappings = try container.decodeIfPresent(Int.self, forKey: .mappings)
+                lights = try container.decodeIfPresent(Int.self, forKey: .lights)
+                areas = try container.decodeIfPresent(Int.self, forKey: .areas)
+                runtimeActive = try container.decodeIfPresent(Bool.self, forKey: .runtimeActive)
+                activeGroupId = try container.decodeIfPresent(String.self, forKey: .activeGroupId)
+                renderMode = try container
+                    .decodeIfPresent(String.self, forKey: .renderMode)
+                    .flatMap(HueAmbienceRelayRenderMode.init(rawValue:))
+                activeTargetIds = try container.decodeIfPresent([String].self, forKey: .activeTargetIds)
+                entertainmentTargetActive = try container.decodeIfPresent(Bool.self, forKey: .entertainmentTargetActive)
+                entertainmentMetadataComplete = try container.decodeIfPresent(Bool.self, forKey: .entertainmentMetadataComplete)
+                lastFrameAt = try container.decodeIfPresent(String.self, forKey: .lastFrameAt)
+                lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+            }
         }
 
         let ok: Bool
@@ -212,7 +254,14 @@ extension RelayManager {
             let response = try await RelayClient.hueAmbienceStatus(baseURL: url)
             updateHueAmbienceRuntimeStatus(
                 configured: response.status.configured,
-                enabled: response.status.enabled != false
+                enabled: response.status.enabled != false,
+                renderMode: response.status.renderMode,
+                runtimeActive: response.status.runtimeActive,
+                activeTargetIds: response.status.activeTargetIds,
+                entertainmentTargetActive: response.status.entertainmentTargetActive,
+                entertainmentMetadataComplete: response.status.entertainmentMetadataComplete,
+                lastFrameAt: response.status.lastFrameAt,
+                lastError: response.status.lastError
             )
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)

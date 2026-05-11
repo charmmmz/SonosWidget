@@ -74,7 +74,6 @@
 				AlbumPaletteExtractor.swift,
 				AppleMusicHandoff.swift,
 				HandoffMatcher.swift,
-				HueAmbienceModels.swift,
 				HueAmbienceRelayConfig.swift,
 				HueAmbienceRenderer.swift,
 				HueAmbienceStore.swift,

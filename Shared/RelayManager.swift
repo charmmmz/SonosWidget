@@ -52,6 +52,8 @@ final class RelayManager {
     private(set) var status: Status = .disabled
     private(set) var isHueAmbienceRelayConfigured = false
     private(set) var isHueAmbienceRelayEnabled = false
+    private(set) var hueAmbienceRuntimeStatus: HueLiveEntertainmentRuntimeStatus = .unavailable
+    private(set) var hueAmbienceRuntimeDetail = "Sync Music Ambience to NAS Relay to enable always-on ambience."
     var hueAmbienceSyncStatus: HueAmbienceSyncStatus = .idle
 
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
@@ -90,9 +92,7 @@ final class RelayManager {
 
         if trimmed.isEmpty {
             status = .disabled
-            isHueAmbienceRelayConfigured = false
-            isHueAmbienceRelayEnabled = false
-            hueAmbienceSyncStatus = .idle
+            updateHueAmbienceRuntimeStatus(configured: false)
             stopPeriodicProbe()
             return
         }
@@ -149,10 +149,48 @@ final class RelayManager {
         periodicTask = nil
     }
 
-    func updateHueAmbienceRuntimeStatus(configured: Bool, enabled: Bool = true) {
+    func updateHueAmbienceRuntimeStatus(
+        configured: Bool,
+        enabled: Bool = true,
+        renderMode: HueAmbienceRelayRenderMode? = nil,
+        runtimeActive: Bool? = nil,
+        activeTargetIds: [String]? = nil,
+        entertainmentTargetActive: Bool? = nil,
+        entertainmentMetadataComplete: Bool? = nil,
+        lastFrameAt: String? = nil,
+        lastError: String? = nil
+    ) {
         isHueAmbienceRelayConfigured = configured
         isHueAmbienceRelayEnabled = configured && enabled
         hueAmbienceSyncStatus = configured ? .synced(Date()) : .idle
+
+        guard configured else {
+            hueAmbienceRuntimeStatus = .unavailable
+            hueAmbienceRuntimeDetail = "Sync Music Ambience to NAS Relay to enable always-on ambience."
+            return
+        }
+
+        let trimmedError = lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedError.isEmpty {
+            hueAmbienceRuntimeStatus = .error(trimmedError)
+            hueAmbienceRuntimeDetail = "NAS reported a Music Ambience runtime error."
+            return
+        }
+
+        if runtimeActive == true {
+            switch renderMode {
+            case .streamingReady:
+                hueAmbienceRuntimeStatus = .fallback("Streaming-ready via CLIP fallback")
+            case .clipFallback, nil:
+                hueAmbienceRuntimeStatus = .fallback("CLIP fallback active")
+            }
+        } else {
+            hueAmbienceRuntimeStatus = .ready("NAS runtime ready")
+        }
+
+        hueAmbienceRuntimeDetail = entertainmentTargetActive == true && entertainmentMetadataComplete == false
+            ? "Entertainment channel metadata is incomplete."
+            : "NAS controls Music Ambience while it is reachable."
     }
 
     private func updateHueAmbienceRuntimeStatus(from health: RelayClient.HealthResponse.HueAmbience?) {
@@ -163,7 +201,14 @@ final class RelayManager {
 
         updateHueAmbienceRuntimeStatus(
             configured: health.configured == true,
-            enabled: health.enabled != false
+            enabled: health.enabled != false,
+            renderMode: health.renderMode,
+            runtimeActive: health.runtimeActive,
+            activeTargetIds: health.activeTargetIds,
+            entertainmentTargetActive: health.entertainmentTargetActive,
+            entertainmentMetadataComplete: health.entertainmentMetadataComplete,
+            lastFrameAt: health.lastFrameAt,
+            lastError: health.lastError
         )
     }
 

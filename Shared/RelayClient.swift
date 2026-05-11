@@ -23,6 +23,39 @@ enum RelayClient {
             let configured: Bool?
             let enabled: Bool?
             let runtimeActive: Bool?
+            let renderMode: HueAmbienceRelayRenderMode?
+            let activeTargetIds: [String]?
+            let entertainmentTargetActive: Bool?
+            let entertainmentMetadataComplete: Bool?
+            let lastFrameAt: String?
+            let lastError: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case configured
+                case enabled
+                case runtimeActive
+                case renderMode
+                case activeTargetIds
+                case entertainmentTargetActive
+                case entertainmentMetadataComplete
+                case lastFrameAt
+                case lastError
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                configured = try container.decodeIfPresent(Bool.self, forKey: .configured)
+                enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+                runtimeActive = try container.decodeIfPresent(Bool.self, forKey: .runtimeActive)
+                renderMode = try container
+                    .decodeIfPresent(String.self, forKey: .renderMode)
+                    .flatMap(HueAmbienceRelayRenderMode.init(rawValue:))
+                activeTargetIds = try container.decodeIfPresent([String].self, forKey: .activeTargetIds)
+                entertainmentTargetActive = try container.decodeIfPresent(Bool.self, forKey: .entertainmentTargetActive)
+                entertainmentMetadataComplete = try container.decodeIfPresent(Bool.self, forKey: .entertainmentMetadataComplete)
+                lastFrameAt = try container.decodeIfPresent(String.self, forKey: .lastFrameAt)
+                lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+            }
         }
         let ok: Bool
         let groups: [Group]

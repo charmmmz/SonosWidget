@@ -128,22 +128,24 @@ enum HueAmbienceFlowSpeed: String, Codable, Equatable, Sendable, CaseIterable {
 
 enum HueLiveEntertainmentRuntimeStatus: Equatable, Sendable {
     case unavailable
-    case available
-    case streaming
-    case conflict
+    case ready(String)
+    case fallback(String)
+    case active(String)
+    case error(String)
 
     var reason: String {
         switch self {
         case .unavailable:
-            return "Requires NAS/Entertainment streaming runtime"
-        case .available:
-            return "Ready for Live Entertainment"
-        case .streaming:
-            return "Live Entertainment streaming"
-        case .conflict:
-            return "Another Hue app is using this Entertainment Area"
+            return "NAS runtime not configured"
+        case .ready(let reason), .fallback(let reason), .active(let reason), .error(let reason):
+            return reason
         }
     }
+}
+
+enum HueAmbienceRelayRenderMode: String, Codable, Equatable, Sendable {
+    case clipFallback
+    case streamingReady
 }
 
 struct HueSonosMapping: Codable, Equatable, Identifiable, Sendable {

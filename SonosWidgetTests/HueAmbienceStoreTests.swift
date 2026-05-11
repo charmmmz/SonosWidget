@@ -189,7 +189,11 @@ final class HueAmbienceStoreTests: XCTestCase {
     func testLiveEntertainmentWithoutRuntimeUsesClearUnavailableStatus() {
         XCTAssertEqual(
             HueLiveEntertainmentRuntimeStatus.unavailable.reason,
-            "Requires NAS/Entertainment streaming runtime"
+            "NAS runtime not configured"
+        )
+        XCTAssertEqual(
+            HueLiveEntertainmentRuntimeStatus.fallback("Streaming-ready via CLIP fallback").reason,
+            "Streaming-ready via CLIP fallback"
         )
     }
 
