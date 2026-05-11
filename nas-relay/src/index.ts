@@ -13,6 +13,7 @@ import { HueAmbienceService } from './hueAmbienceService.js';
 import { createHueAmbienceRouter } from './hueRoutes.js';
 import { Cs2GameStateService } from './cs2GameState.js';
 import { createCs2GameStateRouter } from './cs2Routes.js';
+import { shouldIgnoreHttpAutoLog } from './httpLogging.js';
 import type { LiveActivityContentState, RegisterRequest, SonosGroupSnapshot } from './types.js';
 
 const log = pino({
@@ -90,6 +91,7 @@ async function main(): Promise<void> {
   app.use(
     pinoHttp({
       logger: log,
+      autoLogging: { ignore: shouldIgnoreHttpAutoLog },
       // Don't log the full body; tokens are sensitive-ish.
       serializers: { req: req => ({ method: req.method, url: req.url }) },
     }),
