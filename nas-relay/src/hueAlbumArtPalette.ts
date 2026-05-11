@@ -69,7 +69,9 @@ export async function fetchAlbumArt(uri: string): Promise<Buffer> {
 }
 
 export function paletteFromAlbumArtBuffer(data: Buffer): HueRGBColor[] {
-  return extractPaletteFromColors(sampleImageColors(decodeImage(data)));
+  const colors = sampleImageColors(decodeImage(data));
+  const palette = extractPaletteFromColors(colors);
+  return palette.length > 0 ? palette : fallbackPaletteFromAlbumColors(colors);
 }
 
 export function extractPaletteFromColors(
@@ -205,4 +207,39 @@ function distance(a: HueRGBColor, b: HueRGBColor): number {
   const gDelta = a.g - b.g;
   const bDelta = a.b - b.b;
   return Math.sqrt(rDelta * rDelta + gDelta * gDelta + bDelta * bDelta);
+}
+
+function fallbackPaletteFromAlbumColors(colors: HueRGBColor[]): HueRGBColor[] {
+  if (colors.length === 0) return [];
+
+  const total = colors.reduce(
+    (sum, color) => ({
+      r: sum.r + color.r,
+      g: sum.g + color.g,
+      b: sum.b + color.b,
+    }),
+    { r: 0, g: 0, b: 0 },
+  );
+  return [readableLightColor({
+    r: total.r / colors.length,
+    g: total.g / colors.length,
+    b: total.b / colors.length,
+  })];
+}
+
+function readableLightColor(color: HueRGBColor): HueRGBColor {
+  const maxComponent = brightness(color);
+  if (maxComponent <= 0) return { r: 0.3, g: 0.3, b: 0.3 };
+
+  const targetMax = Math.min(Math.max(maxComponent, 0.3), 0.82);
+  const scale = targetMax / maxComponent;
+  return {
+    r: clamp(color.r * scale),
+    g: clamp(color.g * scale),
+    b: clamp(color.b * scale),
+  };
+}
+
+function clamp(value: number): number {
+  return Math.min(Math.max(value, 0), 1);
 }

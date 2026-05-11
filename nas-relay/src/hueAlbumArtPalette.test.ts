@@ -51,6 +51,20 @@ test('album art palette extraction decodes PNG artwork bytes', () => {
   assert.ok(palette.some(color => color.r > 0.7 && color.g > 0.6 && color.b < 0.2));
 });
 
+test('black and white album art falls back to a neutral cover color', () => {
+  const palette = paletteFromAlbumArtBuffer(makeStripedPng([
+    { r: 0.08, g: 0.08, b: 0.08 },
+    { r: 0.82, g: 0.82, b: 0.82 },
+  ]));
+
+  assert.equal(palette.length, 1);
+  const neutral = palette[0]!;
+  assert.ok(Math.abs(neutral.r - neutral.g) < 0.02);
+  assert.ok(Math.abs(neutral.g - neutral.b) < 0.02);
+  assert.ok(neutral.r >= 0.25);
+  assert.ok(neutral.r <= 0.8);
+});
+
 function makeStripedPng(colors: HueRGBColor[]): Buffer {
   const width = colors.length * 8;
   const height = 8;

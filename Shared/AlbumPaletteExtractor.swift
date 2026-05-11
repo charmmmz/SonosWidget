@@ -68,11 +68,43 @@ enum AlbumPaletteExtractor {
             }
         }
 
-        if palette.isEmpty, let fallback = image.paletteFallbackColor {
+        if palette.isEmpty, let fallback = fallbackColor(from: sampledColors) {
             return [fallback]
         }
 
         return palette
+    }
+
+    private static func fallbackColor(from colors: [HueRGBColor]) -> HueRGBColor? {
+        guard !colors.isEmpty else { return nil }
+
+        let total = colors.reduce(HueRGBColor(r: 0, g: 0, b: 0)) { sum, color in
+            HueRGBColor(
+                r: sum.r + color.r,
+                g: sum.g + color.g,
+                b: sum.b + color.b
+            )
+        }
+        return readableLightColor(HueRGBColor(
+            r: total.r / Double(colors.count),
+            g: total.g / Double(colors.count),
+            b: total.b / Double(colors.count)
+        ))
+    }
+
+    private static func readableLightColor(_ color: HueRGBColor) -> HueRGBColor {
+        let maxComponent = color.brightness
+        guard maxComponent > 0 else {
+            return HueRGBColor(r: 0.3, g: 0.3, b: 0.3)
+        }
+
+        let targetMax = min(max(maxComponent, 0.3), 0.82)
+        let scale = targetMax / maxComponent
+        return HueRGBColor(
+            r: min(max(color.r * scale, 0), 1),
+            g: min(max(color.g * scale, 0), 1),
+            b: min(max(color.b * scale, 0), 1)
+        )
     }
 }
 
@@ -155,28 +187,9 @@ private extension UIImage {
         return colors
     }
 
-    var paletteFallbackColor: HueRGBColor? {
-        guard let hex = dominantColorHex() else { return nil }
-        return HueRGBColor(hex: hex)
-    }
 }
 
 private extension HueRGBColor {
-    init?(hex: String) {
-        var value = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.hasPrefix("#") {
-            value.removeFirst()
-        }
-
-        guard value.count == 6, let rgb = UInt64(value, radix: 16) else {
-            return nil
-        }
-
-        r = Double((rgb >> 16) & 0xFF) / 255.0
-        g = Double((rgb >> 8) & 0xFF) / 255.0
-        b = Double(rgb & 0xFF) / 255.0
-    }
-
     var saturation: Double {
         let maxComponent = max(r, g, b)
         let minComponent = min(r, g, b)

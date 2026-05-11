@@ -52,6 +52,25 @@ final class AlbumPaletteExtractorTests: XCTestCase {
         XCTAssertNotEqual(fallbackColor.xy, HueXYColor(x: 0, y: 0))
     }
 
+    func testGrayscaleArtworkFallsBackToNeutralCoverColor() throws {
+        let image = makeStripedImage(
+            colors: [
+                UIColor(white: 0.08, alpha: 1),
+                UIColor(white: 0.82, alpha: 1)
+            ],
+            size: CGSize(width: 80, height: 40)
+        )
+
+        let palette = AlbumPaletteExtractor.palette(from: image)
+
+        XCTAssertEqual(palette.count, 1)
+        let neutral = try XCTUnwrap(palette.first)
+        XCTAssertLessThan(abs(neutral.r - neutral.g), 0.02)
+        XCTAssertLessThan(abs(neutral.g - neutral.b), 0.02)
+        XCTAssertGreaterThanOrEqual(neutral.r, 0.25)
+        XCTAssertLessThanOrEqual(neutral.r, 0.8)
+    }
+
     private func makeStripedImage(colors: [UIColor], size: CGSize) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: size)
         return renderer.image { context in
