@@ -142,6 +142,35 @@ test('idle snapshots from other Sonos groups do not stop the active Hue ambience
   }
 });
 
+test('non-music playing snapshots do not start Hue ambience', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'hue-service-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save({ ...config, stopBehavior: 'turnOff' });
+    const client = new RecordingHueLightClient();
+    const service = new HueAmbienceService(
+      store,
+      pino({ enabled: false }),
+      () => client,
+      () => [{ r: 1, g: 0, b: 0 }],
+      1,
+    );
+    await service.load();
+
+    service.receiveSnapshot({
+      ...snapshot('/tv-art.jpg'),
+      playbackSourceRaw: 'tv',
+      musicAmbienceEligible: false,
+    });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    assert.equal(client.updates.length, 0);
+    assert.equal(service.status().runtimeActive, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 const config: HueAmbienceRuntimeConfig = {
   enabled: true,
   bridge: { id: 'bridge-1', ipAddress: '192.168.50.216', name: 'Hue Bridge' },

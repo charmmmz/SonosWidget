@@ -90,6 +90,13 @@ export class HueAmbienceService {
       return;
     }
 
+    if (snapshot.musicAmbienceEligible === false) {
+      if (this.snapshotIsUnrelatedToActiveGroup(snapshot)) return;
+      this.scheduleStopActive();
+      this.lastError = 'Active Sonos source is not eligible for Music Ambience';
+      return;
+    }
+
     const targets = resolveHueTargets(config, snapshot);
     if (targets.length === 0) {
       if (this.snapshotIsUnrelatedToActiveGroup(snapshot)) return;

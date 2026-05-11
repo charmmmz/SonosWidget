@@ -103,6 +103,8 @@ async function main(): Promise<void> {
         speakerName: s.speakerName,
         isPlaying: s.isPlaying,
         title: s.trackTitle,
+        playbackSourceRaw: s.playbackSourceRaw,
+        musicAmbienceEligible: s.musicAmbienceEligible,
       })),
       hueAmbience: hueAmbience.status(),
     });
@@ -182,7 +184,7 @@ function buildContentState(snap: SonosGroupSnapshot): LiveActivityContentState {
     endsAt: endsAtUnix !== null ? toSwiftDate(endsAtUnix) : null,
     albumArtThumbnail: null, // Phase 2: fetch + downscale art on the relay
     groupMemberCount: snap.groupMemberCount,
-    playbackSourceRaw: null,
+    playbackSourceRaw: snap.playbackSourceRaw ?? null,
   };
 }
 

@@ -12,6 +12,7 @@ import type { SonosGroupSnapshot } from './types.js';
 export class SonosBridge extends EventEmitter {
   private readonly manager = new SonosManager();
   private readonly snapshots = new Map<string, SonosGroupSnapshot>();
+  private readonly refreshSequences = new Map<string, number>();
   private readonly log: Logger;
   private periodicHandle: NodeJS.Timeout | null = null;
 
@@ -144,16 +145,26 @@ export class SonosBridge extends EventEmitter {
   }
 
   private async refreshSnapshot(device: any): Promise<void> {
+    let groupId: string | null = null;
+    let refreshSequence = 0;
     try {
       // Use the coordinator LAN IP as the group identifier so iOS and the
       // relay agree without an extra mapping step. iOS sends `playbackIP`,
       // which is `coordinatorIP ?? ipAddress`.
       const coordinator = device.Coordinator ?? device;
-      const groupId: string = coordinator.Host ?? device.Host ?? device.Uuid;
+      const resolvedGroupId = firstNonEmpty(coordinator.Host, device.Host, device.Uuid);
+      if (!resolvedGroupId) {
+        throw new Error(`missing Sonos group id for ${device.Name ?? 'unknown device'}`);
+      }
+      groupId = resolvedGroupId;
+      refreshSequence = this.beginRefresh(resolvedGroupId);
       const transport = await coordinator.AVTransportService.GetTransportInfo();
       const position = await coordinator.AVTransportService.GetPositionInfo();
+      if (!this.isCurrentRefresh(resolvedGroupId, refreshSequence)) return;
 
       const isPlaying = String(transport.CurrentTransportState) === 'PLAYING';
+      const trackUri = firstNonEmpty(position.TrackURI, coordinator.CurrentTrackUri, device.CurrentTrackUri);
+      const playbackSourceRaw = playbackSourceFromTrackUri(trackUri);
       const positionSeconds = parseDuration(position.RelTime ?? '00:00:00');
       const durationSeconds = parseDuration(position.TrackDuration ?? '00:00:00');
       const metadata = trackMetadataFromMetadata(position.TrackMetaData);
@@ -171,17 +182,25 @@ export class SonosBridge extends EventEmitter {
           ?? device.CurrentTrack?.AlbumArtUri
           ?? device.CurrentTrack?.AlbumArtURI
           ?? metadata.albumArtUri,
-        coordinator.Host ?? device.Host,
+        coordinator.Host ?? device.Host ?? resolvedGroupId,
       );
 
       const snapshot: SonosGroupSnapshot = {
-        groupId,
+        groupId: resolvedGroupId,
         speakerName: coordinator.Name ?? device.Name ?? device.Uuid,
         trackTitle,
         artist,
         album,
         albumArtUri,
         isPlaying,
+        playbackSourceRaw,
+        musicAmbienceEligible: isMusicAmbienceEligibleForSnapshot({
+          trackTitle,
+          artist,
+          album,
+          albumArtUri,
+          playbackSourceRaw,
+        }),
         positionSeconds,
         durationSeconds,
         // Manager doesn't always know the live group size from here; default 1
@@ -191,14 +210,25 @@ export class SonosBridge extends EventEmitter {
         sampledAt: new Date(),
       };
 
-      this.snapshots.set(groupId, snapshot);
+      this.snapshots.set(resolvedGroupId, snapshot);
       this.emit('change', snapshot);
     } catch (err) {
+      if (groupId && !this.isCurrentRefresh(groupId, refreshSequence)) return;
       this.log.warn(
         { err, device: device.Name },
         'snapshot refresh failed — will retry on next event',
       );
     }
+  }
+
+  private beginRefresh(groupId: string): number {
+    const sequence = (this.refreshSequences.get(groupId) ?? 0) + 1;
+    this.refreshSequences.set(groupId, sequence);
+    return sequence;
+  }
+
+  private isCurrentRefresh(groupId: string, sequence: number): boolean {
+    return this.refreshSequences.get(groupId) === sequence;
   }
 }
 
@@ -211,6 +241,52 @@ function parseDuration(s: string): number {
 
 export function albumArtUriFromMetadata(metadata: unknown): string | null {
   return trackMetadataFromMetadata(metadata).albumArtUri;
+}
+
+export function playbackSourceFromTrackUri(trackUri: unknown): string | null {
+  if (typeof trackUri !== 'string') return null;
+  const uri = trackUri.trim().toLowerCase();
+  if (uri.length === 0) return null;
+
+  if (uri.startsWith('x-sonos-spotify:') || uri.includes('sid=9&') || uri.endsWith('sid=9')) return 'spotify';
+  if (uri.startsWith('x-sonosprog-http:') || uri.includes('sid=204')) return 'appleMusic';
+  if (uri.includes('sid=203')) return 'amazonMusic';
+  if (uri.includes('sid=174')) return 'tidal';
+  if (uri.includes('sid=284')) return 'youtubeMusic';
+  if (uri.startsWith('x-sonos-htastream:')) return 'tv';
+  if (uri.startsWith('x-sonos-vli:') || uri.startsWith('x-rincon-stream:')) return 'airplay';
+  if (
+    uri.startsWith('x-sonosapi-stream:')
+    || uri.startsWith('x-sonosapi-radio:')
+    || uri.startsWith('x-rincon-mp3radio:')
+    || uri.startsWith('aac:')
+  ) {
+    return 'radio';
+  }
+  if (uri.startsWith('x-file-cifs:') || uri.startsWith('x-rincon-playlist:')) return 'library';
+  return null;
+}
+
+export function isMusicAmbienceEligibleForSnapshot(snapshot: {
+  trackTitle?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  albumArtUri?: string | null;
+  playbackSourceRaw?: string | null;
+}): boolean {
+  if (snapshot.playbackSourceRaw === 'tv' || snapshot.playbackSourceRaw === 'lineIn') {
+    return false;
+  }
+
+  if (snapshot.albumArtUri && snapshot.albumArtUri.trim().length > 0) return true;
+
+  const title = normalizedMetadata(snapshot.trackTitle);
+  const artist = normalizedMetadata(snapshot.artist);
+  const album = normalizedMetadata(snapshot.album);
+  if (!title) return false;
+
+  if (snapshot.playbackSourceRaw && snapshot.playbackSourceRaw !== 'unknown') return true;
+  return Boolean(artist || album);
 }
 
 export interface SonosTrackMetadata {
@@ -255,6 +331,11 @@ function emptyTrackMetadata(): SonosTrackMetadata {
     album: null,
     albumArtUri: null,
   };
+}
+
+function normalizedMetadata(value: string | null | undefined): string {
+  const normalized = (value ?? '').trim().toLowerCase();
+  return normalized === 'unknown' ? '' : normalized;
 }
 
 function xmlTagValue(xml: string, tag: string): string | null {
