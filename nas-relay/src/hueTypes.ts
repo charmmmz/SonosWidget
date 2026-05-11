@@ -5,6 +5,8 @@ export type HueAmbienceCapability = 'basic' | 'gradientReady' | 'liveEntertainme
 export type HueGroupSyncStrategy = 'allMappedRooms' | 'coordinatorOnly';
 export type HueAmbienceStopBehavior = 'leaveCurrent' | 'turnOff';
 export type HueAmbienceMotionStyle = 'flowing' | 'still';
+export type HueAmbienceRenderMode = 'clipFallback' | 'streamingReady';
+export type HueAmbienceFrameReason = 'steady' | 'trackChange' | 'pause' | 'stop' | 'disable';
 export type HueLightFunction = 'decorative' | 'functional' | 'mixed' | 'unknown';
 
 export interface HueBridgeInfo {
@@ -40,12 +42,24 @@ export interface HueLightResource {
   functionMetadataResolved: boolean;
 }
 
+export interface HueEntertainmentChannelResource {
+  id: string;
+  lightID?: string | null;
+  serviceID?: string | null;
+  position?: {
+    x: number;
+    y: number;
+    z: number;
+  } | null;
+}
+
 export interface HueAreaResource {
   id: string;
   name: string;
   kind: HueAmbienceTargetKind;
   childLightIDs: string[];
   childDeviceIDs?: string[];
+  entertainmentChannels?: HueEntertainmentChannelResource[];
 }
 
 export interface HueBridgeResources {
@@ -91,6 +105,11 @@ export interface HueAmbienceStatus {
   areas?: number;
   motionStyle?: HueAmbienceMotionStyle;
   stopBehavior?: HueAmbienceStopBehavior;
+  renderMode?: HueAmbienceRenderMode | null;
+  activeTargetIds?: string[];
+  entertainmentTargetActive?: boolean;
+  entertainmentMetadataComplete?: boolean;
+  lastFrameAt?: string | null;
   activeGroupId?: string | null;
   lastError?: string | null;
 }
