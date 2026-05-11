@@ -39,6 +39,210 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertEqual(decoded.preferredTarget?.id, "light-1")
     }
 
+    func testAreaOptionsExcludeDirectLightTargets() {
+        let options = HueAmbienceAreaOptions.displayAreas(
+            from: [
+                HueAreaResource(
+                    id: "ent-1",
+                    name: "Playroom Area",
+                    kind: .entertainmentArea,
+                    childLightIDs: ["light-1"]
+                ),
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Playroom",
+                    kind: .room,
+                    childLightIDs: ["light-1"]
+                ),
+                HueAreaResource(
+                    id: "zone-1",
+                    name: "Desk Zone",
+                    kind: .zone,
+                    childLightIDs: ["light-2"]
+                )
+            ],
+            lights: [
+                HueLightResource(
+                    id: "light-1",
+                    name: "Desk Lamp",
+                    ownerID: "device-1",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            options.map(\.kind),
+            [.entertainmentArea, .room, .zone]
+        )
+        XCTAssertFalse(options.contains { $0.kind == .light })
+    }
+
+    func testAreaOptionsExcludeIncomingLightAreaResources() {
+        let options = HueAmbienceAreaOptions.displayAreas(
+            from: [
+                HueAreaResource(
+                    id: "light-area-1",
+                    name: "Legacy Light",
+                    kind: .light,
+                    childLightIDs: ["light-1"]
+                ),
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Playroom",
+                    kind: .room,
+                    childLightIDs: ["light-1"]
+                )
+            ],
+            lights: [
+                HueLightResource(
+                    id: "light-1",
+                    name: "Desk Lamp",
+                    ownerID: "device-1",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true
+                )
+            ]
+        )
+
+        XCTAssertEqual(options.map(\.kind), [.room])
+        XCTAssertFalse(options.contains { $0.kind == .light })
+    }
+
+    func testEntertainmentMappingSanitizationClearsManualLightOverrides() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+
+        store.updateResources(HueBridgeResources(
+            lights: [
+                HueLightResource(
+                    id: "task-light",
+                    name: "Task Lamp",
+                    ownerID: "device-1",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true,
+                    function: .functional
+                )
+            ],
+            areas: [
+                HueAreaResource(
+                    id: "ent-1",
+                    name: "Playroom Area",
+                    kind: .entertainmentArea,
+                    childLightIDs: ["task-light"],
+                    childDeviceIDs: ["device-1"]
+                )
+            ]
+        ))
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "playroom",
+            sonosName: "Playroom",
+            preferredTarget: .entertainmentArea("ent-1"),
+            includedLightIDs: ["task-light"],
+            excludedLightIDs: ["task-light"],
+            capability: .liveEntertainment
+        ))
+
+        store.updateResources(store.hueResources)
+
+        let mapping = store.mapping(forSonosID: "playroom")
+        XCTAssertEqual(mapping?.preferredTarget, .entertainmentArea("ent-1"))
+        XCTAssertEqual(mapping?.includedLightIDs, [])
+        XCTAssertEqual(mapping?.excludedLightIDs, [])
+    }
+
+    func testLegacyDirectLightMappingIsRemovedDuringSanitization() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+
+        store.updateResources(HueBridgeResources(
+            lights: [
+                HueLightResource(
+                    id: "light-1",
+                    name: "Desk Lamp",
+                    ownerID: "device-1",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true
+                )
+            ],
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Playroom",
+                    kind: .room,
+                    childLightIDs: ["light-1"],
+                    childDeviceIDs: ["device-1"]
+                )
+            ]
+        ))
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "playroom",
+            sonosName: "Playroom",
+            preferredTarget: .light("light-1"),
+            capability: .gradientReady
+        ))
+
+        store.updateResources(store.hueResources)
+
+        XCTAssertNil(store.mapping(forSonosID: "playroom"))
+    }
+
+    func testMappingSanitizationDropsDirectLightFallbackForValidRoomPreferred() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+
+        store.updateResources(HueBridgeResources(
+            lights: [
+                HueLightResource(
+                    id: "light-1",
+                    name: "Desk Lamp",
+                    ownerID: "device-1",
+                    supportsColor: true,
+                    supportsGradient: false,
+                    supportsEntertainment: true
+                )
+            ],
+            areas: [
+                HueAreaResource(
+                    id: "room-1",
+                    name: "Playroom",
+                    kind: .room,
+                    childLightIDs: ["light-1"],
+                    childDeviceIDs: ["device-1"]
+                )
+            ]
+        ))
+        store.upsertMapping(HueSonosMapping(
+            sonosID: "playroom",
+            sonosName: "Playroom",
+            preferredTarget: .room("room-1"),
+            fallbackTarget: .light("light-1")
+        ))
+
+        store.updateResources(store.hueResources)
+
+        let mapping = store.mapping(forSonosID: "playroom")
+        XCTAssertEqual(mapping?.preferredTarget, .room("room-1"))
+        XCTAssertNil(mapping?.fallbackTarget)
+    }
+
     func testOlderMappingPayloadDefaultsIncludedLightsToEmpty() throws {
         let data = """
         {

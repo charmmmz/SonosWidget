@@ -365,14 +365,14 @@ private extension HueBridgeResources {
         )
     }
 
-    func containsTarget(_ target: HueAmbienceTarget?) -> Bool {
+    func containsAssignableTarget(_ target: HueAmbienceTarget?) -> Bool {
         guard let target else {
             return false
         }
 
         switch target {
-        case .light(let id):
-            return lights.contains { $0.id == id }
+        case .light:
+            return false
         case .entertainmentArea, .room, .zone:
             return areas.contains { $0.id == target.id && $0.ambienceTarget == target }
         }
@@ -382,8 +382,8 @@ private extension HueBridgeResources {
 private extension HueSonosMapping {
     func sanitized(for resources: HueBridgeResources) -> HueSonosMapping? {
         let validLightIDs = Set(resources.lights.map(\.id))
-        let resolvedPreferred = resources.containsTarget(preferredTarget) ? preferredTarget : nil
-        let resolvedFallback = resources.containsTarget(fallbackTarget) ? fallbackTarget : nil
+        let resolvedPreferred = resources.containsAssignableTarget(preferredTarget) ? preferredTarget : nil
+        let resolvedFallback = resources.containsAssignableTarget(fallbackTarget) ? fallbackTarget : nil
 
         guard let target = resolvedPreferred ?? resolvedFallback else {
             return nil
@@ -392,8 +392,13 @@ private extension HueSonosMapping {
         var mapping = self
         mapping.preferredTarget = target
         mapping.fallbackTarget = resolvedPreferred == nil ? nil : resolvedFallback
-        mapping.includedLightIDs = includedLightIDs.intersection(validLightIDs)
-        mapping.excludedLightIDs = excludedLightIDs.intersection(validLightIDs)
+        if target.isEntertainmentArea {
+            mapping.includedLightIDs = []
+            mapping.excludedLightIDs = []
+        } else {
+            mapping.includedLightIDs = includedLightIDs.intersection(validLightIDs)
+            mapping.excludedLightIDs = excludedLightIDs.intersection(validLightIDs)
+        }
         return mapping
     }
 }

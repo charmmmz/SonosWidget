@@ -27,6 +27,25 @@ enum HueAmbienceTarget: Codable, Equatable, Hashable, Sendable {
         if case .entertainmentArea = self { return true }
         return false
     }
+
+    var allowsManualLightSelection: Bool {
+        switch self {
+        case .room, .zone:
+            return true
+        case .entertainmentArea, .light:
+            return false
+        }
+    }
+
+    var bypassesFunctionFiltering: Bool {
+        if case .entertainmentArea = self { return true }
+        return false
+    }
+
+    var isLegacyDirectLightTarget: Bool {
+        if case .light = self { return true }
+        return false
+    }
 }
 
 enum HueAmbienceCapability: String, Codable, Equatable, Sendable, CaseIterable {
@@ -435,19 +454,15 @@ enum HueAmbienceAreaOptions {
     }
 
     static func displayAreas(from areas: [HueAreaResource], lights: [HueLightResource]) -> [HueAreaResource] {
-        let lightTargets = lights
-            .filter(\.supportsColor)
-            .map { light in
-                HueAreaResource(
-                    id: light.id,
-                    name: light.name,
-                    kind: .light,
-                    childLightIDs: [light.id],
-                    childDeviceIDs: light.ownerID.map { [$0] } ?? []
-                )
+        areas.filter { area in
+            switch area.kind {
+            case .entertainmentArea, .room, .zone:
+                return true
+            case .light:
+                return false
             }
-
-        return (areas + lightTargets).sorted { lhs, rhs in
+        }
+        .sorted { lhs, rhs in
             let lhsRank = sortRank(lhs.kind)
             let rhsRank = sortRank(rhs.kind)
             if lhsRank != rhsRank {
