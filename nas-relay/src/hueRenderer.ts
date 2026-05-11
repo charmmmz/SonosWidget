@@ -80,6 +80,13 @@ export function buildHueLightBody(
   };
 }
 
+export function buildHueLightOffBody(): { on: { on: false }; dynamics: { duration: number } } {
+  return {
+    on: { on: false },
+    dynamics: { duration: 1200 },
+  };
+}
+
 export async function applyHuePalette(
   client: HueLightClient,
   targets: HueResolvedAmbienceTarget[],
@@ -102,10 +109,7 @@ export async function stopHueTargets(
 ): Promise<void> {
   for (const target of targets) {
     for (const light of target.lights) {
-      await client.updateLight(light.id, {
-        on: { on: false },
-        dynamics: { duration: 1200 },
-      });
+      await client.updateLight(light.id, buildHueLightOffBody());
     }
   }
 }
