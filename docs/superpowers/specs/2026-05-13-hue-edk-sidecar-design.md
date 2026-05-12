@@ -178,6 +178,45 @@ treated as sensitive.
 Logs should include operation status and effect names, but not application keys,
 streaming client keys, or raw credentials.
 
+For any public or production release, the sidecar must not rely on the EDK's
+default bridge credential file storage. The EDK README explicitly places safe
+storage of the Hue username and client key on the developer when releasing an
+application publicly; the default file storage is acceptable only when the
+platform storage is sandboxed away from other applications. The preferred
+sidecar behavior is:
+
+- accept credentials from `nas-relay` at runtime;
+- keep credentials in memory where possible;
+- avoid writing EDK bridge credentials to the sidecar volume;
+- if EDK persistence is required, inject a custom bridge storage accessor or
+  enable EDK file encryption with a key managed outside the checked-in code and
+  outside the sidecar image.
+
+## Distribution Requirements
+
+The EDK terms allow creating a product, app, or service for end users, but they
+also add product obligations that affect the sidecar plan:
+
+- The product or service must provide significant additional functionality beyond
+  the EDK itself. CS2 and music-driven lighting qualify as product behavior, but
+  the sidecar should not be marketed as a generic Hue EDK redistribution.
+- End users must accept terms at least as strict as the EDK terms where required.
+- The app must tell users it is provided by us, not by Signify/Philips Hue.
+- The app must not use Hue, Signify, or Philips branding in logos or graphics
+  without written approval.
+- The app must warn users about possible adverse health effects from certain
+  light combinations or frequencies and tell them to stop using affected
+  features if they experience discomfort.
+- The product must not distribute EDK source code, EDK materials, documentation,
+  examples, or derivatives of those materials.
+- The product must comply with export-control requirements and applicable privacy
+  and device-data obligations.
+
+These points make a private sidecar image the right first implementation path.
+They also mean any App Store or commercial release needs an EULA/privacy update,
+health warning copy, and a final Signify confirmation for Docker image
+distribution of compiled EDK-linked binaries.
+
 ## Testing
 
 Testing is split between repositories.
@@ -201,6 +240,10 @@ In `HueEdkSidecar`:
 Before external distribution, ask Hue/Signify whether a closed-source companion
 service or Docker image may include compiled EDK-linked binaries without EDK
 source, headers, documentation, or examples.
+
+Before external distribution, decide whether the production sidecar keeps Hue
+credentials entirely in memory or uses a custom encrypted EDK bridge storage
+implementation.
 
 Before broadening the MVP, compare real-world output between the built-in
 renderer and EDK sidecar for CT ambience, flash, and kill burst on the same
