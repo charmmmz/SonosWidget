@@ -245,6 +245,31 @@ test('CS2 lighting service rejects CLIP fallback render results', async () => {
   }
 });
 
+test('CS2 lighting service logs render error causes for Hue streaming failures', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const logger = new RecordingCs2LightingLogger();
+    const service = new Cs2LightingService(
+      store,
+      () => new ThrowingHueAmbienceRenderer(new Error('Hue Entertainment streaming is required', {
+        cause: new Error('DTLS socket send failed'),
+      })),
+      { logger },
+    );
+
+    await service.receive(snapshot({
+      player: { state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+
+    assert.equal(logger.warnRecords.length, 1);
+    assert.equal(logger.warnRecords[0]?.data.error, 'render_error:Hue Entertainment streaming is required: DTLS socket send failed');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CS2 lighting service reports fallback when no entertainment area is mapped', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
@@ -773,6 +798,30 @@ test('CS2 planted bomb preset runs near Hue Entertainment update cadence', async
   }
 });
 
+test('CS2 planted bomb preset does not exceed stable Hue Entertainment cadence', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    const service = new Cs2LightingService(store, () => renderer, {
+      minRenderIntervalMs: 0,
+      activeTimeoutMs: 2_000,
+    });
+
+    await service.receive(snapshot({
+      round: { bomb: 'planted' },
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+
+    await new Promise(resolve => setTimeout(resolve, 170));
+
+    assert(renderer.renderedFrames.length <= 6);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CS2 planted bomb animation keeps streaming active between game state heartbeats', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
@@ -928,9 +977,20 @@ class RecordingHueAmbienceRenderer implements HueAmbienceRenderer {
   }
 }
 
+class ThrowingHueAmbienceRenderer implements HueAmbienceRenderer {
+  constructor(private readonly error: Error) {}
+
+  async render(_frame: HueAmbienceFrame): Promise<{ transport: 'clipFallback' | 'entertainmentStreaming' }> {
+    throw this.error;
+  }
+
+  async stop(_frame: HueAmbienceFrame): Promise<void> {}
+}
+
 class RecordingCs2LightingLogger {
   readonly infoRecords: Array<{ data: Record<string, unknown>; message: string }> = [];
   readonly debugRecords: Array<{ data: Record<string, unknown>; message: string }> = [];
+  readonly warnRecords: Array<{ data: Record<string, unknown>; message: string }> = [];
 
   info(data: Record<string, unknown>, message: string): void {
     this.infoRecords.push({ data, message });
@@ -938,5 +998,9 @@ class RecordingCs2LightingLogger {
 
   debug(data: Record<string, unknown>, message: string): void {
     this.debugRecords.push({ data, message });
+  }
+
+  warn(data: Record<string, unknown>, message: string): void {
+    this.warnRecords.push({ data, message });
   }
 }

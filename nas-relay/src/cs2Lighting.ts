@@ -67,7 +67,7 @@ interface Cs2LightingServiceOptions {
 
 const defaultActiveTimeoutMs = 60_000;
 const defaultMinRenderIntervalMs = 70;
-const animationFrameIntervalMs = 16;
+const animationFrameIntervalMs = 40;
 const c4FuseMs = 40_000;
 
 const palettes = {
@@ -228,7 +228,7 @@ export class Cs2LightingService {
       }
     } catch (err) {
       this.clearActive(true);
-      this.fallbackReason = `render_error:${err instanceof Error ? err.message : String(err)}`;
+      this.fallbackReason = `render_error:${errorMessageWithCauses(err)}`;
       await this.logLightingRenderError(snapshot, backgroundDecision, overlayDecision, decision, this.fallbackReason);
     }
   }
@@ -1081,6 +1081,28 @@ function diagnosticSignature(record: Record<string, unknown>): string {
     record.roundKills,
     JSON.stringify(record.firstColor ?? null),
   ].join('|');
+}
+
+function errorMessageWithCauses(err: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = err;
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof Error) {
+      if (current.message && !messages.includes(current.message)) {
+        messages.push(current.message);
+      }
+      current = current.cause;
+      continue;
+    }
+
+    const message = String(current);
+    if (message && !messages.includes(message)) {
+      messages.push(message);
+    }
+    break;
+  }
+
+  return messages.length > 0 ? messages.join(': ') : 'unknown';
 }
 
 function roundPhase(snapshot: Cs2GameStateSnapshot): string {
