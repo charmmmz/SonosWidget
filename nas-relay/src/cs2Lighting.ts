@@ -3,7 +3,7 @@ import type { HueAmbienceRenderer } from './hueFrameRenderer.js';
 import { HueClipClient } from './hueClient.js';
 import type { HueAmbienceConfigStore } from './hueConfigStore.js';
 import type { Cs2GameStateSnapshot } from './cs2Types.js';
-import { createHueEntertainmentStreamingRenderer, type HueEntertainmentControlClient } from './hueEntertainmentStream.js';
+import { createHueEntertainmentStreamingOnlyRenderer, type HueEntertainmentControlClient } from './hueEntertainmentStream.js';
 import type {
   HueAmbienceRuntimeConfig,
   HueRGBColor,
@@ -25,6 +25,7 @@ export interface Cs2LightingDecision {
     | 'lowHealth';
   palette: HueRGBColor[];
   transitionSeconds: number;
+  attackSeconds: number;
   holdSeconds: number;
   fadeSeconds: number;
   dynamicKey?: string;
@@ -39,7 +40,7 @@ export interface Cs2LightingStatus {
   enabled: boolean;
   active: boolean;
   mode: Cs2LightingMode;
-  transport: 'clipFallback' | 'entertainmentStreaming' | 'unavailable';
+  transport: 'entertainmentStreaming' | 'unavailable';
   fallbackReason: string | null;
 }
 
@@ -52,6 +53,7 @@ interface Cs2LightingServiceOptions {
 
 const defaultActiveTimeoutMs = 3_000;
 const defaultMinRenderIntervalMs = 70;
+const animationFrameIntervalMs = 45;
 const c4FuseMs = 40_000;
 
 const palettes = {
@@ -94,6 +96,7 @@ const palettes = {
 
 interface HeldCs2Effect {
   decision: Cs2LightingDecision;
+  baseDecision: Cs2LightingDecision;
   startedAtMs: number;
 }
 
@@ -109,6 +112,13 @@ export class Cs2LightingService {
   private activeRenderer: HueAmbienceRenderer | null = null;
   private activeRendererConfigKey: string | null = null;
   private inactiveStopTimer: NodeJS.Timeout | null = null;
+  private animationTimer: NodeJS.Timeout | null = null;
+  private animationContext: {
+    providerSteamId: string;
+    config: HueAmbienceRuntimeConfig;
+    targets: HueResolvedAmbienceTarget[];
+  } | null = null;
+  private animationInFlight = false;
   private heldEffects = new Map<string, HeldCs2Effect>();
   private bombPlantedAtByProvider = new Map<string, number>();
 
@@ -141,10 +151,11 @@ export class Cs2LightingService {
     }
 
     this.updateBombClock(snapshot, previous, now);
-    const baseDecision = buildCs2LightingDecision(snapshot, previous, {
+    const decisionContext: Cs2LightingDecisionContext = {
       bombPlantedAt: this.bombPlantedAtByProvider.get(snapshot.providerSteamId),
       nowMs: now,
-    });
+    };
+    const baseDecision = buildCs2LightingDecision(snapshot, previous, decisionContext);
     if (!baseDecision) {
       this.clearActive(true);
       this.heldEffects.delete(snapshot.providerSteamId);
@@ -152,7 +163,7 @@ export class Cs2LightingService {
       return;
     }
 
-    const decision = this.decisionWithHeldEffect(snapshot.providerSteamId, baseDecision, now);
+    const decision = this.decisionWithHeldEffect(snapshot.providerSteamId, baseDecision, snapshot, decisionContext, now);
     const signature = frameSignature(decision, snapshot);
     if (signature === this.lastRenderSignature) {
       if (this.activeFrame) {
@@ -168,17 +179,12 @@ export class Cs2LightingService {
 
     this.lastRenderAttemptAt = now;
     this.lastRenderSignature = signature;
-    const frame = buildCs2Frame(targets, decision, new Date(now));
 
     try {
-      await this.options.beforeRender?.();
-      const result = await this.rendererForConfig(config).render(frame);
-      this.activeFrame = frame;
-      this.activeMode = decision.mode;
-      this.activeTransport = result.transport;
-      this.fallbackReason = null;
-      this.lastRenderedAt = frame.createdAt;
-      this.scheduleInactiveStop();
+      await this.renderDecisionFrame(config, targets, decision, new Date(now), true);
+      if (this.activeTransport === 'entertainmentStreaming' && this.heldEffects.has(snapshot.providerSteamId)) {
+        this.scheduleHeldEffectAnimation(snapshot.providerSteamId, config, targets);
+      }
     } catch (err) {
       this.clearActive(true);
       this.fallbackReason = `render_error:${err instanceof Error ? err.message : String(err)}`;
@@ -238,6 +244,7 @@ export class Cs2LightingService {
 
   private async stopActiveRenderer(): Promise<void> {
     this.cancelInactiveStop();
+    this.cancelAnimation();
     const renderer = this.activeRenderer;
     const frame = this.activeFrame;
     this.activeRenderer = null;
@@ -249,6 +256,7 @@ export class Cs2LightingService {
 
   private clearActive(stopRenderer = false): void {
     this.cancelInactiveStop();
+    this.cancelAnimation();
     if (stopRenderer) {
       void this.stopActiveRenderer();
     }
@@ -257,6 +265,88 @@ export class Cs2LightingService {
     this.activeTransport = 'unavailable';
     this.lastRenderedAt = null;
     this.lastRenderSignature = null;
+  }
+
+  private async renderDecisionFrame(
+    config: HueAmbienceRuntimeConfig,
+    targets: HueResolvedAmbienceTarget[],
+    decision: Cs2LightingDecision,
+    now: Date,
+    runBeforeRender: boolean,
+  ): Promise<void> {
+    const frame = buildCs2Frame(targets, decision, now);
+    if (runBeforeRender) {
+      await this.options.beforeRender?.();
+    }
+
+    const result = await this.rendererForConfig(config).render(frame);
+    if (result.transport !== 'entertainmentStreaming') {
+      throw new Error('CS2 lighting requires Hue Entertainment streaming');
+    }
+
+    this.activeFrame = frame;
+    this.activeMode = decision.mode;
+    this.activeTransport = result.transport;
+    this.fallbackReason = null;
+    this.lastRenderedAt = frame.createdAt;
+    this.scheduleInactiveStop();
+  }
+
+  private scheduleHeldEffectAnimation(
+    providerSteamId: string,
+    config: HueAmbienceRuntimeConfig,
+    targets: HueResolvedAmbienceTarget[],
+  ): void {
+    this.animationContext = { providerSteamId, config, targets };
+    if (this.animationTimer) return;
+
+    this.animationTimer = setTimeout(() => {
+      this.animationTimer = null;
+      void this.renderHeldEffectAnimation();
+    }, animationFrameIntervalMs);
+  }
+
+  private async renderHeldEffectAnimation(): Promise<void> {
+    if (this.animationInFlight) return;
+    const context = this.animationContext;
+    if (!context) return;
+
+    const held = this.heldEffects.get(context.providerSteamId);
+    if (!held) {
+      this.animationContext = null;
+      return;
+    }
+
+    this.animationInFlight = true;
+    try {
+      const now = new Date();
+      const animated = heldEffectDecision(held, held.baseDecision, now.getTime());
+      if (animated.complete) {
+        this.heldEffects.delete(context.providerSteamId);
+      }
+
+      this.lastRenderSignature = `animation|${context.providerSteamId}|${animated.decision.reason}|${animated.decision.dynamicKey ?? ''}`;
+      await this.renderDecisionFrame(context.config, context.targets, animated.decision, now, false);
+
+      if (animated.complete || !this.heldEffects.has(context.providerSteamId)) {
+        this.animationContext = null;
+      } else {
+        this.animationTimer = setTimeout(() => {
+          this.animationTimer = null;
+          void this.renderHeldEffectAnimation();
+        }, animationFrameIntervalMs);
+      }
+    } finally {
+      this.animationInFlight = false;
+    }
+  }
+
+  private cancelAnimation(): void {
+    if (this.animationTimer) {
+      clearTimeout(this.animationTimer);
+      this.animationTimer = null;
+    }
+    this.animationContext = null;
   }
 
   private updateBombClock(
@@ -279,29 +369,32 @@ export class Cs2LightingService {
   private decisionWithHeldEffect(
     providerSteamId: string,
     decision: Cs2LightingDecision,
+    snapshot: Cs2GameStateSnapshot,
+    context: Cs2LightingDecisionContext,
     now: number,
   ): Cs2LightingDecision {
     if (isHeldEventDecision(decision)) {
-      this.heldEffects.set(providerSteamId, { decision, startedAtMs: now });
-      return decision;
+      const active = this.heldEffects.get(providerSteamId);
+      if (active?.decision.reason === decision.reason && !heldEffectComplete(active, now)) {
+        return heldEffectDecision(active, baseDecisionForSnapshot(snapshot, context) ?? active.baseDecision, now).decision;
+      }
+
+      const startedAtMs = now - firstFrameLeadMs(decision);
+      const held = {
+        decision,
+        baseDecision: baseDecisionForHeldEffect(snapshot, decision, context),
+        startedAtMs,
+      };
+      this.heldEffects.set(providerSteamId, held);
+      return heldEffectDecision(held, held.baseDecision, now).decision;
     }
 
     const held = this.heldEffects.get(providerSteamId);
     if (!held) return decision;
 
-    const heldMs = held.decision.holdSeconds * 1000;
-    const fadeMs = held.decision.fadeSeconds * 1000;
-    const elapsed = now - held.startedAtMs;
-    if (elapsed <= heldMs) return held.decision;
-    if (elapsed <= heldMs + fadeMs) {
-      const progress = fadeMs > 0 ? (elapsed - heldMs) / fadeMs : 1;
-      return {
-        ...decision,
-        reason: held.decision.reason,
-        palette: blendPalettes(held.decision.palette, decision.palette, smoothstep(progress)),
-        transitionSeconds: Math.max(decision.transitionSeconds, 0.18),
-        dynamicKey: `${held.decision.reason}:fade:${Math.floor(progress * 10)}`,
-      };
+    const animated = heldEffectDecision(held, decision, now);
+    if (!animated.complete) {
+      return animated.decision;
     }
 
     this.heldEffects.delete(providerSteamId);
@@ -311,7 +404,7 @@ export class Cs2LightingService {
 
 function createCs2HueRenderer(config: HueAmbienceRuntimeConfig): HueAmbienceRenderer {
   const client = new HueClipClient(config.bridge, config.applicationKey);
-  return createHueEntertainmentStreamingRenderer(
+  return createHueEntertainmentStreamingOnlyRenderer(
     config,
     client as HueClipClient & HueEntertainmentControlClient,
   );
@@ -329,14 +422,15 @@ export function buildCs2LightingDecision(
   const isDead = (state?.health ?? 100) <= 0;
   const observer = activity === 'spectating' || activity === 'observer' || activity === 'menu';
 
-  if ((state?.flashed ?? 0) > 0) {
+  if ((state?.flashed ?? 0) > 0 && ((previous?.player?.state?.flashed ?? 0) <= 0)) {
     return {
       mode,
       reason: 'flash',
       palette: palettes.flash,
-      transitionSeconds: 0.12,
-      holdSeconds: 0.18,
-      fadeSeconds: 0.3,
+      transitionSeconds: 0.08,
+      attackSeconds: 0.12,
+      holdSeconds: 0.08,
+      fadeSeconds: 0.7,
     };
   }
 
@@ -346,6 +440,7 @@ export function buildCs2LightingDecision(
       reason: 'burning',
       palette: palettes.burning,
       transitionSeconds: mode === 'deathmatch' ? 0.08 : 0.12,
+      attackSeconds: mode === 'deathmatch' ? 0.06 : 0.08,
       holdSeconds: 0.2,
       fadeSeconds: 0.4,
     };
@@ -357,6 +452,7 @@ export function buildCs2LightingDecision(
       reason: 'damage',
       palette: palettes.damage,
       transitionSeconds: mode === 'deathmatch' ? 0.1 : 0.14,
+      attackSeconds: mode === 'deathmatch' ? 0.06 : 0.08,
       holdSeconds: mode === 'deathmatch' ? 0.28 : 0.4,
       fadeSeconds: mode === 'deathmatch' ? 0.35 : 0.55,
     };
@@ -368,6 +464,7 @@ export function buildCs2LightingDecision(
       reason: 'death',
       palette: dim(palettes.damage, 0.28),
       transitionSeconds: 0.25,
+      attackSeconds: 0.12,
       holdSeconds: 0.65,
       fadeSeconds: 0.8,
     };
@@ -380,9 +477,10 @@ export function buildCs2LightingDecision(
       mode,
       reason: 'kill',
       palette: palettes.kill,
-      transitionSeconds: mode === 'deathmatch' ? 0.14 : 0.2,
-      holdSeconds: mode === 'deathmatch' ? 0.5 : 0.65,
-      fadeSeconds: mode === 'deathmatch' ? 0.55 : 0.75,
+      transitionSeconds: mode === 'deathmatch' ? 0.06 : 0.08,
+      attackSeconds: mode === 'deathmatch' ? 0.04 : 0.05,
+      holdSeconds: mode === 'deathmatch' ? 0.08 : 0.1,
+      fadeSeconds: mode === 'deathmatch' ? 0.16 : 0.2,
     };
   }
 
@@ -392,6 +490,7 @@ export function buildCs2LightingDecision(
       reason: 'lowHealth',
       palette: scaleHealthPalette(palettes.lowHealth, health),
       transitionSeconds: 0.3,
+      attackSeconds: 0,
       holdSeconds: 0,
       fadeSeconds: 0,
     };
@@ -406,6 +505,7 @@ export function buildCs2LightingDecision(
     reason: 'ambient',
     palette: teamAmbientPalette(snapshot),
     transitionSeconds: mode === 'deathmatch' ? 0.18 : 0.28,
+    attackSeconds: 0,
     holdSeconds: 0,
     fadeSeconds: 0,
   };
@@ -541,10 +641,128 @@ function bombPlantedDecision(
     reason: 'bombPlanted',
     palette,
     transitionSeconds: Math.max(0.04, Math.min(0.18, periodMs / 1000 * 0.22)),
+    attackSeconds: 0,
     holdSeconds: 0,
     fadeSeconds: 0,
     dynamicKey: `bomb:${Math.floor(elapsed / periodMs)}:${lit ? 'on' : 'off'}`,
   };
+}
+
+function baseDecisionForHeldEffect(
+  snapshot: Cs2GameStateSnapshot,
+  effect: Cs2LightingDecision,
+  context: Cs2LightingDecisionContext,
+): Cs2LightingDecision {
+  if (effect.reason === 'flash') {
+    return ambientDecision(snapshot);
+  }
+
+  return baseDecisionForSnapshot(snapshot, context) ?? ambientDecision(snapshot);
+}
+
+function baseDecisionForSnapshot(
+  snapshot: Cs2GameStateSnapshot,
+  context: Cs2LightingDecisionContext,
+): Cs2LightingDecision | null {
+  const mode = gameMode(snapshot);
+  const state = snapshot.player?.state;
+  const health = clamp01((state?.health ?? 100) / 100);
+  const activity = snapshot.player?.activity?.toLowerCase();
+  const observer = activity === 'spectating' || activity === 'observer' || activity === 'menu';
+  const isDead = (state?.health ?? 100) <= 0;
+  if (observer || isDead) return null;
+
+  if (health > 0 && health <= 0.3) {
+    return {
+      mode,
+      reason: 'lowHealth',
+      palette: scaleHealthPalette(palettes.lowHealth, health),
+      transitionSeconds: 0.3,
+      attackSeconds: 0,
+      holdSeconds: 0,
+      fadeSeconds: 0,
+    };
+  }
+
+  if (mode === 'competitive' && snapshot.round?.bomb?.toLowerCase() === 'planted') {
+    return bombPlantedDecision(mode, context);
+  }
+
+  return ambientDecision(snapshot);
+}
+
+function ambientDecision(snapshot: Cs2GameStateSnapshot): Cs2LightingDecision {
+  const mode = gameMode(snapshot);
+  return {
+    mode,
+    reason: 'ambient',
+    palette: teamAmbientPalette(snapshot),
+    transitionSeconds: mode === 'deathmatch' ? 0.18 : 0.28,
+    attackSeconds: 0,
+    holdSeconds: 0,
+    fadeSeconds: 0,
+  };
+}
+
+function firstFrameLeadMs(decision: Cs2LightingDecision): number {
+  return Math.min(Math.max(decision.attackSeconds * 1000 * 0.35, 20), 45);
+}
+
+function heldEffectComplete(held: HeldCs2Effect, now: number): boolean {
+  return now - held.startedAtMs > heldEffectTotalMs(held.decision);
+}
+
+function heldEffectDecision(
+  held: HeldCs2Effect,
+  fallbackDecision: Cs2LightingDecision,
+  now: number,
+): { decision: Cs2LightingDecision; complete: boolean } {
+  const attackMs = held.decision.attackSeconds * 1000;
+  const holdMs = held.decision.holdSeconds * 1000;
+  const fadeMs = held.decision.fadeSeconds * 1000;
+  const elapsed = Math.max(0, now - held.startedAtMs);
+
+  if (elapsed <= attackMs) {
+    const progress = attackMs > 0 ? smoothstep(elapsed / attackMs) : 1;
+    return {
+      complete: false,
+      decision: {
+        ...held.decision,
+        palette: blendPalettes(held.baseDecision.palette, held.decision.palette, progress),
+        dynamicKey: `${held.decision.reason}:attack:${Math.floor(progress * 10)}`,
+      },
+    };
+  }
+
+  if (elapsed <= attackMs + holdMs) {
+    return {
+      complete: false,
+      decision: {
+        ...held.decision,
+        dynamicKey: `${held.decision.reason}:hold`,
+      },
+    };
+  }
+
+  if (elapsed <= attackMs + holdMs + fadeMs) {
+    const progress = fadeMs > 0 ? smoothstep((elapsed - attackMs - holdMs) / fadeMs) : 1;
+    return {
+      complete: false,
+      decision: {
+        ...fallbackDecision,
+        reason: held.decision.reason,
+        palette: blendPalettes(held.decision.palette, fallbackDecision.palette, progress),
+        transitionSeconds: Math.max(fallbackDecision.transitionSeconds, 0.12),
+        dynamicKey: `${held.decision.reason}:release:${Math.floor(progress * 10)}`,
+      },
+    };
+  }
+
+  return { complete: true, decision: fallbackDecision };
+}
+
+function heldEffectTotalMs(decision: Cs2LightingDecision): number {
+  return (decision.attackSeconds + decision.holdSeconds + decision.fadeSeconds) * 1000;
 }
 
 function isDeathEvent(snapshot: Cs2GameStateSnapshot, previous?: Cs2GameStateSnapshot): boolean {
@@ -561,7 +779,7 @@ function isPriorityDecision(decision: Cs2LightingDecision): boolean {
 }
 
 function isHeldEventDecision(decision: Cs2LightingDecision): boolean {
-  return decision.holdSeconds > 0 || decision.fadeSeconds > 0;
+  return decision.attackSeconds > 0 || decision.holdSeconds > 0 || decision.fadeSeconds > 0;
 }
 
 function blendPalettes(from: HueRGBColor[], to: HueRGBColor[], progress: number): HueRGBColor[] {

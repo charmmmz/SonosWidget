@@ -85,6 +85,23 @@ test('Hue Entertainment streaming renderer falls back to CLIP when application i
   assert.equal(fallback.rendered.length, 1);
 });
 
+test('Hue Entertainment streaming renderer can require streaming without CLIP fallback', async () => {
+  const fallback = new RecordingRenderer();
+  const renderer = new HueEntertainmentStreamingRenderer(
+    { ...config(), streamingClientKey: null },
+    new RecordingEntertainmentControlClient(),
+    new RecordingDtlsSocketFactory().create,
+    fallback,
+    { allowClipFallback: false },
+  );
+
+  await assert.rejects(
+    () => renderer.render(frame()),
+    /streaming.*required/i,
+  );
+  assert.equal(fallback.rendered.length, 0);
+});
+
 function frame(overrides: { channelID?: string | null } = {}): HueAmbienceFrame {
   return buildHueAmbienceFrame({
     targets: [target(overrides)],

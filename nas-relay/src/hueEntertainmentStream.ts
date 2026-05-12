@@ -30,6 +30,10 @@ export type HueEntertainmentDtlsSocketFactory = (
   options: HueEntertainmentDtlsSocketOptions,
 ) => HueEntertainmentDtlsSocket;
 
+export interface HueEntertainmentStreamingRendererOptions {
+  allowClipFallback?: boolean;
+}
+
 export class HueEntertainmentStreamSession {
   private socket: HueEntertainmentDtlsSocket | null = null;
   private activeAreaID: string | null = null;
@@ -111,31 +115,42 @@ export class HueEntertainmentStreamingRenderer implements HueAmbienceRenderer {
     controlClient: HueEntertainmentControlClient,
     socketFactory: HueEntertainmentDtlsSocketFactory,
     private readonly fallbackRenderer: HueAmbienceRenderer,
+    private readonly options: HueEntertainmentStreamingRendererOptions = {},
   ) {
     this.session = new HueEntertainmentStreamSession(config, controlClient, socketFactory);
   }
 
   async render(frame: HueAmbienceFrame): Promise<HueAmbienceRenderResult> {
     if (!canStreamFrame(this.config, frame)) {
-      return await this.fallbackRenderer.render(frame);
+      return await this.renderFallbackOrThrow(frame);
     }
 
     try {
       await this.session.render(frame, frame.createdAt);
       return { transport: 'entertainmentStreaming' };
-    } catch {
+    } catch (err) {
       await this.session.stop().catch(() => {});
-      return await this.fallbackRenderer.render(frame);
+      return await this.renderFallbackOrThrow(frame, err);
     }
   }
 
   async stop(frame: HueAmbienceFrame): Promise<void> {
     await this.session.stop();
-    await this.fallbackRenderer.stop(frame);
+    if (this.options.allowClipFallback !== false) {
+      await this.fallbackRenderer.stop(frame);
+    }
   }
 
   async release(): Promise<void> {
     await this.session.stop();
+  }
+
+  private async renderFallbackOrThrow(frame: HueAmbienceFrame, cause?: unknown): Promise<HueAmbienceRenderResult> {
+    if (this.options.allowClipFallback === false) {
+      throw new Error('Hue Entertainment streaming is required', { cause });
+    }
+
+    return await this.fallbackRenderer.render(frame);
   }
 }
 
@@ -149,6 +164,20 @@ export function createHueEntertainmentStreamingRenderer(
     lightClient,
     socketFactory ?? (options => new NodeHueEntertainmentDtlsSocket(options)),
     new ClipHueAmbienceRenderer(lightClient),
+  );
+}
+
+export function createHueEntertainmentStreamingOnlyRenderer(
+  config: HueAmbienceRuntimeConfig,
+  lightClient: HueLightClient & HueEntertainmentControlClient,
+  socketFactory?: HueEntertainmentDtlsSocketFactory,
+): HueAmbienceRenderer {
+  return new HueEntertainmentStreamingRenderer(
+    config,
+    lightClient,
+    socketFactory ?? (options => new NodeHueEntertainmentDtlsSocket(options)),
+    new ClipHueAmbienceRenderer(lightClient),
+    { allowClipFallback: false },
   );
 }
 

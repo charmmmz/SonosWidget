@@ -42,7 +42,7 @@ test('CS2 decision ignores competitive observer state instead of taking over lig
   assert.equal(decision, null);
 });
 
-test('CS2 kill effect uses a non-green confirmation palette with a visible hold', () => {
+test('CS2 kill effect uses a short non-green burst', () => {
   const previous = snapshot({
     player: { state: { round_kills: 0, health: 100, burning: 0, flashed: 0 } },
   });
@@ -53,7 +53,9 @@ test('CS2 kill effect uses a non-green confirmation palette with a visible hold'
   const decision = buildCs2LightingDecision(current, previous);
 
   assert.equal(decision?.reason, 'kill');
-  assert(decision.holdSeconds >= 0.5);
+  assert(decision.attackSeconds <= 0.08);
+  assert(decision.holdSeconds <= 0.16);
+  assert(decision.fadeSeconds <= 0.25);
   assert(decision.palette.every(color => color.g <= Math.max(color.r, color.b)));
 });
 
@@ -91,13 +93,14 @@ test('CS2 lighting service renders enabled game state to mapped entertainment ar
     const frame = renderer.renderedFrames[0]!;
     assert.equal(frame.mode, 'streamingReady');
     assert.equal(frame.targets[0]?.area.id, 'ent-1');
-    assert.deepEqual(frame.targets[0]?.lights[0]?.colors[0], { r: 1, g: 1, b: 1 });
-    assert.equal(frame.transitionSeconds, 0.12);
+    const color = frame.targets[0]?.lights[0]?.colors[0];
+    assert(color && color.r > 0.05 && color.r < 1);
+    assert.equal(frame.transitionSeconds, 0.08);
     assert.deepEqual(service.status(), {
       enabled: true,
       active: true,
       mode: 'competitive',
-      transport: 'clipFallback',
+      transport: 'entertainmentStreaming',
       fallbackReason: null,
     });
   } finally {
@@ -124,6 +127,31 @@ test('CS2 lighting service reports Entertainment Streaming transport when render
       mode: 'competitive',
       transport: 'entertainmentStreaming',
       fallbackReason: null,
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CS2 lighting service rejects CLIP fallback render results', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer('clipFallback');
+    const service = new Cs2LightingService(store, () => renderer);
+
+    await service.receive(snapshot({
+      player: { state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+
+    assert.equal(renderer.renderedFrames.length, 1);
+    assert.deepEqual(service.status(), {
+      enabled: true,
+      active: false,
+      mode: 'idle',
+      transport: 'unavailable',
+      fallbackReason: 'render_error:CS2 lighting requires Hue Entertainment streaming',
     });
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -187,7 +215,7 @@ test('CS2 lighting service keeps duplicate game state active without re-renderin
   }
 });
 
-test('CS2 lighting service holds kill effect instead of immediately reverting to ambient', async () => {
+test('CS2 lighting service renders kill as a short burst and restores ambient quickly', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
     const store = new HueAmbienceConfigStore(dir);
@@ -208,18 +236,78 @@ test('CS2 lighting service holds kill effect instead of immediately reverting to
       receivedAt: new Date(now),
       player: { state: { round_kills: 1, health: 100, burning: 0, flashed: 0 } },
     }));
-    now += 120;
+    now += 40;
     await service.receive(snapshot({
       receivedAt: new Date(now),
       player: { state: { round_kills: 1, health: 100, burning: 0, flashed: 0 } },
     }));
+    const burst = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
 
-    assert.equal(renderer.renderedFrames.length, 2);
-    assert.deepEqual(renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0], {
-      r: 1,
-      g: 0.72,
-      b: 0.12,
+    now += 360;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { state: { round_kills: 1, health: 100, burning: 0, flashed: 0 } },
+    }));
+    const restored = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    assert(burst && burst.r > 0.8 && burst.g > 0.2);
+    assert.deepEqual(restored, { r: 0.05, g: 0.18, b: 0.44 });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CS2 flash effect attacks from team color to white and releases back smoothly', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    let now = new Date('2026-05-12T09:30:00.000Z').getTime();
+    const service = new Cs2LightingService(store, () => renderer, {
+      minRenderIntervalMs: 0,
+      now: () => now,
     });
+
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const ambient = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 20;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+    const attack = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 120;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+    const peak = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 260;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const release = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 500;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const restored = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    assert.deepEqual(ambient, { r: 0.05, g: 0.18, b: 0.44 });
+    assert(attack && attack.r > ambient!.r && attack.r < 1);
+    assert.deepEqual(peak, { r: 1, g: 1, b: 1 });
+    assert(release && release.r > ambient!.r && release.r < 1);
+    assert.deepEqual(restored, ambient);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -338,7 +426,7 @@ class RecordingHueAmbienceRenderer implements HueAmbienceRenderer {
   readonly renderedFrames: HueAmbienceFrame[] = [];
   readonly stoppedFrames: HueAmbienceFrame[] = [];
 
-  constructor(private readonly transport: 'clipFallback' | 'entertainmentStreaming' = 'clipFallback') {}
+  constructor(private readonly transport: 'clipFallback' | 'entertainmentStreaming' = 'entertainmentStreaming') {}
 
   async render(frame: HueAmbienceFrame): Promise<{ transport: 'clipFallback' | 'entertainmentStreaming' }> {
     this.renderedFrames.push(frame);
