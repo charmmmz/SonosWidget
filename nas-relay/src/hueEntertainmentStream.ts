@@ -57,8 +57,8 @@ export class HueEntertainmentStreamSession {
       },
       this.sequence,
     );
+    await this.sendPacket(packet, target.area.id);
     this.sequence = (this.sequence + 1) & 0xff;
-    await this.socket?.send(packet);
   }
 
   async stop(): Promise<void> {
@@ -104,6 +104,36 @@ export class HueEntertainmentStreamSession {
       await this.controlClient.setEntertainmentStreaming(areaID, false).catch(() => {});
       throw err;
     }
+  }
+
+  private async sendPacket(packet: Buffer, areaID: string): Promise<void> {
+    try {
+      await this.sendPacketOnce(packet);
+      return;
+    } catch (err) {
+      await this.resetSocket();
+      await this.ensureStarted(areaID);
+      try {
+        await this.sendPacketOnce(packet);
+      } catch (retryErr) {
+        throw new Error('Hue Entertainment DTLS send failed after reconnect', { cause: retryErr ?? err });
+      }
+    }
+  }
+
+  private async sendPacketOnce(packet: Buffer): Promise<void> {
+    const socket = this.socket;
+    if (!socket) {
+      throw new Error('Hue Entertainment DTLS socket is not connected');
+    }
+    await socket.send(packet);
+  }
+
+  private async resetSocket(): Promise<void> {
+    const socket = this.socket;
+    this.socket = null;
+    this.activeAreaID = null;
+    await socket?.close().catch(() => {});
   }
 }
 

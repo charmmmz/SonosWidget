@@ -55,6 +55,27 @@ test('Hue Entertainment stream session starts the bridge session before sending 
   assert.equal(socketFactory.sockets[0]?.packets[0]?.subarray(0, 9).toString('ascii'), 'HueStream');
 });
 
+test('Hue Entertainment stream session reconnects once when the DTLS socket was closed', async () => {
+  const control = new RecordingEntertainmentControlClient();
+  const socketFactory = new RecordingDtlsSocketFactory();
+  const session = new HueEntertainmentStreamSession(config(), control, socketFactory.create);
+
+  await session.render(frame(), new Date('2026-05-12T09:45:00Z'));
+  socketFactory.sockets[0]!.sendError = new Error('The socket is closed. Cannot send data.');
+
+  await session.render(frame(), new Date('2026-05-12T09:45:01Z'));
+
+  assert.deepEqual(control.actions, [
+    { areaID: '01234567-89ab-cdef-0123-456789abcdef', active: true },
+    { areaID: '01234567-89ab-cdef-0123-456789abcdef', active: true },
+  ]);
+  assert.equal(socketFactory.sockets.length, 2);
+  assert.equal(socketFactory.sockets[0]?.closed, true);
+  assert.equal(socketFactory.sockets[1]?.connected, true);
+  assert.equal(socketFactory.sockets[0]?.packets.length, 1);
+  assert.equal(socketFactory.sockets[1]?.packets.length, 1);
+});
+
 test('Hue Entertainment streaming renderer falls back to CLIP when client key is missing', async () => {
   const fallback = new RecordingRenderer();
   const renderer = new HueEntertainmentStreamingRenderer(
@@ -204,6 +225,7 @@ class RecordingDtlsSocketFactory {
 class RecordingDtlsSocket implements HueEntertainmentDtlsSocket {
   connected = false;
   closed = false;
+  sendError: Error | null = null;
   readonly packets: Buffer[] = [];
 
   async connect(): Promise<void> {
@@ -211,6 +233,11 @@ class RecordingDtlsSocket implements HueEntertainmentDtlsSocket {
   }
 
   async send(packet: Buffer): Promise<void> {
+    if (this.sendError) {
+      const err = this.sendError;
+      this.sendError = null;
+      throw err;
+    }
     this.packets.push(packet);
   }
 
