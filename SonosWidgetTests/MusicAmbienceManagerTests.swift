@@ -260,7 +260,7 @@ final class MusicAmbienceManagerTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(renderer.applyCount, 0)
-        XCTAssertEqual(manager.status, .syncing("NAS Relay controlling Music Ambience"))
+        XCTAssertEqual(manager.status, .syncing("NAS Relay controlling Hue Ambience"))
     }
 
     func testRelayTakeoverCancelsLocalRenderingWithoutSendingStopCommand() async {
@@ -294,7 +294,7 @@ final class MusicAmbienceManagerTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(renderer.stopCount, 0)
-        XCTAssertEqual(manager.status, .syncing("NAS Relay controlling Music Ambience"))
+        XCTAssertEqual(manager.status, .syncing("NAS Relay controlling Hue Ambience"))
     }
 
     func testFlowingMotionReappliesRotatedPaletteWhilePlaying() async {

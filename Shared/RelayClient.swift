@@ -57,9 +57,68 @@ enum RelayClient {
                 lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
             }
         }
+        struct HueEntertainment: Decodable, Sendable {
+            let configured: Bool?
+            let bridgeReachable: Bool?
+            let streaming: HueEntertainmentStreamingStatus
+            let activeStreamer: String?
+            let activeAreaId: String?
+            let lastError: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case configured
+                case bridgeReachable
+                case streaming
+                case activeStreamer
+                case activeAreaId
+                case lastError
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                configured = try container.decodeIfPresent(Bool.self, forKey: .configured)
+                bridgeReachable = try container.decodeIfPresent(Bool.self, forKey: .bridgeReachable)
+                streaming = try container
+                    .decodeIfPresent(String.self, forKey: .streaming)
+                    .flatMap(HueEntertainmentStreamingStatus.init(rawValue:)) ?? .unknown
+                activeStreamer = try container.decodeIfPresent(String.self, forKey: .activeStreamer)
+                activeAreaId = try container.decodeIfPresent(String.self, forKey: .activeAreaId)
+                lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+            }
+        }
+        struct CS2Lighting: Decodable, Sendable {
+            let enabled: Bool?
+            let active: Bool?
+            let mode: CS2LightingMode
+            let transport: CS2LightingTransport
+            let fallbackReason: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case enabled
+                case active
+                case mode
+                case transport
+                case fallbackReason
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+                active = try container.decodeIfPresent(Bool.self, forKey: .active)
+                mode = try container
+                    .decodeIfPresent(String.self, forKey: .mode)
+                    .flatMap(CS2LightingMode.init(rawValue:)) ?? .unknown
+                transport = try container
+                    .decodeIfPresent(String.self, forKey: .transport)
+                    .flatMap(CS2LightingTransport.init(rawValue:)) ?? .unknown
+                fallbackReason = try container.decodeIfPresent(String.self, forKey: .fallbackReason)
+            }
+        }
         let ok: Bool
         let groups: [Group]
         let hueAmbience: HueAmbience?
+        let hueEntertainment: HueEntertainment?
+        let cs2Lighting: CS2Lighting?
     }
 
     static func health(baseURL: URL) async throws -> HealthResponse {

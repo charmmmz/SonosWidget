@@ -10,6 +10,7 @@ final class HueAmbienceRelayConfigTests: XCTestCase {
 
         let store = HueAmbienceStore(storage: HueAmbienceDefaults(defaults: defaults))
         store.isEnabled = true
+        store.isCS2SyncEnabled = true
         store.flowSpeed = .fast
         store.bridge = HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.50.216", name: "Hue Bridge")
         store.updateResources(HueBridgeResources(
@@ -49,6 +50,8 @@ final class HueAmbienceRelayConfigTests: XCTestCase {
         let credentials = InMemoryHueRelayCredentialStorage()
         let credentialStore = HueCredentialStore(storage: credentials)
         credentialStore.saveApplicationKey("hue-secret", forBridgeID: "bridge-1")
+        credentialStore.saveStreamingClientKey("streaming-secret", forBridgeID: "bridge-1")
+        credentialStore.saveStreamingApplicationId("streaming-app-id", forBridgeID: "bridge-1")
 
         let config = try HueAmbienceRelayConfig(
             store: store,
@@ -69,10 +72,13 @@ final class HueAmbienceRelayConfigTests: XCTestCase {
         let preferredTarget = try XCTUnwrap(firstMapping["preferredTarget"] as? [String: Any])
 
         XCTAssertEqual(object["applicationKey"] as? String, "hue-secret")
+        XCTAssertEqual(object["streamingClientKey"] as? String, "streaming-secret")
+        XCTAssertEqual(object["streamingApplicationId"] as? String, "streaming-app-id")
         XCTAssertEqual(firstMapping["relayGroupID"] as? String, "192.168.50.25")
         XCTAssertEqual(preferredTarget["kind"] as? String, "entertainmentArea")
         XCTAssertEqual(preferredTarget["id"] as? String, "ent-1")
         XCTAssertEqual(object["flowIntervalSeconds"] as? Double, 4)
+        XCTAssertEqual(object["cs2LightingEnabled"] as? Bool, true)
 
         let resources = try XCTUnwrap(object["resources"] as? [String: Any])
         let areas = try XCTUnwrap(resources["areas"] as? [[String: Any]])

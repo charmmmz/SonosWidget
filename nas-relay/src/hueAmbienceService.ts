@@ -4,12 +4,15 @@ import { HueClipClient } from './hueClient.js';
 import { buildHueAmbienceFrame, type HueAmbienceFrame } from './hueAmbienceFrames.js';
 import type { HueAmbienceConfigStore } from './hueConfigStore.js';
 import { paletteForSnapshot } from './hueAlbumArtPalette.js';
-import { ClipHueAmbienceRenderer, type HueAmbienceRenderer } from './hueFrameRenderer.js';
+import type { HueAmbienceRenderer } from './hueFrameRenderer.js';
+import { createHueEntertainmentStreamingRenderer, type HueEntertainmentControlClient } from './hueEntertainmentStream.js';
 import { resolveHueTargets } from './hueRenderer.js';
 import type {
   HueAmbienceRenderMode,
   HueAmbienceRuntimeConfig,
   HueAmbienceServiceStatus,
+  HueEntertainmentClient,
+  HueEntertainmentStatus,
   HueLightClient,
   HueRGBColor,
   HueResolvedAmbienceTarget,
@@ -19,6 +22,20 @@ import type {
 type HuePaletteProvider = (snapshot: HueSnapshot) => Promise<HueRGBColor[]> | HueRGBColor[];
 
 export const DEFAULT_STOP_GRACE_MS = 4_000;
+const ENTERTAINMENT_STATUS_TIMEOUT_MS = 1_500;
+
+interface HueEntertainmentConfigurationEnvelope {
+  data?: HueEntertainmentConfigurationStatusDTO[];
+}
+
+interface HueEntertainmentConfigurationStatusDTO {
+  id?: string;
+  status?: string | null;
+  active_streamer?: {
+    rid?: string | null;
+    rtype?: string | null;
+  } | null;
+}
 
 export class HueAmbienceService {
   private config: HueAmbienceRuntimeConfig | null = null;
@@ -35,6 +52,7 @@ export class HueAmbienceService {
   private activeRenderMode: HueAmbienceRenderMode | null = null;
   private entertainmentTargetActive = false;
   private activeEntertainmentMetadataComplete = false;
+  private activeRenderer: HueAmbienceRenderer | null = null;
 
   constructor(
     private readonly store: HueAmbienceConfigStore,
@@ -46,7 +64,15 @@ export class HueAmbienceService {
     private readonly rendererFactory: (
       config: HueAmbienceRuntimeConfig,
       client: HueLightClient,
-    ) => HueAmbienceRenderer = (_config, client) => new ClipHueAmbienceRenderer(client),
+    ) => HueAmbienceRenderer = (config, client) =>
+      createHueEntertainmentStreamingRenderer(
+        config,
+        client as HueLightClient & HueEntertainmentControlClient,
+      ),
+    private readonly entertainmentClientFactory: (
+      config: HueAmbienceRuntimeConfig,
+    ) => HueEntertainmentClient = config =>
+      new HueClipClient(config.bridge, config.applicationKey, ENTERTAINMENT_STATUS_TIMEOUT_MS),
   ) {}
 
   async load(): Promise<void> {
@@ -77,6 +103,12 @@ export class HueAmbienceService {
     await this.stopActive();
   }
 
+  async pauseForExternalRenderer(): Promise<void> {
+    this.cancelScheduledStop();
+    this.cancelPendingWork();
+    await this.stopActive(false);
+  }
+
   status(): HueAmbienceServiceStatus {
     return {
       ...this.store.status(),
@@ -90,6 +122,51 @@ export class HueAmbienceService {
       entertainmentMetadataComplete: this.activeEntertainmentMetadataComplete,
       lastFrameAt: this.lastFrameAt,
     };
+  }
+
+  async entertainmentStatus(): Promise<HueEntertainmentStatus> {
+    const config = this.config;
+    if (!config) {
+      return {
+        configured: false,
+        bridgeReachable: false,
+        streaming: 'unknown',
+        activeStreamer: null,
+        activeAreaId: null,
+        lastError: null,
+      };
+    }
+
+    try {
+      const envelope = await this.entertainmentClientFactory(config)
+        .get<HueEntertainmentConfigurationEnvelope>('/clip/v2/resource/entertainment_configuration');
+      const activeArea = (envelope.data ?? []).find(area =>
+        area.status === 'active' || Boolean(area.active_streamer?.rid),
+      );
+      const activeStreamer = activeArea?.active_streamer?.rid ?? null;
+      const relayStreamerId = config.streamingApplicationId ?? config.applicationKey;
+      const streaming = activeArea
+        ? activeStreamer === relayStreamerId ? 'activeByRelay' : 'occupied'
+        : 'free';
+
+      return {
+        configured: true,
+        bridgeReachable: true,
+        streaming,
+        activeStreamer,
+        activeAreaId: activeArea?.id ?? null,
+        lastError: null,
+      };
+    } catch (err) {
+      return {
+        configured: true,
+        bridgeReachable: false,
+        streaming: 'unknown',
+        activeStreamer: null,
+        activeAreaId: null,
+        lastError: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   receiveSnapshot(snapshot: HueSnapshot): void {
@@ -156,6 +233,7 @@ export class HueAmbienceService {
 
     const client = this.clientFactory(config);
     const renderer = this.rendererFactory(config, client);
+    this.activeRenderer = renderer;
     const intervalSeconds = Math.max(config.flowIntervalSeconds, 1);
     const transitionSeconds = config.motionStyle === 'flowing' ? intervalSeconds : 4;
     this.pendingStopFrame = this.buildStopFrame(targets, snapshot, transitionSeconds);
@@ -175,9 +253,11 @@ export class HueAmbienceService {
           transitionSeconds,
           reason: step === 0 ? 'trackChange' : 'steady',
         });
-        await renderer.render(frame);
+        const result = await renderer.render(frame);
         this.activeFrame = frame;
-        this.activeRenderMode = frame.mode;
+        this.activeRenderMode = result.transport === 'entertainmentStreaming'
+          ? 'entertainmentStreaming'
+          : frame.mode;
         this.entertainmentTargetActive = frame.targets.some(target => target.area.kind === 'entertainmentArea');
         this.activeEntertainmentMetadataComplete = frame.metadataComplete;
         this.lastFrameAt = frame.createdAt.toISOString();
@@ -212,14 +292,23 @@ export class HueAmbienceService {
 
     const config = this.config;
     const frame = this.activeFrame ?? this.pendingStopFrame;
+    const renderer = this.activeRenderer;
     this.clearActiveState();
 
-    if (!applyStopBehavior || !config || config.stopBehavior !== 'turnOff' || !frame) {
+    if (!frame || !renderer) {
+      return;
+    }
+
+    if (!applyStopBehavior || !config || config.stopBehavior !== 'turnOff') {
+      await renderer.release?.().catch(err => {
+        this.lastError = err instanceof Error ? err.message : String(err);
+        this.log.warn({ err }, 'Hue ambience release failed');
+      });
       return;
     }
 
     try {
-      await this.rendererFactory(config, this.clientFactory(config)).stop({ ...frame, reason: 'stop' });
+      await renderer.stop({ ...frame, reason: 'stop' });
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
       this.log.warn({ err }, 'Hue ambience stop failed');
@@ -235,6 +324,7 @@ export class HueAmbienceService {
     this.activeRenderMode = null;
     this.entertainmentTargetActive = false;
     this.activeEntertainmentMetadataComplete = false;
+    this.activeRenderer = null;
   }
 
   private buildStopFrame(

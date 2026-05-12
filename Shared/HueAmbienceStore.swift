@@ -3,6 +3,7 @@ import Observation
 
 protocol HueAmbienceStorage: AnyObject {
     var isEnabled: Bool { get set }
+    var isCS2SyncEnabled: Bool { get set }
     var bridgeData: Data? { get set }
     var mappingsData: Data? { get set }
     var resourcesData: Data? { get set }
@@ -32,6 +33,22 @@ final class HueAmbienceDefaults: HueAmbienceStorage {
                 defaults.set(newValue, forKey: "hueAmbienceEnabled")
             } else {
                 SharedStorage.hueAmbienceEnabled = newValue
+            }
+        }
+    }
+
+    var isCS2SyncEnabled: Bool {
+        get {
+            if let defaults {
+                return defaults.bool(forKey: "hueCS2SyncEnabled")
+            }
+            return SharedStorage.hueCS2SyncEnabled
+        }
+        set {
+            if let defaults {
+                defaults.set(newValue, forKey: "hueCS2SyncEnabled")
+            } else {
+                SharedStorage.hueCS2SyncEnabled = newValue
             }
         }
     }
@@ -187,6 +204,12 @@ final class HueAmbienceStore {
         }
     }
 
+    var isCS2SyncEnabled: Bool {
+        didSet {
+            storage.isCS2SyncEnabled = isCS2SyncEnabled
+        }
+    }
+
     var bridge: HueBridgeInfo? {
         didSet {
             if oldValue?.id != bridge?.id {
@@ -251,6 +274,7 @@ final class HueAmbienceStore {
         let storage = storage ?? HueAmbienceDefaults()
         self.storage = storage
         self.isEnabled = storage.isEnabled
+        self.isCS2SyncEnabled = storage.isCS2SyncEnabled
         self.bridge = Self.decode(HueBridgeInfo.self, from: storage.bridgeData)
         let decodedMappings = Self.decode([HueSonosMapping].self, from: storage.mappingsData) ?? []
         let decodedResources = Self.decode(HueBridgeResources.self, from: storage.resourcesData)
@@ -333,6 +357,7 @@ final class HueAmbienceStore {
 
     func disconnectBridge() {
         isEnabled = false
+        isCS2SyncEnabled = false
         bridge = nil
         mappings = []
         hueResources = .empty

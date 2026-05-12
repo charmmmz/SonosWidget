@@ -1,11 +1,11 @@
 enum SettingsHubDestination: String, CaseIterable, Hashable, Identifiable {
     case sonos
-    case musicAmbience
+    case hueAmbience
     case localServer
 
     static let primary: [SettingsHubDestination] = [
         .sonos,
-        .musicAmbience,
+        .hueAmbience,
         .localServer,
     ]
 
@@ -15,8 +15,8 @@ enum SettingsHubDestination: String, CaseIterable, Hashable, Identifiable {
         switch self {
         case .sonos:
             return "Sonos"
-        case .musicAmbience:
-            return "Music Ambience"
+        case .hueAmbience:
+            return "Hue Ambience"
         case .localServer:
             return "Local Server"
         }
@@ -26,8 +26,8 @@ enum SettingsHubDestination: String, CaseIterable, Hashable, Identifiable {
         switch self {
         case .sonos:
             return "Account, speakers, and music services"
-        case .musicAmbience:
-            return "Hue Bridge, assignments, and light behavior"
+        case .hueAmbience:
+            return "Hue Bridge, sync status, music, and game lighting"
         case .localServer:
             return "Relay, Live Activity, and NAS Agent"
         }
@@ -37,7 +37,7 @@ enum SettingsHubDestination: String, CaseIterable, Hashable, Identifiable {
         switch self {
         case .sonos:
             return "hifispeaker.2.fill"
-        case .musicAmbience:
+        case .hueAmbience:
             return "sparkles"
         case .localServer:
             return "server.rack"

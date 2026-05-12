@@ -7,7 +7,7 @@ enum HueAmbienceRelayConfigError: Error, LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .missingBridge:
-            return "Pair a Hue Bridge before syncing Music Ambience to the NAS relay."
+            return "Pair a Hue Bridge before syncing Hue Ambience to the NAS relay."
         case .missingApplicationKey:
             return "Hue Bridge application key is missing. Pair the Bridge again before syncing to NAS."
         }
@@ -17,8 +17,11 @@ enum HueAmbienceRelayConfigError: Error, LocalizedError, Equatable {
 struct HueAmbienceRelayConfig: Encodable, Sendable {
     let schemaVersion: Int
     let enabled: Bool
+    let cs2LightingEnabled: Bool
     let bridge: HueBridgeInfo
     let applicationKey: String
+    let streamingClientKey: String?
+    let streamingApplicationId: String?
     let resources: HueBridgeResources
     let mappings: [HueAmbienceRelayMapping]
     let groupStrategy: HueGroupSyncStrategy
@@ -47,8 +50,11 @@ struct HueAmbienceRelayConfig: Encodable, Sendable {
 
         self.schemaVersion = 1
         self.enabled = store.isEnabled
+        self.cs2LightingEnabled = store.isCS2SyncEnabled
         self.bridge = bridge
         self.applicationKey = applicationKey
+        self.streamingClientKey = credentialStore.streamingClientKey(forBridgeID: bridge.id)
+        self.streamingApplicationId = credentialStore.streamingApplicationId(forBridgeID: bridge.id)
         self.resources = store.hueResources
         self.mappings = store.mappings.map { mapping in
             HueAmbienceRelayMapping(
@@ -132,6 +138,7 @@ extension RelayClient {
 
             let configured: Bool
             let enabled: Bool?
+            let cs2LightingEnabled: Bool?
             let bridge: Bridge?
             let mappings: Int?
             let lights: Int?
@@ -148,6 +155,7 @@ extension RelayClient {
             private enum CodingKeys: String, CodingKey {
                 case configured
                 case enabled
+                case cs2LightingEnabled
                 case bridge
                 case mappings
                 case lights
@@ -166,6 +174,7 @@ extension RelayClient {
                 let container = try decoder.container(keyedBy: CodingKeys.self)
                 configured = try container.decode(Bool.self, forKey: .configured)
                 enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+                cs2LightingEnabled = try container.decodeIfPresent(Bool.self, forKey: .cs2LightingEnabled)
                 bridge = try container.decodeIfPresent(Bridge.self, forKey: .bridge)
                 mappings = try container.decodeIfPresent(Int.self, forKey: .mappings)
                 lights = try container.decodeIfPresent(Int.self, forKey: .lights)
@@ -237,6 +246,7 @@ extension RelayManager {
             )
             try await RelayClient.putHueAmbienceConfig(baseURL: url, config: config)
             updateHueAmbienceRuntimeStatus(configured: true, enabled: config.enabled)
+            updateCS2LightingStatus(enabled: config.cs2LightingEnabled)
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)
         }
@@ -252,6 +262,7 @@ extension RelayManager {
         do {
             try await RelayClient.deleteHueAmbienceConfig(baseURL: url)
             updateHueAmbienceRuntimeStatus(configured: false)
+            updateCS2LightingStatus(enabled: false)
             hueAmbienceSyncStatus = .idle
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)
@@ -277,6 +288,9 @@ extension RelayManager {
                 lastFrameAt: response.status.lastFrameAt,
                 lastError: response.status.lastError
             )
+            if let cs2LightingEnabled = response.status.cs2LightingEnabled {
+                updateCS2LightingStatus(enabled: cs2LightingEnabled)
+            }
         } catch {
             hueAmbienceSyncStatus = .failed(error.localizedDescription)
         }

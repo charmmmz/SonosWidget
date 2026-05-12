@@ -35,7 +35,7 @@ services:
       # Shared secret for `/internal/*` (Python agent). Optional if you don't run nas-agent.
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
 
-      # Hue Music Ambience — the iOS app uploads the actual Bridge app key and
+      # Hue Ambience — the iOS app uploads the actual Bridge app key and
       # assignments to this file through /api/hue-ambience/config.
       HUE_AMBIENCE_ENABLED: ${HUE_AMBIENCE_ENABLED:-true}
       HUE_AMBIENCE_CONFIG_PATH: ${HUE_AMBIENCE_CONFIG_PATH:-/app/data/hue-ambience-config.json}

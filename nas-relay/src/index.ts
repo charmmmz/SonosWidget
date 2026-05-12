@@ -13,6 +13,7 @@ import { HueAmbienceService } from './hueAmbienceService.js';
 import { createHueAmbienceRouter } from './hueRoutes.js';
 import { Cs2GameStateService } from './cs2GameState.js';
 import { createCs2GameStateRouter } from './cs2Routes.js';
+import { Cs2LightingService } from './cs2Lighting.js';
 import { shouldIgnoreHttpAutoLog } from './httpLogging.js';
 import type { LiveActivityContentState, RegisterRequest, SonosGroupSnapshot } from './types.js';
 
@@ -34,12 +35,16 @@ async function main(): Promise<void> {
   // ---- core wiring ------------------------------------------------------
   const tokens = new TokenStore(DATA_DIR, log);
   await tokens.load();
+  const hueConfigStore = new HueAmbienceConfigStore(DATA_DIR);
   const hueAmbience = new HueAmbienceService(
-    new HueAmbienceConfigStore(DATA_DIR),
+    hueConfigStore,
     log.child({ module: 'hue-ambience' }),
   );
   await hueAmbience.load();
   const cs2GameState = new Cs2GameStateService();
+  const cs2Lighting = new Cs2LightingService(hueConfigStore, undefined, {
+    beforeRender: () => hueAmbience.pauseForExternalRenderer(),
+  });
 
   const apns = await ApnsClient.create(
     {
@@ -57,7 +62,9 @@ async function main(): Promise<void> {
 
   // ---- snapshot → APNs pipeline ----------------------------------------
   sonos.on('change', async (snap: SonosGroupSnapshot) => {
-    hueAmbience.receiveSnapshot(snap);
+    if (!cs2Lighting.shouldDeferAlbumAmbience()) {
+      hueAmbience.receiveSnapshot(snap);
+    }
 
     const matching = tokens.forGroup(snap.groupId);
     if (matching.length === 0) return;
@@ -101,7 +108,13 @@ async function main(): Promise<void> {
   app.use('/api', createHueAmbienceRouter(hueAmbience, log));
   app.use('/api', createCs2GameStateRouter(cs2GameState, log.child({ module: 'cs2' })));
 
-  app.get('/api/health', (_req, res) => {
+  cs2GameState.on('state', snapshot => {
+    void cs2Lighting.receive(snapshot);
+  });
+
+  app.get('/api/health', async (_req, res) => {
+    const hueAmbienceStatus = hueAmbience.status();
+    const hueEntertainmentStatus = await hueAmbience.entertainmentStatus();
     res.json({
       ok: true,
       groups: sonos.allSnapshots().map(s => ({
@@ -112,7 +125,9 @@ async function main(): Promise<void> {
         playbackSourceRaw: s.playbackSourceRaw,
         musicAmbienceEligible: s.musicAmbienceEligible,
       })),
-      hueAmbience: hueAmbience.status(),
+      hueAmbience: hueAmbienceStatus,
+      hueEntertainment: hueEntertainmentStatus,
+      cs2Lighting: cs2Lighting.status(),
       cs2: {
         providers: cs2GameState.status(),
       },

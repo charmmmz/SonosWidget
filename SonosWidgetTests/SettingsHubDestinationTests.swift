@@ -5,7 +5,7 @@ final class SettingsHubDestinationTests: XCTestCase {
     func testPrimaryDestinationsKeepSettingsHubOrder() {
         XCTAssertEqual(SettingsHubDestination.primary, [
             .sonos,
-            .musicAmbience,
+            .hueAmbience,
             .localServer,
         ])
     }
@@ -13,13 +13,13 @@ final class SettingsHubDestinationTests: XCTestCase {
     func testPrimaryDestinationsDescribeConsolidatedGroups() {
         XCTAssertEqual(
             SettingsHubDestination.primary.map(\.title),
-            ["Sonos", "Music Ambience", "Local Server"]
+            ["Sonos", "Hue Ambience", "Local Server"]
         )
         XCTAssertEqual(
             SettingsHubDestination.primary.map(\.subtitle),
             [
                 "Account, speakers, and music services",
-                "Hue Bridge, assignments, and light behavior",
+                "Hue Bridge, sync status, music, and game lighting",
                 "Relay, Live Activity, and NAS Agent",
             ]
         )

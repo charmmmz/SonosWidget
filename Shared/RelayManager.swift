@@ -39,7 +39,7 @@ final class RelayManager {
             case .idle:
                 return "Not synced"
             case .syncing:
-                return "Syncing Music Ambience"
+                return "Syncing Hue Ambience"
             case .synced:
                 return "Synced to NAS Relay"
             case .failed(let reason):
@@ -53,7 +53,14 @@ final class RelayManager {
     private(set) var isHueAmbienceRelayConfigured = false
     private(set) var isHueAmbienceRelayEnabled = false
     private(set) var hueAmbienceRuntimeStatus: HueLiveEntertainmentRuntimeStatus = .unavailable
-    private(set) var hueAmbienceRuntimeDetail = "Sync Music Ambience to NAS Relay to enable always-on ambience."
+    private(set) var hueAmbienceRuntimeDetail = "Sync Hue Ambience to NAS Relay to enable always-on ambience."
+    private(set) var hueEntertainmentStreamingStatus: HueEntertainmentStreamingStatus = .unknown
+    private(set) var hueEntertainmentStreamingDetail = "Entertainment streaming status has not been checked."
+    private(set) var isCS2LightingEnabled = false
+    private(set) var isCS2LightingActive = false
+    private(set) var cs2LightingMode: CS2LightingMode = .idle
+    private(set) var cs2LightingTransport: CS2LightingTransport = .unavailable
+    private(set) var cs2LightingDetail = "CS2 sync is idle."
     var hueAmbienceSyncStatus: HueAmbienceSyncStatus = .idle
 
     @ObservationIgnored private var periodicTask: Task<Void, Never>?
@@ -93,6 +100,8 @@ final class RelayManager {
         if trimmed.isEmpty {
             status = .disabled
             updateHueAmbienceRuntimeStatus(configured: false)
+            updateHueEntertainmentStatus(nil)
+            updateCS2LightingStatus(nil)
             stopPeriodicProbe()
             return
         }
@@ -118,11 +127,15 @@ final class RelayManager {
                 guard !Task.isCancelled else { return }
                 self.status = .connected(groupCount: health.groups.count)
                 self.updateHueAmbienceRuntimeStatus(from: health.hueAmbience)
+                self.updateHueEntertainmentStatus(health.hueEntertainment)
+                self.updateCS2LightingStatus(health.cs2Lighting)
             } catch is CancellationError {
                 // Newer probe took over — its result is what matters.
             } catch {
                 guard !Task.isCancelled else { return }
                 self.status = .unreachable(reason: error.localizedDescription)
+                self.updateHueEntertainmentStatus(nil)
+                self.updateCS2LightingStatus(nil)
             }
         }
         inFlightProbe = task
@@ -166,25 +179,27 @@ final class RelayManager {
 
         guard configured else {
             hueAmbienceRuntimeStatus = .unavailable
-            hueAmbienceRuntimeDetail = "Sync Music Ambience to NAS Relay to enable always-on ambience."
+            hueAmbienceRuntimeDetail = "Sync Hue Ambience to NAS Relay to enable always-on ambience."
             return
         }
 
         guard enabled else {
-            hueAmbienceRuntimeStatus = .ready("Music Ambience disabled")
-            hueAmbienceRuntimeDetail = "Enable Music Ambience to let NAS control your lights."
+            hueAmbienceRuntimeStatus = .ready("Album ambience disabled")
+            hueAmbienceRuntimeDetail = "Enable album ambience or CS2 sync to let NAS control your lights."
             return
         }
 
         let trimmedError = lastError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmedError.isEmpty {
             hueAmbienceRuntimeStatus = .error(trimmedError)
-            hueAmbienceRuntimeDetail = "NAS reported a Music Ambience runtime error."
+            hueAmbienceRuntimeDetail = "NAS reported a Hue Ambience runtime error."
             return
         }
 
         if runtimeActive == true {
             switch renderMode {
+            case .entertainmentStreaming:
+                hueAmbienceRuntimeStatus = .active("Entertainment streaming active")
             case .streamingReady:
                 hueAmbienceRuntimeStatus = .fallback("Streaming-ready via CLIP fallback")
             case .clipFallback, nil:
@@ -196,7 +211,7 @@ final class RelayManager {
 
         hueAmbienceRuntimeDetail = entertainmentTargetActive == true && entertainmentMetadataComplete == false
             ? "Entertainment channel metadata is incomplete."
-            : "NAS controls Music Ambience while it is reachable."
+            : "NAS controls Hue Ambience while it is reachable."
     }
 
     private func updateHueAmbienceRuntimeStatus(from health: RelayClient.HealthResponse.HueAmbience?) {
@@ -216,6 +231,70 @@ final class RelayManager {
             lastFrameAt: health.lastFrameAt,
             lastError: health.lastError
         )
+    }
+
+    private func updateHueEntertainmentStatus(_ health: RelayClient.HealthResponse.HueEntertainment?) {
+        guard let health else {
+            hueEntertainmentStreamingStatus = .unknown
+            hueEntertainmentStreamingDetail = "Entertainment streaming status has not been checked."
+            return
+        }
+
+        hueEntertainmentStreamingStatus = health.streaming
+        if let error = health.lastError, !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            hueEntertainmentStreamingDetail = error
+            return
+        }
+
+        switch health.streaming {
+        case .free:
+            hueEntertainmentStreamingDetail = "Bridge Entertainment streaming is free."
+        case .activeByRelay:
+            hueEntertainmentStreamingDetail = "NAS Relay owns the active Entertainment stream."
+        case .occupied:
+            if let streamer = health.activeStreamer, !streamer.isEmpty {
+                hueEntertainmentStreamingDetail = "Occupied by \(streamer)."
+            } else {
+                hueEntertainmentStreamingDetail = "Occupied by another Hue streaming app."
+            }
+        case .unknown:
+            hueEntertainmentStreamingDetail = "Entertainment streaming status is not available yet."
+        }
+    }
+
+    private func updateCS2LightingStatus(_ health: RelayClient.HealthResponse.CS2Lighting?) {
+        guard let health else {
+            isCS2LightingEnabled = false
+            isCS2LightingActive = false
+            cs2LightingMode = .idle
+            cs2LightingTransport = .unavailable
+            cs2LightingDetail = "CS2 sync is idle."
+            return
+        }
+
+        isCS2LightingEnabled = health.enabled == true
+        isCS2LightingActive = health.active == true
+        cs2LightingMode = health.mode
+        cs2LightingTransport = health.transport
+        if let fallback = health.fallbackReason, !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            cs2LightingDetail = "Paused: \(fallback)"
+        } else if isCS2LightingActive {
+            cs2LightingDetail = "CS2 lighting is active."
+        } else if isCS2LightingEnabled {
+            cs2LightingDetail = "Waiting for CS2 game state."
+        } else {
+            cs2LightingDetail = "CS2 sync is disabled."
+        }
+    }
+
+    func updateCS2LightingStatus(enabled: Bool) {
+        isCS2LightingEnabled = enabled
+        isCS2LightingActive = false
+        cs2LightingMode = .idle
+        cs2LightingTransport = .unavailable
+        cs2LightingDetail = enabled
+            ? "Waiting for CS2 game state."
+            : "CS2 sync is disabled."
     }
 
 }

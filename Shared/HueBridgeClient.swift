@@ -16,8 +16,24 @@ struct HueBridgeRequest: Equatable, Sendable {
     }
 }
 
+struct HueBridgeResponse: Equatable, Sendable {
+    var data: Data
+    var headers: [String: String]
+
+    func headerValue(named name: String) -> String? {
+        headers[name.lowercased()]
+    }
+}
+
 protocol HueBridgeTransport: AnyObject {
     func send(_ request: HueBridgeRequest) async throws -> Data
+    func sendResponse(_ request: HueBridgeRequest) async throws -> HueBridgeResponse
+}
+
+extension HueBridgeTransport {
+    func sendResponse(_ request: HueBridgeRequest) async throws -> HueBridgeResponse {
+        HueBridgeResponse(data: try await send(request), headers: [:])
+    }
 }
 
 enum HueBridgeError: Error, LocalizedError, Equatable {
@@ -60,6 +76,10 @@ final class URLSessionHueBridgeTransport: NSObject, HueBridgeTransport, URLSessi
     }
 
     func send(_ request: HueBridgeRequest) async throws -> Data {
+        try await sendResponse(request).data
+    }
+
+    func sendResponse(_ request: HueBridgeRequest) async throws -> HueBridgeResponse {
         guard let url = URL(string: request.path, relativeTo: baseURL)?.absoluteURL else {
             throw HueBridgeError.bridgeURLUnavailable
         }
@@ -77,7 +97,14 @@ final class URLSessionHueBridgeTransport: NSObject, HueBridgeTransport, URLSessi
             throw HueBridgeError.httpStatus(httpResponse.statusCode)
         }
 
-        return data
+        let headers = (response as? HTTPURLResponse)?.allHeaderFields.reduce(
+            into: [String: String]()
+        ) { result, entry in
+            guard let name = entry.key as? String else { return }
+            result[name.lowercased()] = "\(entry.value)"
+        } ?? [:]
+
+        return HueBridgeResponse(data: data, headers: headers)
     }
 
     func urlSession(
@@ -314,7 +341,10 @@ struct HueBridgeClient {
     }
 
     func pairBridge(deviceType: String) async throws -> String {
-        let body = try JSONSerialization.data(withJSONObject: ["devicetype": deviceType])
+        let body = try JSONSerialization.data(withJSONObject: [
+            "devicetype": deviceType,
+            "generateclientkey": true,
+        ])
         let request = HueBridgeRequest(
             method: "POST",
             path: "/api",
@@ -334,6 +364,13 @@ struct HueBridgeClient {
         }
 
         credentialStore.saveApplicationKey(applicationKey, forBridgeID: bridge.id)
+        if let clientKey = response.compactMap(\.success?.clientKey).first, !clientKey.isEmpty {
+            credentialStore.saveStreamingClientKey(clientKey, forBridgeID: bridge.id)
+        }
+        if let applicationID = try await fetchStreamingApplicationID(applicationKey: applicationKey),
+           !applicationID.isEmpty {
+            credentialStore.saveStreamingApplicationId(applicationID, forBridgeID: bridge.id)
+        }
         return applicationKey
     }
 
@@ -428,6 +465,20 @@ struct HueBridgeClient {
         let request = try authenticatedRequest(method: "GET", path: path)
         let data = try await resolvedTransport().send(request)
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    private func fetchStreamingApplicationID(applicationKey: String) async throws -> String? {
+        let request = HueBridgeRequest(
+            method: "GET",
+            path: "/auth/v1",
+            headers: [
+                "Content-Type": "application/json",
+                "hue-application-key": applicationKey
+            ]
+        )
+        let response = try await resolvedTransport().sendResponse(request)
+        return response.headerValue(named: "hue-application-id")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func authenticatedRequest(method: String, path: String, body: Data? = nil) throws -> HueBridgeRequest {
@@ -529,6 +580,12 @@ private struct HuePairingResponse: Decodable {
 
 private struct HuePairingSuccess: Decodable {
     var username: String
+    var clientKey: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case username
+        case clientKey = "clientkey"
+    }
 }
 
 private struct HuePairingError: Decodable {

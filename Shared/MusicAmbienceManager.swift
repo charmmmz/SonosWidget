@@ -30,7 +30,7 @@ final class MusicAmbienceManager {
             case .disabled:
                 return "Disabled"
             case .unconfigured:
-                return "Set Up Music Ambience"
+                return "Set Up Hue Ambience"
             case .idle:
                 return "Ready"
             case .syncing(let detail), .paused(let detail):
@@ -83,7 +83,7 @@ final class MusicAmbienceManager {
             setStatus(.unconfigured)
         } else if shouldDeferLocalHueAmbience {
             resetRenderState()
-            setStatus(.syncing("NAS Relay controlling Music Ambience"))
+            setStatus(.syncing("NAS Relay controlling Hue Ambience"))
         } else {
             refreshHueResourcesIfNeeded(for: store.mappings)
             setStatus(.idle)
@@ -123,7 +123,7 @@ final class MusicAmbienceManager {
         }
         guard !shouldDeferLocalHueAmbience else {
             resetRenderState()
-            setStatus(snapshot.isPlaying ? .syncing("NAS Relay controlling Music Ambience") : .idle)
+            setStatus(snapshot.isPlaying ? .syncing("NAS Relay controlling Hue Ambience") : .idle)
             return
         }
         guard snapshot.isPlaying else {

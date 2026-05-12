@@ -64,15 +64,47 @@ struct HueCredentialStore {
         storage.save(key, account: applicationKeyAccount(forBridgeID: bridgeID))
     }
 
+    func saveStreamingClientKey(_ key: String, forBridgeID bridgeID: String) {
+        storage.save(key, account: streamingClientKeyAccount(forBridgeID: bridgeID))
+    }
+
+    func saveStreamingApplicationId(_ id: String, forBridgeID bridgeID: String) {
+        storage.save(id, account: streamingApplicationIdAccount(forBridgeID: bridgeID))
+    }
+
     func applicationKey(forBridgeID bridgeID: String) -> String? {
         storage.read(account: applicationKeyAccount(forBridgeID: bridgeID))
+    }
+
+    func streamingClientKey(forBridgeID bridgeID: String) -> String? {
+        storage.read(account: streamingClientKeyAccount(forBridgeID: bridgeID))
+    }
+
+    func streamingApplicationId(forBridgeID bridgeID: String) -> String? {
+        storage.read(account: streamingApplicationIdAccount(forBridgeID: bridgeID))
     }
 
     func deleteApplicationKey(forBridgeID bridgeID: String) {
         storage.delete(account: applicationKeyAccount(forBridgeID: bridgeID))
     }
 
+    func deleteStreamingClientKey(forBridgeID bridgeID: String) {
+        storage.delete(account: streamingClientKeyAccount(forBridgeID: bridgeID))
+    }
+
+    func deleteStreamingApplicationId(forBridgeID bridgeID: String) {
+        storage.delete(account: streamingApplicationIdAccount(forBridgeID: bridgeID))
+    }
+
     private func applicationKeyAccount(forBridgeID bridgeID: String) -> String {
         "hue.applicationKey.\(bridgeID)"
+    }
+
+    private func streamingClientKeyAccount(forBridgeID bridgeID: String) -> String {
+        "hue.streamingClientKey.\(bridgeID)"
+    }
+
+    private func streamingApplicationIdAccount(forBridgeID bridgeID: String) -> String {
+        "hue.streamingApplicationId.\(bridgeID)"
     }
 }

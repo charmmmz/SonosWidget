@@ -71,6 +71,7 @@ export class HueAmbienceConfigStore {
       areas: this.currentConfig.resources.areas.length,
       motionStyle: this.currentConfig.motionStyle,
       stopBehavior: this.currentConfig.stopBehavior,
+      cs2LightingEnabled: this.currentConfig.cs2LightingEnabled,
       renderMode: null,
       activeTargetIds: [],
       entertainmentTargetActive: false,
@@ -144,6 +145,13 @@ function normalizeConfig(config: HueAmbienceRuntimeConfig): HueAmbienceRuntimeCo
       }),
     },
     mappings,
+    cs2LightingEnabled: config.cs2LightingEnabled === true,
+    streamingClientKey: typeof config.streamingClientKey === 'string' && config.streamingClientKey.length > 0
+      ? config.streamingClientKey
+      : undefined,
+    streamingApplicationId: typeof config.streamingApplicationId === 'string' && config.streamingApplicationId.length > 0
+      ? config.streamingApplicationId
+      : undefined,
     groupStrategy: config.groupStrategy ?? 'allMappedRooms',
     stopBehavior: config.stopBehavior ?? 'leaveCurrent',
     motionStyle: config.motionStyle ?? 'flowing',

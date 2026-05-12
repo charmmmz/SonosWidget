@@ -5,9 +5,10 @@ export type HueAmbienceCapability = 'basic' | 'gradientReady' | 'liveEntertainme
 export type HueGroupSyncStrategy = 'allMappedRooms' | 'coordinatorOnly';
 export type HueAmbienceStopBehavior = 'leaveCurrent' | 'turnOff';
 export type HueAmbienceMotionStyle = 'flowing' | 'still';
-export type HueAmbienceRenderMode = 'clipFallback' | 'streamingReady';
+export type HueAmbienceRenderMode = 'clipFallback' | 'streamingReady' | 'entertainmentStreaming';
 export type HueAmbienceFrameReason = 'steady' | 'trackChange' | 'pause' | 'stop' | 'disable';
 export type HueLightFunction = 'decorative' | 'functional' | 'mixed' | 'unknown';
+export type HueEntertainmentStreamingStatus = 'free' | 'activeByRelay' | 'occupied' | 'unknown';
 
 export interface HueBridgeInfo {
   id: string;
@@ -69,8 +70,11 @@ export interface HueBridgeResources {
 
 export interface HueAmbienceRuntimeConfig {
   enabled: boolean;
+  cs2LightingEnabled?: boolean;
   bridge: HueBridgeInfo;
   applicationKey: string;
+  streamingClientKey?: string | null;
+  streamingApplicationId?: string | null;
   resources: HueBridgeResources;
   mappings: HueSonosMapping[];
   groupStrategy: HueGroupSyncStrategy;
@@ -105,6 +109,7 @@ export interface HueAmbienceStatus {
   areas?: number;
   motionStyle?: HueAmbienceMotionStyle;
   stopBehavior?: HueAmbienceStopBehavior;
+  cs2LightingEnabled?: boolean;
   renderMode?: HueAmbienceRenderMode | null;
   activeTargetIds?: string[];
   entertainmentTargetActive?: boolean;
@@ -119,8 +124,21 @@ export interface HueAmbienceServiceStatus extends HueAmbienceStatus {
   lastTrackKey?: string | null;
 }
 
+export interface HueEntertainmentStatus {
+  configured: boolean;
+  bridgeReachable: boolean;
+  streaming: HueEntertainmentStreamingStatus;
+  activeStreamer?: string | null;
+  activeAreaId?: string | null;
+  lastError?: string | null;
+}
+
 export interface HueLightClient {
   updateLight(id: string, body: unknown): Promise<void>;
+}
+
+export interface HueEntertainmentClient {
+  get<T>(path: string): Promise<T>;
 }
 
 export type HueSnapshot = SonosGroupSnapshot;

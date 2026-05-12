@@ -2,7 +2,7 @@
 
 A small Node.js + TypeScript service that subscribes to Sonos UPnP events on
 your LAN, pushes the corresponding Live Activity updates to the Charm for
-Sonos iOS app via Apple's APNs HTTP/2 endpoint, and can run Hue Music Ambience
+Sonos iOS app via Apple's APNs HTTP/2 endpoint, and can run Hue Ambience
 while the iPhone app is suspended.
 
 The point: keep the iPhone Lock Screen Live Activity fresh **without** the
@@ -20,15 +20,19 @@ APNs, and the Live Activity updates within another ~1–3 s.
   — the widget falls back to its on-device cache, same path it uses today
   for the local-update flow. Phase 2 will fetch and downsample art on the
   relay and embed it.
-- Hue Music Ambience config is uploaded from the iOS app. The relay stores the
+- Hue Ambience config is uploaded from the iOS app. The relay stores the
   Hue app key and assignments in `DATA_DIR/hue-ambience-config.json`, then
-  applies slow album-palette REST transitions on Sonos play/track changes.
+  applies album-palette transitions on Sonos play/track changes.
   The iOS Light Motion Speed setting controls the flow interval; set
   `HUE_FLOW_INTERVAL_SECONDS` only when the NAS should override that value.
-  True Hue Entertainment DTLS streaming remains a future runtime.
+  Mapped Entertainment Areas use Hue Entertainment DTLS streaming when the
+  Bridge provides a streaming client key, with CLIP v2 as a fallback.
 - Counter-Strike 2 Game State Integration payloads can be posted directly to
-  the relay. For now the relay validates and caches the latest payload per
-  provider SteamID; Hue Entertainment reactions will be layered on top later.
+  the relay. When Hue Ambience config has CS2 sync enabled and at least one
+  mapped Entertainment Area, the relay renders low-latency game lighting from
+  the latest local-player state. Competitive and deathmatch use separate
+  strategies; competitive spectator/death state falls back to low-brightness
+  ambience.
 
 External access (DDNS IPv6 / Cloudflare Tunnel / Tailscale) is intentionally
 out of scope here; bring up the LAN path first, then layer on whichever

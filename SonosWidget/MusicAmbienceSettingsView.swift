@@ -46,10 +46,44 @@ struct MusicAmbienceSettingsView: View {
     @Bindable private var relay = RelayManager.shared
 
     var body: some View {
+        Group {
+            sharedStatusSection
+            musicSection
+            gameSection
+        }
+        .onChange(of: store.isCS2SyncEnabled) {
+            let actions = syncActions
+            Task {
+                await actions.syncableSettingChanged()
+            }
+        }
+    }
+
+    private var sharedStatusSection: some View {
+        Section {
+            LabeledContent("NAS Relay", value: relayStatusText)
+            LabeledContent("Hue Config", value: relay.hueAmbienceSyncStatus.title)
+            LabeledContent("Hue Runtime", value: relay.hueAmbienceRuntimeStatus.reason)
+            LabeledContent("Streaming", value: relay.hueEntertainmentStreamingStatus.label)
+
+            Text(relay.hueAmbienceRuntimeDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(relay.hueEntertainmentStreamingDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Hue Ambience")
+        } footer: {
+            Text("Shared Hue Bridge and NAS Relay status for music and game lighting.")
+        }
+    }
+
+    private var musicSection: some View {
         Section {
             statusRow
 
-            Toggle("Enable Music Ambience", isOn: $store.isEnabled)
+            Toggle("Enable Album Ambience", isOn: $store.isEnabled)
                 .disabled(store.bridge == nil || store.mappings.isEmpty)
 
             Button {
@@ -97,7 +131,7 @@ struct MusicAmbienceSettingsView: View {
                     .foregroundStyle(.secondary)
             }
         } header: {
-            Text("Hue Music Ambience")
+            Text("Music")
         } footer: {
             Text("Uses album artwork colors for Hue ambience. Without a NAS, continuous background syncing is limited by iOS.")
         }
@@ -124,6 +158,23 @@ struct MusicAmbienceSettingsView: View {
             Task {
                 await actions.stopBehaviorChanged()
             }
+        }
+    }
+
+    private var gameSection: some View {
+        Section {
+            Toggle("Enable CS2 Sync", isOn: $store.isCS2SyncEnabled)
+                .disabled(store.bridge == nil)
+
+            LabeledContent("CS2 Status", value: relay.cs2LightingMode.label)
+            LabeledContent("CS2 Transport", value: relay.cs2LightingTransport.label)
+            Text(relay.cs2LightingDetail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("Game")
+        } footer: {
+            Text("CS2 sync uses Hue Entertainment streaming when the Bridge session is free. If another Hue app owns streaming, music ambience can still use the existing fallback path.")
         }
     }
 
@@ -154,7 +205,7 @@ struct MusicAmbienceSettingsView: View {
     private var nasRelayStatusText: String {
         switch relay.hueAmbienceSyncStatus {
         case .synced(let date):
-            return "NAS Relay has the current Music Ambience config · \(date.formatted(date: .omitted, time: .shortened))"
+            return "NAS Relay has the current Hue Ambience config · \(date.formatted(date: .omitted, time: .shortened))"
         case .syncing:
             return "Uploading Bridge credentials and Hue assignments to your local relay..."
         case .failed(let reason):
@@ -164,6 +215,19 @@ struct MusicAmbienceSettingsView: View {
                 return "Set a NAS Relay URL below, then sync this Hue setup so Docker can run the light effect."
             }
             return "Sync sends the Hue app key and assignments to your local NAS Relay."
+        }
+    }
+
+    private var relayStatusText: String {
+        switch relay.status {
+        case .disabled:
+            return "Not configured"
+        case .probing:
+            return "Checking"
+        case .connected:
+            return "Connected"
+        case .unreachable:
+            return "Offline"
         }
     }
 
@@ -245,7 +309,7 @@ struct HueAmbienceSetupSheet: View {
                 assignmentsSection
                 effectSection
             }
-            .navigationTitle("Music Ambience")
+            .navigationTitle("Hue Ambience")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -258,12 +322,12 @@ struct HueAmbienceSetupSheet: View {
             .onAppear {
                 loadStoredBridgeState()
             }
-            .confirmationDialog("Reset Music Ambience?", isPresented: $isResetConfirmationPresented) {
-                Button("Reset Music Ambience", role: .destructive) {
+            .confirmationDialog("Reset Hue Ambience?", isPresented: $isResetConfirmationPresented) {
+                Button("Reset Hue Ambience", role: .destructive) {
                     Task { await resetMusicAmbience() }
                 }
             } message: {
-                Text("This clears the paired Hue Bridge, assignments, cached Hue resources, and the NAS relay Music Ambience config.")
+                Text("This clears the paired Hue Bridge, assignments, cached Hue resources, and the NAS relay Hue Ambience config.")
             }
         }
     }
@@ -346,7 +410,7 @@ struct HueAmbienceSetupSheet: View {
         } header: {
             Text("Connection")
         } footer: {
-            Text("Refresh Hue Data reloads Bridge resources and cleans stale assignments. Reset clears local and NAS Music Ambience data.")
+            Text("Refresh Hue Data reloads Bridge resources and cleans stale assignments. Reset clears local and NAS Hue Ambience data.")
         }
     }
 
@@ -388,7 +452,7 @@ struct HueAmbienceSetupSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            LabeledContent("Live Entertainment", value: relay.hueAmbienceRuntimeStatus.reason)
+            LabeledContent("Streaming Readiness", value: relay.hueAmbienceRuntimeStatus.reason)
             Text(relay.hueAmbienceRuntimeDetail)
                 .font(.caption)
                 .foregroundStyle(.secondary)

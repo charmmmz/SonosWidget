@@ -15,6 +15,7 @@
     "@svrooij/sonos": "^2.5.0",
     "express": "^4.21.0",
     "jpeg-js": "^0.4.4",
+    "node-dtls-client": "^2.0.2",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "pngjs": "^7.0.0"

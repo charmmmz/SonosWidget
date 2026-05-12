@@ -508,6 +508,21 @@ final class HueAmbienceStoreTests: XCTestCase {
         XCTAssertEqual(restored.flowSpeed, .fast)
     }
 
+    func testStorePersistsCS2SyncEnabled() {
+        let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = HueAmbienceDefaults(defaults: defaults)
+        let store = HueAmbienceStore(storage: storage)
+
+        store.isCS2SyncEnabled = true
+
+        let restored = HueAmbienceStore(storage: storage)
+
+        XCTAssertTrue(restored.isCS2SyncEnabled)
+    }
+
     func testStorePersistsEnabledBridgeMappingsAndStrategy() {
         let suiteName = "HueAmbienceStoreTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

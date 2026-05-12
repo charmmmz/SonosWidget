@@ -93,7 +93,7 @@ struct SettingsView: View {
                 speakersSection
                 musicServicesSection
             }
-        case .musicAmbience:
+        case .hueAmbience:
             settingsDetailForm(title: destination.title) {
                 MusicAmbienceSettingsView(
                     store: hueStore,
@@ -133,7 +133,7 @@ struct SettingsView: View {
         switch destination {
         case .sonos:
             return "\(sonosAccountStatusSummary) · \(speakersStatusSummary)"
-        case .musicAmbience:
+        case .hueAmbience:
             return musicAmbienceStatusSummary
         case .localServer:
             return "Relay \(relayStatusTitle) · Agent \(agentStatusTitle)"

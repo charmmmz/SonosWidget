@@ -5,7 +5,7 @@ export function stablePaletteForTrack(title = '', artist = '', album = '', fallb
   const seed = [title, artist, album, fallbackKey]
     .map(value => value.trim())
     .filter(value => value.length > 0)
-    .join('|') || 'Charm Music Ambience';
+    .join('|') || 'Charm Hue Ambience';
   const digest = crypto.createHash('sha256').update(seed).digest();
   const colors: HueRGBColor[] = [];
 

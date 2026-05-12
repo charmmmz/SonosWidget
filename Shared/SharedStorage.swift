@@ -187,11 +187,16 @@ enum SharedStorage {
         set { defaults.set(newValue, forKey: "agentToken") }
     }
 
-    // MARK: - Hue Music Ambience
+    // MARK: - Hue Ambience
 
     nonisolated static var hueAmbienceEnabled: Bool {
         get { defaults.bool(forKey: "hueAmbienceEnabled") }
         set { defaults.set(newValue, forKey: "hueAmbienceEnabled") }
+    }
+
+    nonisolated static var hueCS2SyncEnabled: Bool {
+        get { defaults.bool(forKey: "hueCS2SyncEnabled") }
+        set { defaults.set(newValue, forKey: "hueCS2SyncEnabled") }
     }
 
     nonisolated static var hueBridgeData: Data? {

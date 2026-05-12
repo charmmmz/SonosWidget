@@ -50,20 +50,49 @@ final class HueBridgeClientTests: XCTestCase {
         XCTAssertNil(store.applicationKey(forBridgeID: "bridge-1"))
     }
 
-    func testPairBridgeStoresApplicationKeyFromLinkButtonResponse() async throws {
+    func testCredentialStoreSavesReadsAndDeletesStreamingClientKey() {
+        let storage = InMemoryHueCredentialStorage()
+        let store = HueCredentialStore(storage: storage)
+
+        store.saveStreamingClientKey("streaming-key-1", forBridgeID: "bridge-1")
+        XCTAssertEqual(store.streamingClientKey(forBridgeID: "bridge-1"), "streaming-key-1")
+
+        store.deleteStreamingClientKey(forBridgeID: "bridge-1")
+        XCTAssertNil(store.streamingClientKey(forBridgeID: "bridge-1"))
+    }
+
+    func testCredentialStoreSavesReadsAndDeletesStreamingApplicationId() {
+        let storage = InMemoryHueCredentialStorage()
+        let store = HueCredentialStore(storage: storage)
+
+        store.saveStreamingApplicationId("streaming-app-id-1", forBridgeID: "bridge-1")
+        XCTAssertEqual(store.streamingApplicationId(forBridgeID: "bridge-1"), "streaming-app-id-1")
+
+        store.deleteStreamingApplicationId(forBridgeID: "bridge-1")
+        XCTAssertNil(store.streamingApplicationId(forBridgeID: "bridge-1"))
+    }
+
+    func testPairBridgeStoresApplicationKeyAndEntertainmentCredentialsFromLinkButtonResponse() async throws {
         let credentials = InMemoryHueCredentialStorage()
         let credentialStore = HueCredentialStore(storage: credentials)
-        let transport = MockHueTransport(responses: [
+        let transport = MockHueTransport(
+            responses: [
             "POST /api": """
             [
               {
                 "success": {
-                  "username": "generated-key"
+                  "username": "generated-key",
+                  "clientkey": "generated-streaming-key"
                 }
               }
             ]
-            """
-        ])
+            """,
+            "GET /auth/v1": "{}"
+            ],
+            responseHeaders: [
+                "GET /auth/v1": ["hue-application-id": "streaming-app-id"]
+            ]
+        )
         let client = HueBridgeClient(
             bridge: HueBridgeInfo(id: "bridge-1", ipAddress: "192.168.1.20", name: "Home Hue"),
             credentialStore: credentialStore,
@@ -74,8 +103,15 @@ final class HueBridgeClientTests: XCTestCase {
 
         XCTAssertEqual(key, "generated-key")
         XCTAssertEqual(credentialStore.applicationKey(forBridgeID: "bridge-1"), "generated-key")
+        XCTAssertEqual(credentialStore.streamingClientKey(forBridgeID: "bridge-1"), "generated-streaming-key")
+        XCTAssertEqual(credentialStore.streamingApplicationId(forBridgeID: "bridge-1"), "streaming-app-id")
         XCTAssertEqual(transport.requests.first?.method, "POST")
         XCTAssertEqual(transport.requests.first?.path, "/api")
+        XCTAssertEqual(transport.requests.map(\.path), ["/api", "/auth/v1"])
+        let body = try XCTUnwrap(transport.requests.first?.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["devicetype"] as? String, "Charm Player#iPhone")
+        XCTAssertEqual(json["generateclientkey"] as? Bool, true)
     }
 
     func testFetchResourcesDecodesEntertainmentAreasRoomsZonesAndLights() async throws {
@@ -879,19 +915,28 @@ private final class InMemoryHueCredentialStorage: HueCredentialStorage {
 
 private final class MockHueTransport: HueBridgeTransport {
     private let responses: [String: Data]
+    private let responseHeaders: [String: [String: String]]
     private(set) var requests: [HueBridgeRequest] = []
 
-    init(responses: [String: String]) {
+    init(responses: [String: String], responseHeaders: [String: [String: String]] = [:]) {
         self.responses = responses.mapValues { Data($0.utf8) }
+        self.responseHeaders = responseHeaders
     }
 
     func send(_ request: HueBridgeRequest) async throws -> Data {
+        try await sendResponse(request).data
+    }
+
+    func sendResponse(_ request: HueBridgeRequest) async throws -> HueBridgeResponse {
         requests.append(request)
 
         guard let response = responses["\(request.method) \(request.path)"] else {
             throw URLError(.badServerResponse)
         }
 
-        return response
+        return HueBridgeResponse(
+            data: response,
+            headers: responseHeaders["\(request.method) \(request.path)"] ?? [:]
+        )
     }
 }
