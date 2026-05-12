@@ -1,3 +1,6 @@
+import { appendFile, mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
+
 import { buildHueAmbienceFrame, type HueAmbienceFrame } from './hueAmbienceFrames.js';
 import type { HueAmbienceRenderer } from './hueFrameRenderer.js';
 import { HueClipClient } from './hueClient.js';
@@ -46,16 +49,24 @@ export interface Cs2LightingStatus {
   fallbackReason: string | null;
 }
 
+interface Cs2LightingLogger {
+  debug?(data: Record<string, unknown>, message: string): void;
+  info?(data: Record<string, unknown>, message: string): void;
+  warn?(data: Record<string, unknown>, message: string): void;
+}
+
 interface Cs2LightingServiceOptions {
   activeTimeoutMs?: number;
   minRenderIntervalMs?: number;
   beforeRender?: () => Promise<void> | void;
   now?: () => number;
+  logger?: Cs2LightingLogger;
+  logFilePath?: string;
 }
 
 const defaultActiveTimeoutMs = 3_000;
 const defaultMinRenderIntervalMs = 70;
-const animationFrameIntervalMs = 45;
+const animationFrameIntervalMs = 40;
 const c4FuseMs = 40_000;
 
 const palettes = {
@@ -129,6 +140,8 @@ export class Cs2LightingService {
   private animationInFlight = false;
   private heldEffects = new Map<string, HeldCs2Effect>();
   private bombPlantedAtByProvider = new Map<string, number>();
+  private activeProviderSteamId: string | null = null;
+  private lastDiagnosticSignature: string | null = null;
 
   constructor(
     private readonly store: HueAmbienceConfigStore,
@@ -163,11 +176,14 @@ export class Cs2LightingService {
       bombPlantedAt: this.bombPlantedAtByProvider.get(snapshot.providerSteamId),
       nowMs: now,
     };
-    const baseDecision = buildCs2LightingDecision(snapshot, previous, decisionContext);
+    const overlayDecision = momentaryDecisionForSnapshot(snapshot, previous);
+    const backgroundDecision = backgroundDecisionForSnapshot(snapshot, decisionContext);
+    const baseDecision = overlayDecision ?? backgroundDecision;
     if (!baseDecision) {
       this.clearActive(true);
       this.heldEffects.delete(snapshot.providerSteamId);
       this.fallbackReason = null;
+      await this.logLightingCleared(snapshot, 'no_active_decision');
       return;
     }
 
@@ -190,6 +206,8 @@ export class Cs2LightingService {
 
     try {
       await this.renderDecisionFrame(config, targets, decision, new Date(now), true);
+      this.activeProviderSteamId = snapshot.providerSteamId;
+      await this.logLightingDecision(snapshot, backgroundDecision, overlayDecision, decision);
       if (this.activeTransport === 'entertainmentStreaming'
         && this.shouldAnimateProvider(snapshot.providerSteamId, decision)) {
         this.schedulePresetAnimation(snapshot.providerSteamId, config, targets);
@@ -197,6 +215,7 @@ export class Cs2LightingService {
     } catch (err) {
       this.clearActive(true);
       this.fallbackReason = `render_error:${err instanceof Error ? err.message : String(err)}`;
+      await this.logLightingRenderError(snapshot, backgroundDecision, overlayDecision, decision, this.fallbackReason);
     }
   }
 
@@ -241,8 +260,11 @@ export class Cs2LightingService {
   private scheduleInactiveStop(): void {
     this.cancelInactiveStop();
     this.inactiveStopTimer = setTimeout(() => {
+      const providerSteamId = this.activeProviderSteamId;
       void this.stopActiveRenderer();
+      void this.logLightingInactiveTimeout(providerSteamId);
     }, this.options.activeTimeoutMs ?? defaultActiveTimeoutMs);
+    this.inactiveStopTimer.unref?.();
   }
 
   private cancelInactiveStop(): void {
@@ -272,6 +294,7 @@ export class Cs2LightingService {
     this.activeFrame = null;
     this.activeMode = 'idle';
     this.activeTransport = 'unavailable';
+    this.activeProviderSteamId = null;
     this.lastRenderedAt = null;
     this.lastRenderSignature = null;
   }
@@ -316,6 +339,7 @@ export class Cs2LightingService {
       this.animationTimer = null;
       void this.renderPresetAnimation();
     }, animationFrameIntervalMs);
+    this.animationTimer.unref?.();
   }
 
   private async renderPresetAnimation(): Promise<void> {
@@ -357,6 +381,7 @@ export class Cs2LightingService {
         overlayComplete = animated.complete;
         if (animated.complete) {
           this.heldEffects.delete(context.providerSteamId);
+          void this.logLightingOverlayComplete(snapshot, held.decision, background);
         }
       }
 
@@ -378,6 +403,7 @@ export class Cs2LightingService {
           this.animationTimer = null;
           void this.renderPresetAnimation();
         }, animationFrameIntervalMs);
+        this.animationTimer.unref?.();
       }
     } finally {
       this.animationInFlight = false;
@@ -446,6 +472,165 @@ export class Cs2LightingService {
 
     this.heldEffects.delete(providerSteamId);
     return decision;
+  }
+
+  private async logLightingDecision(
+    snapshot: Cs2GameStateSnapshot,
+    backgroundDecision: Cs2LightingDecision | null,
+    overlayDecision: Cs2LightingDecision | null,
+    finalDecision: Cs2LightingDecision,
+  ): Promise<void> {
+    const record = this.diagnosticRecord(snapshot, {
+      event: 'decision',
+      transport: this.activeTransport,
+      finalReason: finalDecision.reason,
+      finalDynamicKey: finalDecision.dynamicKey ?? null,
+      backgroundReason: backgroundDecision?.reason ?? null,
+      backgroundDynamicKey: backgroundDecision?.dynamicKey ?? null,
+      overlayReason: overlayDecision?.reason ?? null,
+      firstColor: finalDecision.palette[0] ?? null,
+      palette: finalDecision.palette.slice(0, 4),
+      transitionSeconds: finalDecision.transitionSeconds,
+    });
+    await this.writeDedupedDiagnosticRecord(record, 'CS2 lighting decision selected', 'info');
+  }
+
+  private async logLightingCleared(snapshot: Cs2GameStateSnapshot, clearReason: string): Promise<void> {
+    const record = this.diagnosticRecord(snapshot, {
+      event: 'cleared',
+      clearReason,
+      transport: 'unavailable',
+      finalReason: null,
+      backgroundReason: null,
+      overlayReason: null,
+      firstColor: null,
+    });
+    await this.writeDedupedDiagnosticRecord(record, 'CS2 lighting cleared', 'info');
+  }
+
+  private async logLightingRenderError(
+    snapshot: Cs2GameStateSnapshot,
+    backgroundDecision: Cs2LightingDecision | null,
+    overlayDecision: Cs2LightingDecision | null,
+    finalDecision: Cs2LightingDecision,
+    error: string,
+  ): Promise<void> {
+    const record = this.diagnosticRecord(snapshot, {
+      event: 'render_error',
+      error,
+      transport: this.activeTransport,
+      finalReason: finalDecision.reason,
+      finalDynamicKey: finalDecision.dynamicKey ?? null,
+      backgroundReason: backgroundDecision?.reason ?? null,
+      overlayReason: overlayDecision?.reason ?? null,
+      firstColor: finalDecision.palette[0] ?? null,
+    });
+    await this.writeDedupedDiagnosticRecord(record, 'CS2 lighting render failed', 'warn');
+  }
+
+  private async logLightingOverlayComplete(
+    snapshot: Cs2GameStateSnapshot,
+    overlayDecision: Cs2LightingDecision,
+    backgroundDecision: Cs2LightingDecision | null,
+  ): Promise<void> {
+    const record = this.diagnosticRecord(snapshot, {
+      event: 'overlay_complete',
+      transport: this.activeTransport,
+      finalReason: backgroundDecision?.reason ?? null,
+      backgroundReason: backgroundDecision?.reason ?? null,
+      overlayReason: overlayDecision.reason,
+      firstColor: backgroundDecision?.palette[0] ?? null,
+    });
+    await this.writeDedupedDiagnosticRecord(record, 'CS2 lighting overlay completed', 'debug');
+  }
+
+  private async logLightingInactiveTimeout(providerSteamId: string | null): Promise<void> {
+    const snapshot = providerSteamId ? this.previousByProvider.get(providerSteamId) : undefined;
+    const record = snapshot
+      ? this.diagnosticRecord(snapshot, {
+        event: 'inactive_timeout',
+        transport: this.activeTransport,
+        finalReason: null,
+        backgroundReason: null,
+        overlayReason: null,
+        firstColor: null,
+      })
+      : {
+        event: 'inactive_timeout',
+        timestamp: new Date(this.options.now?.() ?? Date.now()).toISOString(),
+        providerSteamId,
+        transport: this.activeTransport,
+      };
+    await this.writeDedupedDiagnosticRecord(record, 'CS2 lighting inactive timeout', 'info');
+  }
+
+  private diagnosticRecord(
+    snapshot: Cs2GameStateSnapshot,
+    extra: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const state = snapshot.player?.state;
+    return {
+      timestamp: new Date(this.options.now?.() ?? Date.now()).toISOString(),
+      providerSteamId: snapshot.providerSteamId,
+      providerName: snapshot.provider?.name ?? null,
+      playerName: snapshot.player?.name ?? null,
+      team: snapshot.player?.team ?? null,
+      activity: snapshot.player?.activity ?? null,
+      map: snapshot.map?.name ?? null,
+      mapMode: snapshot.map?.mode ?? null,
+      mapPhase: snapshot.map?.phase ?? null,
+      roundPhase: snapshot.round?.phase ?? null,
+      bomb: snapshot.round?.bomb ?? null,
+      health: state?.health ?? null,
+      armor: state?.armor ?? null,
+      flashed: state?.flashed ?? null,
+      burning: state?.burning ?? null,
+      smoked: state?.smoked ?? null,
+      roundKills: state?.round_kills ?? null,
+      matchKills: snapshot.player?.match_stats?.kills ?? null,
+      matchDeaths: snapshot.player?.match_stats?.deaths ?? null,
+      sourceIp: snapshot.sourceIp ?? null,
+      ...extra,
+    };
+  }
+
+  private async writeDedupedDiagnosticRecord(
+    record: Record<string, unknown>,
+    message: string,
+    level: 'debug' | 'info' | 'warn',
+  ): Promise<void> {
+    const signature = diagnosticSignature(record);
+    if (signature === this.lastDiagnosticSignature) return;
+    this.lastDiagnosticSignature = signature;
+    await this.writeDiagnosticRecord(record, message, level);
+  }
+
+  private async writeDiagnosticRecord(
+    record: Record<string, unknown>,
+    message: string,
+    level: 'debug' | 'info' | 'warn',
+  ): Promise<void> {
+    const payload = {
+      message,
+      ...record,
+    };
+    this.options.logger?.[level]?.(payload, message);
+
+    const logFilePath = this.options.logFilePath;
+    if (!logFilePath) return;
+
+    try {
+      await mkdir(dirname(logFilePath), { recursive: true });
+      await appendFile(logFilePath, `${JSON.stringify(payload)}\n`, 'utf8');
+    } catch (err) {
+      this.options.logger?.warn?.(
+        {
+          err: err instanceof Error ? err.message : String(err),
+          logFilePath,
+        },
+        'failed to write CS2 lighting diagnostic log',
+      );
+    }
   }
 }
 
@@ -735,6 +920,33 @@ function frameSignature(decision: Cs2LightingDecision, snapshot: Cs2GameStateSna
     snapshot.round?.bomb,
     snapshot.round?.phase,
     snapshot.map?.phase,
+  ].join('|');
+}
+
+function diagnosticSignature(record: Record<string, unknown>): string {
+  return [
+    record.event,
+    record.providerSteamId,
+    record.transport,
+    record.finalReason,
+    record.finalDynamicKey,
+    record.backgroundReason,
+    record.backgroundDynamicKey,
+    record.overlayReason,
+    record.clearReason,
+    record.error,
+    record.team,
+    record.activity,
+    record.map,
+    record.mapMode,
+    record.mapPhase,
+    record.roundPhase,
+    record.bomb,
+    record.health,
+    record.flashed,
+    record.burning,
+    record.roundKills,
+    JSON.stringify(record.firstColor ?? null),
   ].join('|');
 }
 

@@ -25,6 +25,8 @@ const log = pino({
 const RELAY_PORT = Number(process.env.RELAY_PORT ?? 8787);
 const SEED_IP = process.env.SONOS_SEED_IP;
 const DATA_DIR = process.env.DATA_DIR ?? '/app/data';
+const CS2_LIGHTING_LOG_PATH = process.env.CS2_LIGHTING_LOG_PATH
+  ?? path.join(DATA_DIR, 'cs2-lighting.jsonl');
 
 if (!SEED_IP) {
   log.fatal('SONOS_SEED_IP is required (any always-on speaker IP on the LAN)');
@@ -44,6 +46,8 @@ async function main(): Promise<void> {
   const cs2GameState = new Cs2GameStateService();
   const cs2Lighting = new Cs2LightingService(hueConfigStore, undefined, {
     beforeRender: () => hueAmbience.pauseForExternalRenderer(),
+    logger: log.child({ module: 'cs2-lighting' }),
+    logFilePath: CS2_LIGHTING_LOG_PATH,
   });
 
   const apns = await ApnsClient.create(

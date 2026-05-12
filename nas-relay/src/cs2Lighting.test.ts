@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -270,6 +270,60 @@ test('CS2 lighting service reports fallback when no entertainment area is mapped
   }
 });
 
+test('CS2 lighting service logs selected background and overlay decisions', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    const logger = new RecordingCs2LightingLogger();
+    const service = new Cs2LightingService(store, () => renderer, { logger });
+
+    await service.receive(snapshot({
+      player: { team: 'T', state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+
+    assert.equal(logger.infoRecords.length, 1);
+    assert.equal(logger.infoRecords[0]?.message, 'CS2 lighting decision selected');
+    assert.equal(logger.infoRecords[0]?.data.finalReason, 'flash');
+    assert.equal(logger.infoRecords[0]?.data.backgroundReason, 'ambient');
+    assert.equal(logger.infoRecords[0]?.data.overlayReason, 'flash');
+    assert.equal(logger.infoRecords[0]?.data.team, 'T');
+    assert.deepEqual(logger.infoRecords[0]?.data.firstColor, renderer.renderedFrames[0]?.targets[0]?.lights[0]?.colors[0]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CS2 lighting service writes diagnostic decisions to a JSONL file', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    const logFilePath = path.join(dir, 'logs', 'cs2-lighting.jsonl');
+    const service = new Cs2LightingService(store, () => renderer, { logFilePath });
+
+    await service.receive(snapshot({
+      player: { team: 'T', state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+
+    const lines = (await readFile(logFilePath, 'utf8')).trim().split('\n');
+    const record = JSON.parse(lines[0]!) as Record<string, unknown>;
+
+    assert.equal(lines.length, 1);
+    assert.equal(record.event, 'decision');
+    assert.equal(record.message, 'CS2 lighting decision selected');
+    assert.equal(record.finalReason, 'flash');
+    assert.equal(record.backgroundReason, 'ambient');
+    assert.equal(record.overlayReason, 'flash');
+    assert.equal(record.team, 'T');
+    assert.deepEqual(record.firstColor, renderer.renderedFrames[0]?.targets[0]?.lights[0]?.colors[0]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CS2 lighting service keeps duplicate game state active without re-rendering', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
@@ -494,6 +548,30 @@ test('CS2 planted bomb preset keeps animating without new game state posts', asy
   }
 });
 
+test('CS2 planted bomb preset runs near Hue Entertainment update cadence', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    const service = new Cs2LightingService(store, () => renderer, {
+      minRenderIntervalMs: 0,
+      activeTimeoutMs: 2_000,
+    });
+
+    await service.receive(snapshot({
+      round: { bomb: 'planted' },
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+
+    await new Promise(resolve => setTimeout(resolve, 170));
+
+    assert(renderer.renderedFrames.length >= 5);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CS2 planted bomb effect changes blink frame as the detonation window advances', () => {
   const plantedAt = new Date('2026-05-12T09:30:00.000Z');
   const first = buildCs2LightingDecision(snapshot({
@@ -616,5 +694,18 @@ class RecordingHueAmbienceRenderer implements HueAmbienceRenderer {
 
   async stop(frame: HueAmbienceFrame): Promise<void> {
     this.stoppedFrames.push(frame);
+  }
+}
+
+class RecordingCs2LightingLogger {
+  readonly infoRecords: Array<{ data: Record<string, unknown>; message: string }> = [];
+  readonly debugRecords: Array<{ data: Record<string, unknown>; message: string }> = [];
+
+  info(data: Record<string, unknown>, message: string): void {
+    this.infoRecords.push({ data, message });
+  }
+
+  debug(data: Record<string, unknown>, message: string): void {
+    this.debugRecords.push({ data, message });
   }
 }
