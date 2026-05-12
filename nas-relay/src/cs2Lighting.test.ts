@@ -380,6 +380,30 @@ test('CS2 lighting service keeps steady state active past the configured CS2 hea
   }
 });
 
+test('CS2 lighting service tolerates long quiet game state gaps before releasing streaming', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    let now = new Date('2026-05-12T09:30:00.000Z').getTime();
+    const service = new Cs2LightingService(store, () => renderer, {
+      now: () => now,
+    });
+
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+
+    now += 45_000;
+
+    assert.equal(service.status(new Date(now)).active, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CS2 lighting service extends active lease from game state even when rendering is throttled', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
@@ -491,6 +515,76 @@ test('CS2 lighting service renders kill as a short burst and restores ambient qu
 
     assert(burst && burst.r > 0.8 && burst.g > 0.2);
     assert.deepEqual(restored, { r: 0.05, g: 0.18, b: 0.44 });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CS2 lighting service eases between team background colors instead of hard cutting', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    let now = new Date('2026-05-12T09:30:00.000Z').getTime();
+    const service = new Cs2LightingService(store, () => renderer, {
+      minRenderIntervalMs: 0,
+      now: () => now,
+    });
+
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const ctAmbient = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 20;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'T', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const firstTransition = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 360;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'T', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const settled = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    assert.deepEqual(ctAmbient, { r: 0.05, g: 0.18, b: 0.44 });
+    assert(firstTransition);
+    assert(firstTransition.r > ctAmbient!.r && firstTransition.r < 0.48);
+    assert(firstTransition.b < ctAmbient!.b && firstTransition.b > 0.02);
+    assert.deepEqual(settled, { r: 0.48, g: 0.18, b: 0.02 });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CS2 background transition settles without another game state post', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    const service = new Cs2LightingService(store, () => renderer, {
+      minRenderIntervalMs: 0,
+      activeTimeoutMs: 2_000,
+    });
+
+    await service.receive(snapshot({
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    await service.receive(snapshot({
+      player: { team: 'T', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+
+    await new Promise(resolve => setTimeout(resolve, 420));
+
+    const settled = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+    assert(renderer.renderedFrames.length >= 8);
+    assert.deepEqual(settled, { r: 0.48, g: 0.18, b: 0.02 });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

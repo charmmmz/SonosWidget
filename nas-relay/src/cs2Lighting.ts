@@ -65,9 +65,9 @@ interface Cs2LightingServiceOptions {
   logFilePath?: string;
 }
 
-const defaultActiveTimeoutMs = 8_000;
+const defaultActiveTimeoutMs = 60_000;
 const defaultMinRenderIntervalMs = 70;
-const animationFrameIntervalMs = 40;
+const animationFrameIntervalMs = 16;
 const c4FuseMs = 40_000;
 
 const palettes = {
@@ -114,6 +114,13 @@ interface HeldCs2Effect {
   startedAtMs: number;
 }
 
+interface Cs2BackgroundTransition {
+  from: Cs2LightingDecision;
+  to: Cs2LightingDecision;
+  startedAtMs: number;
+  durationMs: number;
+}
+
 interface Cs2PresetKeyframe {
   atMs: number;
   palette: HueRGBColor[];
@@ -141,6 +148,8 @@ export class Cs2LightingService {
   } | null = null;
   private animationInFlight = false;
   private heldEffects = new Map<string, HeldCs2Effect>();
+  private backgroundTransitions = new Map<string, Cs2BackgroundTransition>();
+  private displayedDecisionByProvider = new Map<string, Cs2LightingDecision>();
   private bombPlantedAtByProvider = new Map<string, number>();
   private activeProviderSteamId: string | null = null;
   private lastDiagnosticSignature: string | null = null;
@@ -192,7 +201,8 @@ export class Cs2LightingService {
       return;
     }
 
-    const decision = this.decisionWithHeldEffect(snapshot.providerSteamId, baseDecision, snapshot, decisionContext, now);
+    const heldDecision = this.decisionWithHeldEffect(snapshot.providerSteamId, baseDecision, snapshot, decisionContext, now);
+    const decision = this.decisionWithBackgroundTransition(snapshot.providerSteamId, heldDecision, now);
     const signature = frameSignature(decision, snapshot);
     if (signature === this.lastRenderSignature) {
       if (this.activeFrame) {
@@ -209,7 +219,7 @@ export class Cs2LightingService {
     this.lastRenderSignature = signature;
 
     try {
-      await this.renderDecisionFrame(config, targets, decision, new Date(now), true);
+      await this.renderDecisionFrame(config, targets, decision, new Date(now), true, true, snapshot.providerSteamId);
       this.activeProviderSteamId = snapshot.providerSteamId;
       await this.logLightingDecision(snapshot, backgroundDecision, overlayDecision, decision);
       if (this.activeTransport === 'entertainmentStreaming'
@@ -303,6 +313,8 @@ export class Cs2LightingService {
     this.lastGameStateAt = null;
     this.lastRenderedAt = null;
     this.lastRenderSignature = null;
+    this.backgroundTransitions.clear();
+    this.displayedDecisionByProvider.clear();
   }
 
   private async renderDecisionFrame(
@@ -312,6 +324,7 @@ export class Cs2LightingService {
     now: Date,
     runBeforeRender: boolean,
     refreshActiveDeadline = true,
+    providerSteamId?: string,
   ): Promise<void> {
     const frame = buildCs2Frame(targets, decision, now);
     if (runBeforeRender) {
@@ -327,6 +340,9 @@ export class Cs2LightingService {
     this.activeMode = decision.mode;
     this.activeTransport = result.transport;
     this.fallbackReason = null;
+    if (providerSteamId) {
+      this.displayedDecisionByProvider.set(providerSteamId, decision);
+    }
     if (refreshActiveDeadline) {
       this.lastRenderedAt = frame.createdAt;
       this.scheduleInactiveStop();
@@ -370,9 +386,13 @@ export class Cs2LightingService {
       bombPlantedAt: this.bombPlantedAtByProvider.get(context.providerSteamId),
       nowMs,
     };
-    const background = backgroundDecisionForSnapshot(snapshot, decisionContext);
+    const hadBackgroundTransition = this.backgroundTransitions.has(context.providerSteamId);
+    const rawBackground = backgroundDecisionForSnapshot(snapshot, decisionContext);
+    const background = rawBackground
+      ? this.decisionWithBackgroundTransition(context.providerSteamId, rawBackground, nowMs, false)
+      : null;
     const held = this.heldEffects.get(context.providerSteamId);
-    if (!held && !isAnimatedBackgroundDecision(background)) {
+    if (!held && !isAnimatedBackgroundDecision(background) && !hadBackgroundTransition) {
       this.animationContext = null;
       return;
     }
@@ -398,10 +418,11 @@ export class Cs2LightingService {
       }
 
       this.lastRenderSignature = `animation|${context.providerSteamId}|${decision.reason}|${decision.dynamicKey ?? ''}`;
-      await this.renderDecisionFrame(context.config, context.targets, decision, now, false, false);
+      await this.renderDecisionFrame(context.config, context.targets, decision, now, false, false, context.providerSteamId);
 
       const shouldContinue = this.heldEffects.has(context.providerSteamId)
         || isAnimatedBackgroundDecision(background)
+        || this.backgroundTransitions.has(context.providerSteamId)
         || (held !== undefined && !overlayComplete);
       if (!shouldContinue) {
         this.animationContext = null;
@@ -426,7 +447,9 @@ export class Cs2LightingService {
   }
 
   private shouldAnimateProvider(providerSteamId: string, decision: Cs2LightingDecision): boolean {
-    return this.heldEffects.has(providerSteamId) || isAnimatedBackgroundDecision(decision);
+    return this.heldEffects.has(providerSteamId)
+      || this.backgroundTransitions.has(providerSteamId)
+      || isAnimatedBackgroundDecision(decision);
   }
 
   private updateBombClock(
@@ -479,6 +502,80 @@ export class Cs2LightingService {
 
     this.heldEffects.delete(providerSteamId);
     return decision;
+  }
+
+  private decisionWithBackgroundTransition(
+    providerSteamId: string,
+    decision: Cs2LightingDecision,
+    now: number,
+    allowStart = true,
+  ): Cs2LightingDecision {
+    if (!isSmoothBackgroundDecision(decision)) {
+      if (!isHeldEventDecision(decision)) {
+        this.backgroundTransitions.delete(providerSteamId);
+      }
+      return decision;
+    }
+
+    const active = this.backgroundTransitions.get(providerSteamId);
+    if (active) {
+      if (sameTransitionTarget(active.to, decision)) {
+        return this.sampleBackgroundTransition(providerSteamId, active, now);
+      }
+
+      const from = this.sampleBackgroundTransition(providerSteamId, active, now);
+      return allowStart
+        ? this.startBackgroundTransition(providerSteamId, from, decision, now)
+        : from;
+    }
+
+    if (!allowStart) return decision;
+
+    const previous = this.displayedDecisionByProvider.get(providerSteamId);
+    if (!previous || isHeldEventDecision(previous) || sameTransitionTarget(previous, decision)) {
+      return decision;
+    }
+
+    return this.startBackgroundTransition(providerSteamId, previous, decision, now);
+  }
+
+  private startBackgroundTransition(
+    providerSteamId: string,
+    from: Cs2LightingDecision,
+    to: Cs2LightingDecision,
+    now: number,
+  ): Cs2LightingDecision {
+    const durationMs = backgroundTransitionDurationMs(to);
+    const leadMs = Math.min(animationFrameIntervalMs * 1.5, durationMs * 0.18);
+    const transition = {
+      from,
+      to,
+      startedAtMs: now - leadMs,
+      durationMs,
+    };
+    this.backgroundTransitions.set(providerSteamId, transition);
+    return this.sampleBackgroundTransition(providerSteamId, transition, now);
+  }
+
+  private sampleBackgroundTransition(
+    providerSteamId: string,
+    transition: Cs2BackgroundTransition,
+    now: number,
+  ): Cs2LightingDecision {
+    const elapsedMs = Math.max(0, now - transition.startedAtMs);
+    if (elapsedMs >= transition.durationMs) {
+      this.backgroundTransitions.delete(providerSteamId);
+      return transition.to;
+    }
+
+    const rawProgress = clamp01(elapsedMs / transition.durationMs);
+    const progress = easeProgress(rawProgress, 'smooth');
+    return {
+      ...transition.to,
+      palette: blendPalettes(transition.from.palette, transition.to.palette, progress),
+      transitionSeconds: Math.min(transition.to.transitionSeconds, animationFrameIntervalMs / 1000),
+      dynamicKey: `background:${backgroundTransitionSignature(transition.to)}:${Math.floor(rawProgress * 1000)}`,
+    };
   }
 
   private async logLightingDecision(
@@ -553,6 +650,8 @@ export class Cs2LightingService {
 
   private async logLightingInactiveTimeout(providerSteamId: string | null): Promise<void> {
     const snapshot = providerSteamId ? this.previousByProvider.get(providerSteamId) : undefined;
+    const nowMs = this.options.now?.() ?? Date.now();
+    const silenceMs = this.lastGameStateAt ? Math.max(0, nowMs - this.lastGameStateAt.getTime()) : null;
     const record = snapshot
       ? this.diagnosticRecord(snapshot, {
         event: 'inactive_timeout',
@@ -561,12 +660,16 @@ export class Cs2LightingService {
         backgroundReason: null,
         overlayReason: null,
         firstColor: null,
+        lastGameStateAt: this.lastGameStateAt?.toISOString() ?? null,
+        silenceMs,
       })
       : {
         event: 'inactive_timeout',
-        timestamp: new Date(this.options.now?.() ?? Date.now()).toISOString(),
+        timestamp: new Date(nowMs).toISOString(),
         providerSteamId,
         transport: this.activeTransport,
+        lastGameStateAt: this.lastGameStateAt?.toISOString() ?? null,
+        silenceMs,
       };
     await this.writeDedupedDiagnosticRecord(record, 'CS2 lighting inactive timeout', 'info');
   }
@@ -1217,6 +1320,35 @@ function isAnimatedBackgroundDecision(decision: Cs2LightingDecision | null): boo
   return decision?.reason === 'bombPlanted';
 }
 
+function isSmoothBackgroundDecision(decision: Cs2LightingDecision): boolean {
+  return !isHeldEventDecision(decision) && !isAnimatedBackgroundDecision(decision);
+}
+
+function sameTransitionTarget(
+  from: Cs2LightingDecision,
+  to: Cs2LightingDecision,
+): boolean {
+  return backgroundTransitionSignature(from) === backgroundTransitionSignature(to);
+}
+
+function backgroundTransitionDurationMs(decision: Cs2LightingDecision): number {
+  return Math.max(
+    animationFrameIntervalMs * 3,
+    Math.min(900, Math.round(decision.transitionSeconds * 1000)),
+  );
+}
+
+function backgroundTransitionSignature(decision: Cs2LightingDecision): string {
+  return [
+    decision.mode,
+    decision.reason,
+    decision.dynamicKey ?? '',
+    decision.palette
+      .map(color => `${color.r.toFixed(4)},${color.g.toFixed(4)},${color.b.toFixed(4)}`)
+      .join(';'),
+  ].join('|');
+}
+
 function blendPalettes(from: HueRGBColor[], to: HueRGBColor[], progress: number): HueRGBColor[] {
   const count = Math.max(from.length, to.length, 1);
   const blended: HueRGBColor[] = [];
@@ -1224,9 +1356,9 @@ function blendPalettes(from: HueRGBColor[], to: HueRGBColor[], progress: number)
     const a = from[index % from.length] ?? { r: 0, g: 0, b: 0 };
     const b = to[index % to.length] ?? a;
     blended.push({
-      r: lerp(a.r, b.r, progress),
-      g: lerp(a.g, b.g, progress),
-      b: lerp(a.b, b.b, progress),
+      r: lerpSrgb(a.r, b.r, progress),
+      g: lerpSrgb(a.g, b.g, progress),
+      b: lerpSrgb(a.b, b.b, progress),
     });
   }
   return blended;
@@ -1239,6 +1371,32 @@ function smoothstep(value: number): number {
 
 function lerp(from: number, to: number, progress: number): number {
   return clamp01(from + ((to - from) * progress));
+}
+
+function lerpSrgb(from: number, to: number, progress: number): number {
+  return linearToSrgb(lerp(srgbToLinear(from), srgbToLinear(to), progress));
+}
+
+function srgbToLinear(value: number): number {
+  const channel = clamp01(value);
+  return channel <= 0.04045
+    ? channel / 12.92
+    : ((channel + 0.055) / 1.055) ** 2.4;
+}
+
+function linearToSrgb(value: number): number {
+  const channel = clamp01(value);
+  const srgb = channel <= 0.0031308
+    ? channel * 12.92
+    : (1.055 * (channel ** (1 / 2.4))) - 0.055;
+  return snapChannel(srgb);
+}
+
+function snapChannel(value: number): number {
+  const channel = clamp01(value);
+  if (channel <= 1e-12) return 0;
+  if (1 - channel <= 1e-12) return 1;
+  return channel;
 }
 
 function clamp01(value: number): number {
