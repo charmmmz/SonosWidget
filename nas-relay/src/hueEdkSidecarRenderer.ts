@@ -101,6 +101,7 @@ class HueEdkSidecarRenderer implements HueAmbienceRenderer {
       bridgeName: this.config.bridge.name,
       applicationKey: this.config.applicationKey,
       streamingClientKey: this.config.streamingClientKey,
+      streamingApplicationId: this.config.streamingApplicationId,
       entertainmentAreaId: areaId,
       targetFps: this.options.targetFps ?? 60,
       sessionPolicy: this.options.sessionPolicy ?? 'reuse',

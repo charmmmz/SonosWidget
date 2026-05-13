@@ -31,6 +31,7 @@ test('Hue EDK sidecar renderer configures the selected entertainment area and se
     bridgeName: 'Hue Bridge',
     applicationKey: 'app-key',
     streamingClientKey: 'stream-key',
+    streamingApplicationId: 'stream-app',
     entertainmentAreaId: 'ent-1',
     targetFps: 60,
     sessionPolicy: 'reuse',
