@@ -41,7 +41,7 @@ test('Hue EDK sidecar renderer configures the selected entertainment area and se
   assert.equal(typeof (recorder.calls[2]?.body as Record<string, unknown>).brightness, 'number');
 });
 
-test('Hue EDK sidecar renderer maps CS2 flash and kill frames to effect endpoints', async () => {
+test('Hue EDK sidecar renderer maps CS2 flash and kill frames to spatial effect endpoints', async () => {
   const { createHueEdkSidecarRenderer } = await loadSidecarRendererModule();
   const recorder = recordingFetch();
   const renderer = createHueEdkSidecarRenderer(config, {
@@ -56,6 +56,7 @@ test('Hue EDK sidecar renderer maps CS2 flash and kill frames to effect endpoint
     transitionSeconds: 0.08,
   }));
   await renderer.render(cs2Frame('kill', [{ r: 1, g: 0.72, b: 0.12 }], {
+    strength: 3,
     attackSeconds: 0.05,
     holdSeconds: 0.1,
     fadeSeconds: 0.2,
@@ -75,8 +76,143 @@ test('Hue EDK sidecar renderer maps CS2 flash and kill frames to effect endpoint
     fadeMs: 700,
   });
   assert.deepEqual(recorder.calls[3]?.body, {
+    r: 1,
+    g: 0.92,
+    b: 0.55,
     intensity: 1,
-    durationMs: 220,
+    durationMs: 210,
+    radius: 2.5,
+  });
+});
+
+test('Hue EDK sidecar renderer maps CS2 damage and burning states to native pulse and sphere effects', async () => {
+  const { createHueEdkSidecarRenderer } = await loadSidecarRendererModule();
+  const recorder = recordingFetch();
+  const renderer = createHueEdkSidecarRenderer(config, {
+    baseUrl: 'http://hue-edk-sidecar:8787',
+    fetch: recorder.fetch,
+  });
+
+  const result = await renderer.render(cs2Frame('damage', [{ r: 1, g: 0.05, b: 0.02 }], {
+    effectKey: 'damage-1',
+    attackSeconds: 0.08,
+    holdSeconds: 0.4,
+    fadeSeconds: 0.55,
+    transitionSeconds: 0.14,
+  }));
+  await renderer.render(cs2Frame('damage', [{ r: 0.5, g: 0.02, b: 0.01 }], {
+    effectKey: 'damage-1',
+    attackSeconds: 0.08,
+    holdSeconds: 0.4,
+    fadeSeconds: 0.55,
+    transitionSeconds: 0.14,
+  }));
+  await renderer.render(cs2Frame('burning', [{ r: 1, g: 0.28, b: 0 }], {
+    effectKey: 'burning-1',
+    attackSeconds: 0.08,
+    holdSeconds: 0.2,
+    fadeSeconds: 0.4,
+    transitionSeconds: 0.12,
+  }));
+
+  assert.equal(result.nativeEffectActive, true);
+  assert.deepEqual(recorder.calls.map(call => call.path), [
+    '/configure',
+    '/session/start',
+    '/effect/pulse',
+    '/effect/sphere',
+  ]);
+  assert.deepEqual(recorder.calls[2]?.body, {
+    r: 1,
+    g: 0.05,
+    b: 0.02,
+    intensity: 1,
+    attackMs: 80,
+    holdMs: 400,
+    fadeMs: 550,
+  });
+  assert.deepEqual(recorder.calls[3]?.body, {
+    kind: 'burning',
+    r: 1,
+    g: 0.28,
+    b: 0,
+    intensity: 1,
+    attackMs: 80,
+    holdMs: 200,
+    fadeMs: 400,
+    x: 0,
+    y: 0,
+    z: -0.82,
+    radius: 1.35,
+  });
+});
+
+test('Hue EDK sidecar renderer maps planted C4 and round freeze to iterator effects', async () => {
+  const { createHueEdkSidecarRenderer } = await loadSidecarRendererModule();
+  const recorder = recordingFetch();
+  const renderer = createHueEdkSidecarRenderer(config, {
+    baseUrl: 'http://hue-edk-sidecar:8787',
+    fetch: recorder.fetch,
+  });
+
+  const planted = await renderer.render(cs2Frame('bombPlanted', [{ r: 1, g: 0.16, b: 0.03 }], {
+    effectKey: 'c4-1',
+    remainingMs: 32_000,
+    cadenceMs: 820,
+    transitionSeconds: 0.18,
+  }));
+  await renderer.render(cs2Frame('bombPlanted', [{ r: 0.24, g: 0.04, b: 0.01 }], {
+    effectKey: 'c4-1',
+    remainingMs: 31_000,
+    cadenceMs: 800,
+    transitionSeconds: 0.18,
+  }));
+  const freeze = await renderer.render(cs2Frame('roundFreeze', [{ r: 0.05, g: 0.18, b: 0.44 }], {
+    effectKey: 'freeze-1',
+    transitionSeconds: 0.4,
+  }));
+  const exploded = await renderer.render(cs2Frame('bombExploded', [{ r: 1, g: 0.55, b: 0.04 }], {
+    effectKey: 'c4-explosion-1',
+    attackSeconds: 0.04,
+    holdSeconds: 0.2,
+    fadeSeconds: 1,
+    transitionSeconds: 0.04,
+  }));
+
+  assert.equal(planted.nativeEffectActive, true);
+  assert.equal(freeze.nativeEffectActive, true);
+  assert.equal(exploded.nativeEffectActive, true);
+  assert.deepEqual(recorder.calls.map(call => call.path), [
+    '/configure',
+    '/session/start',
+    '/ambient/team',
+    '/effect/c4',
+    '/ambient/team',
+    '/effect/iterator',
+    '/effect/explosion',
+  ]);
+  assert.deepEqual(recorder.calls[3]?.body, {
+    remainingMs: 32000,
+    intensity: 1,
+  });
+  assert.deepEqual(recorder.calls[5]?.body, {
+    kind: 'freeze',
+    r: 0.05,
+    g: 0.18,
+    b: 0.44,
+    intensity: 0.44,
+    pulseMs: 680,
+    offsetMs: 180,
+    order: 'clockwise',
+    mode: 'cycle',
+  });
+  assert.deepEqual(recorder.calls[6]?.body, {
+    r: 1,
+    g: 0.55,
+    b: 0.04,
+    intensity: 1,
+    durationMs: 1240,
+    radius: 2.2,
   });
 });
 
@@ -151,7 +287,10 @@ interface SidecarRendererModule {
     config: HueAmbienceRuntimeConfig,
     options: Record<string, unknown>,
   ) => {
-    render(frame: HueAmbienceFrame): Promise<{ transport: 'entertainmentStreaming' }>;
+    render(frame: HueAmbienceFrame): Promise<{
+      transport: 'entertainmentStreaming';
+      nativeEffectActive?: boolean;
+    }>;
     stop(frame: HueAmbienceFrame): Promise<void>;
   };
 }
@@ -253,6 +392,9 @@ function cs2Frame(
       attackSeconds: overrides.attackSeconds ?? 0,
       holdSeconds: overrides.holdSeconds ?? 0,
       fadeSeconds: overrides.fadeSeconds ?? 0,
+      cadenceMs: overrides.cadenceMs,
+      remainingMs: overrides.remainingMs,
+      strength: overrides.strength,
     },
   } as HueAmbienceFrame;
 }

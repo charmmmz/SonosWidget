@@ -95,6 +95,21 @@ test('CS2 kill effect uses a short non-green burst', () => {
   assert(decision.holdSeconds <= 0.16);
   assert(decision.fadeSeconds <= 0.25);
   assert(decision.palette.every(color => color.g <= Math.max(color.r, color.b)));
+  assert.equal(decision.strength, 1);
+});
+
+test('CS2 kill burst strength follows the current round kill count', () => {
+  const previous = snapshot({
+    player: { state: { round_kills: 2, health: 100, burning: 0, flashed: 0 } },
+  });
+  const current = snapshot({
+    player: { state: { round_kills: 3, health: 100, burning: 0, flashed: 0 } },
+  });
+
+  const decision = buildCs2LightingDecision(current, previous);
+
+  assert.equal(decision?.reason, 'kill');
+  assert.equal(decision.strength, 3);
 });
 
 test('CS2 decision uses separate deathmatch damage strategy', () => {
@@ -194,6 +209,7 @@ test('CS2 round freeze is a dim team background state', () => {
   }));
 
   assert.equal(decision?.reason, 'roundFreeze');
+  assert.equal(decision?.effectKey, 'round:0:roundFreeze:CT');
   const color = decision?.palette[0];
   assert(color && color.b > color.r);
   assert(color && maxChannel(color) < 0.3);
@@ -488,6 +504,10 @@ test('CS2 lighting service logs selected background and overlay decisions', asyn
     assert.equal(logger.infoRecords[0]?.data.finalReason, 'flash');
     assert.equal(logger.infoRecords[0]?.data.backgroundReason, 'ambient');
     assert.equal(logger.infoRecords[0]?.data.overlayReason, 'flash');
+    assert.equal(logger.infoRecords[0]?.data.finalEffectProfile, 'flash_overlay');
+    assert.equal(logger.infoRecords[0]?.data.finalEffectLayer, 'overlay');
+    assert.equal(logger.infoRecords[0]?.data.finalSidecarCommand, 'effect/flash');
+    assert.equal(logger.infoRecords[0]?.data.animationCadenceMs, 16);
     assert.equal(logger.infoRecords[0]?.data.team, 'T');
     assert.deepEqual(logger.infoRecords[0]?.data.firstColor, renderer.renderedFrames[0]?.targets[0]?.lights[0]?.colors[0]);
   } finally {
@@ -517,8 +537,45 @@ test('CS2 lighting service writes diagnostic decisions to a JSONL file', async (
     assert.equal(record.finalReason, 'flash');
     assert.equal(record.backgroundReason, 'ambient');
     assert.equal(record.overlayReason, 'flash');
+    assert.equal(record.finalEffectProfile, 'flash_overlay');
+    assert.equal(record.finalEffectLayer, 'overlay');
+    assert.equal(record.finalSidecarCommand, 'effect/flash');
+    assert.equal(record.animationCadenceMs, 16);
     assert.equal(record.team, 'T');
     assert.deepEqual(record.firstColor, renderer.renderedFrames[0]?.targets[0]?.lights[0]?.colors[0]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CS2 lighting service logs C4 blink cadence and sidecar command', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer();
+    const logger = new RecordingCs2LightingLogger();
+    let now = new Date('2026-05-12T09:30:00.000Z').getTime();
+    const service = new Cs2LightingService(store, () => renderer, {
+      logger,
+      now: () => now,
+    });
+
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      round: { phase: 'live', bomb: 'planted' },
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+
+    const record = logger.infoRecords[0]?.data;
+
+    assert.equal(record?.finalReason, 'bombPlanted');
+    assert.equal(record?.finalEffectProfile, 'c4_blink');
+    assert.equal(record?.finalEffectLayer, 'background');
+    assert.equal(record?.finalSidecarCommand, 'effect/c4');
+    assert.equal(record?.finalCadenceMs, 1000);
+    assert.equal(record?.finalRemainingMs, 40000);
+    assert.equal(record?.animationCadenceMs, 16);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1066,6 +1123,48 @@ test('CS2 planted bomb effect changes blink frame as the detonation window advan
   assert.notDeepEqual(first?.palette, later?.palette);
 });
 
+test('CS2 bomb explosion becomes a short native overlay event', () => {
+  const previous = snapshot({
+    round: { bomb: 'planted' },
+    player: { state: { health: 100, burning: 0, flashed: 0 } },
+  });
+  const current = snapshot({
+    round: { bomb: 'exploded' },
+    player: { state: { health: 100, burning: 0, flashed: 0 } },
+  });
+
+  const decision = buildCs2LightingDecision(current, previous);
+
+  assert.equal(decision?.reason, 'bombExploded');
+  assert.equal(decision?.effectKey, '76561197981496355:bombExploded');
+  assert(decision && decision.attackSeconds <= 0.05);
+  assert(decision && decision.fadeSeconds >= 1);
+});
+
+test('CS2 lighting service lets native EDK effects animate without relay frame loop', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new RecordingHueAmbienceRenderer('entertainmentStreaming', true);
+    const service = new Cs2LightingService(store, () => renderer, {
+      minRenderIntervalMs: 0,
+      activeTimeoutMs: 2_000,
+    });
+
+    await service.receive(snapshot({
+      round: { bomb: 'planted' },
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    assert.equal(renderer.renderedFrames.length, 1);
+    assert.equal(service.status().active, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 const config: HueAmbienceRuntimeConfig = {
   enabled: true,
   cs2LightingEnabled: true,
@@ -1161,11 +1260,20 @@ class RecordingHueAmbienceRenderer implements HueAmbienceRenderer {
   readonly renderedFrames: HueAmbienceFrame[] = [];
   readonly stoppedFrames: HueAmbienceFrame[] = [];
 
-  constructor(private readonly transport: 'clipFallback' | 'entertainmentStreaming' = 'entertainmentStreaming') {}
+  constructor(
+    private readonly transport: 'clipFallback' | 'entertainmentStreaming' = 'entertainmentStreaming',
+    private readonly nativeEffectActive = false,
+  ) {}
 
-  async render(frame: HueAmbienceFrame): Promise<{ transport: 'clipFallback' | 'entertainmentStreaming' }> {
+  async render(frame: HueAmbienceFrame): Promise<{
+    transport: 'clipFallback' | 'entertainmentStreaming';
+    nativeEffectActive?: boolean;
+  }> {
     this.renderedFrames.push(frame);
-    return { transport: this.transport };
+    return {
+      transport: this.transport,
+      ...(this.nativeEffectActive ? { nativeEffectActive: true } : {}),
+    };
   }
 
   async stop(frame: HueAmbienceFrame): Promise<void> {

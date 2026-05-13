@@ -45,6 +45,9 @@ export interface HueAmbienceFrameEffect {
   attackSeconds?: number;
   holdSeconds?: number;
   fadeSeconds?: number;
+  cadenceMs?: number;
+  remainingMs?: number;
+  strength?: number;
 }
 
 export interface BuildHueAmbienceFrameInput {

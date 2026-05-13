@@ -4,6 +4,7 @@ import type { HueLightClient } from './hueTypes.js';
 
 export interface HueAmbienceRenderResult {
   transport: 'clipFallback' | 'entertainmentStreaming';
+  nativeEffectActive?: boolean;
 }
 
 export interface HueAmbienceRenderer {
