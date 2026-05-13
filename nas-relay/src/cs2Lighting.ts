@@ -312,8 +312,15 @@ export class Cs2LightingService {
     const frame = this.activeFrame;
     this.activeRenderer = null;
     this.activeRendererConfigKey = null;
-    if (renderer && frame) {
+    if (!renderer) return;
+
+    if (frame) {
       await renderer.stop(frame).catch(() => {});
+      return;
+    }
+
+    if (renderer.release) {
+      await renderer.release().catch(() => {});
     }
   }
 

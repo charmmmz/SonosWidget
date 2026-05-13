@@ -414,6 +414,26 @@ test('CS2 lighting service logs render error causes for Hue streaming failures',
   }
 });
 
+test('CS2 lighting service releases renderer when initial streaming start fails', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
+  try {
+    const store = new HueAmbienceConfigStore(dir);
+    await store.save(config);
+    const renderer = new ThrowingReleasableHueAmbienceRenderer(new Error('bridge did not start streaming'));
+    const service = new Cs2LightingService(store, () => renderer);
+
+    await service.receive(snapshot({
+      player: { state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+
+    assert.equal(renderer.releaseCount, 1);
+    assert.equal(renderer.stoppedFrames.length, 0);
+    assert.equal(service.status().active, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CS2 lighting service reports fallback when no entertainment area is mapped', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
@@ -1161,6 +1181,25 @@ class ThrowingHueAmbienceRenderer implements HueAmbienceRenderer {
   }
 
   async stop(_frame: HueAmbienceFrame): Promise<void> {}
+}
+
+class ThrowingReleasableHueAmbienceRenderer implements HueAmbienceRenderer {
+  releaseCount = 0;
+  readonly stoppedFrames: HueAmbienceFrame[] = [];
+
+  constructor(private readonly error: Error) {}
+
+  async render(_frame: HueAmbienceFrame): Promise<{ transport: 'clipFallback' | 'entertainmentStreaming' }> {
+    throw this.error;
+  }
+
+  async stop(frame: HueAmbienceFrame): Promise<void> {
+    this.stoppedFrames.push(frame);
+  }
+
+  async release(): Promise<void> {
+    this.releaseCount += 1;
+  }
 }
 
 class RecordingCs2LightingLogger {
