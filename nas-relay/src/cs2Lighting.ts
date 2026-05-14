@@ -41,6 +41,7 @@ export interface Cs2LightingDecision {
   strength?: number;
   dynamicKey?: string;
   effectKey?: string;
+  effectPhase?: 'sustain' | 'release';
 }
 
 export interface Cs2LightingDecisionContext {
@@ -126,6 +127,8 @@ interface HeldCs2Effect {
   decision: Cs2LightingDecision;
   baseDecision: Cs2LightingDecision;
   startedAtMs: number;
+  releaseStartedAtMs?: number;
+  releasePalette?: HueRGBColor[];
 }
 
 interface Cs2BackgroundTransition {
@@ -574,9 +577,14 @@ export class Cs2LightingService {
   ): Cs2LightingDecision {
     if (isHeldEventDecision(decision)) {
       const active = this.heldEffects.get(providerSteamId);
+      const restartingFlash = decision.reason === 'flash'
+        && active?.decision.reason === 'flash'
+        && active.releaseStartedAtMs !== undefined
+        && snapshotFlashed(snapshot);
       if (active?.decision.reason === decision.reason
         && (!decision.effectKey || active.decision.effectKey === decision.effectKey)
-        && !heldEffectComplete(active, now)) {
+        && !heldEffectComplete(active, now)
+        && !restartingFlash) {
         return heldEffectDecision(active, backgroundDecisionForSnapshot(snapshot, context) ?? active.baseDecision, now).decision;
       }
 
@@ -596,6 +604,14 @@ export class Cs2LightingService {
 
     const held = this.heldEffects.get(providerSteamId);
     if (!held) return decision;
+
+    if (held.decision.reason === 'flash'
+      && !snapshotFlashed(snapshot)
+      && held.releaseStartedAtMs === undefined) {
+      const fallback = backgroundDecisionForSnapshot(snapshot, context) ?? decision;
+      held.releasePalette = heldEffectDecision(held, fallback, now).decision.palette;
+      held.releaseStartedAtMs = now;
+    }
 
     const animated = heldEffectDecision(held, decision, now);
     if (!animated.complete) {
@@ -941,6 +957,7 @@ function momentaryDecisionForSnapshot(
       attackSeconds: 0.12,
       holdSeconds: 0.08,
       fadeSeconds: 0.7,
+      effectPhase: 'sustain',
     };
   }
 
@@ -1061,6 +1078,7 @@ function buildCs2Frame(
       attackSeconds: decision.attackSeconds,
       holdSeconds: decision.holdSeconds,
       fadeSeconds: decision.fadeSeconds,
+      effectPhase: decision.effectPhase,
       cadenceMs: decision.cadenceMs,
       remainingMs: decision.remainingMs,
       strength: decision.strength,
@@ -1141,6 +1159,10 @@ function healthDropped(snapshot: Cs2GameStateSnapshot, previous?: Cs2GameStateSn
     && Number.isFinite(previousHealth)
     && (previousHealth as number) > (currentHealth as number)
     && (currentHealth as number) > 0;
+}
+
+function snapshotFlashed(snapshot: Cs2GameStateSnapshot): boolean {
+  return (snapshot.player?.state?.flashed ?? 0) > 0;
 }
 
 function killsIncreased(snapshot: Cs2GameStateSnapshot, previous?: Cs2GameStateSnapshot): boolean {
@@ -1264,6 +1286,7 @@ function frameSignature(decision: Cs2LightingDecision, snapshot: Cs2GameStateSna
     decision.mode,
     decision.reason,
     decision.dynamicKey,
+    decision.effectPhase,
     snapshot.player?.team,
     snapshot.player?.state?.health,
     snapshot.player?.state?.flashed,
@@ -1283,6 +1306,7 @@ function diagnosticSignature(record: Record<string, unknown>): string {
     record.transport,
     record.finalReason,
     record.finalDynamicKey,
+    record.finalEffectPhase,
     record.finalEffectProfile,
     record.finalSidecarCommand,
     record.finalCadenceMs,
@@ -1321,6 +1345,7 @@ function decisionTelemetry(
     [field('AttackSeconds')]: decision?.attackSeconds ?? null,
     [field('HoldSeconds')]: decision?.holdSeconds ?? null,
     [field('FadeSeconds')]: decision?.fadeSeconds ?? null,
+    [field('EffectPhase')]: decision?.effectPhase ?? null,
   };
 }
 
@@ -1520,6 +1545,10 @@ function firstFrameLeadMs(decision: Cs2LightingDecision): number {
 }
 
 function heldEffectComplete(held: HeldCs2Effect, now: number): boolean {
+  if (held.decision.reason === 'flash') {
+    if (held.releaseStartedAtMs === undefined) return false;
+    return now - held.releaseStartedAtMs > Math.max(1, held.decision.fadeSeconds * 1000);
+  }
   return now - held.startedAtMs > heldEffectTotalMs(held.decision);
 }
 
@@ -1528,6 +1557,10 @@ function heldEffectDecision(
   fallbackDecision: Cs2LightingDecision,
   now: number,
 ): { decision: Cs2LightingDecision; complete: boolean } {
+  if (held.decision.reason === 'flash') {
+    return flashHeldEffectDecision(held, fallbackDecision, now);
+  }
+
   const elapsed = Math.max(0, now - held.startedAtMs);
   const effectiveFallback = held.decision.reason === 'death' ? held.baseDecision : fallbackDecision;
   const preset = overlayPresetKeyframes(held.decision, held.baseDecision, effectiveFallback);
@@ -1549,7 +1582,71 @@ function heldEffectDecision(
       holdSeconds: held.decision.holdSeconds,
       fadeSeconds: held.decision.fadeSeconds,
       strength: held.decision.strength,
+      effectPhase: held.decision.effectPhase,
       dynamicKey: `${held.decision.reason}:preset:${sampled.segment}:${Math.floor(sampled.progress * 10)}`,
+      effectKey: held.decision.effectKey,
+    },
+  };
+}
+
+function flashHeldEffectDecision(
+  held: HeldCs2Effect,
+  fallbackDecision: Cs2LightingDecision,
+  now: number,
+): { decision: Cs2LightingDecision; complete: boolean } {
+  const releaseDurationMs = Math.max(1, held.decision.fadeSeconds * 1000);
+
+  if (held.releaseStartedAtMs !== undefined) {
+    const elapsed = Math.max(0, now - held.releaseStartedAtMs);
+    if (elapsed > releaseDurationMs) {
+      return { complete: true, decision: fallbackDecision };
+    }
+
+    const preset: Cs2PresetKeyframe[] = [
+      { atMs: 0, palette: held.releasePalette ?? palettes.flash, ease: 'smooth' },
+      { atMs: releaseDurationMs, palette: fallbackDecision.palette, ease: 'out' },
+    ];
+    const sampled = samplePresetKeyframes(preset, elapsed);
+    return {
+      complete: false,
+      decision: {
+        ...fallbackDecision,
+        mode: held.decision.mode,
+        reason: held.decision.reason,
+        palette: sampled.palette,
+        transitionSeconds: held.decision.transitionSeconds,
+        attackSeconds: held.decision.attackSeconds,
+        holdSeconds: held.decision.holdSeconds,
+        fadeSeconds: held.decision.fadeSeconds,
+        effectPhase: 'release',
+        dynamicKey: `flash:release:${sampled.segment}:${Math.floor(sampled.progress * 10)}`,
+        effectKey: held.decision.effectKey,
+      },
+    };
+  }
+
+  const elapsed = Math.max(0, now - held.startedAtMs);
+  const attackMs = Math.max(1, held.decision.attackSeconds * 1000);
+  const preset: Cs2PresetKeyframe[] = [
+    { atMs: 0, palette: held.baseDecision.palette, ease: 'smooth' },
+    { atMs: attackMs, palette: palettes.flash, ease: 'out' },
+  ];
+  const sampled = samplePresetKeyframes(preset, Math.min(elapsed, attackMs));
+  const phaseKey = elapsed >= attackMs ? 'hold' : Math.floor(sampled.progress * 10);
+
+  return {
+    complete: false,
+    decision: {
+      ...fallbackDecision,
+      mode: held.decision.mode,
+      reason: held.decision.reason,
+      palette: elapsed >= attackMs ? palettes.flash : sampled.palette,
+      transitionSeconds: held.decision.transitionSeconds,
+      attackSeconds: held.decision.attackSeconds,
+      holdSeconds: held.decision.holdSeconds,
+      fadeSeconds: held.decision.fadeSeconds,
+      effectPhase: 'sustain',
+      dynamicKey: `flash:sustain:${phaseKey}`,
       effectKey: held.decision.effectKey,
     },
   };

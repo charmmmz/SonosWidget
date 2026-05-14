@@ -123,6 +123,7 @@ test('Hue EDK sidecar renderer maps CS2 flash and kill frames to spatial effect 
   });
 
   await renderer.render(cs2Frame('flash', [{ r: 1, g: 1, b: 1 }], {
+    effectPhase: 'sustain',
     attackSeconds: 0.12,
     holdSeconds: 0.08,
     fadeSeconds: 0.7,
@@ -144,6 +145,7 @@ test('Hue EDK sidecar renderer maps CS2 flash and kill frames to spatial effect 
   ]);
   assert.deepEqual(recorder.calls[2]?.body, {
     kind: 'flash',
+    phase: 'sustain',
     r: 1,
     g: 1,
     b: 1,
@@ -334,6 +336,7 @@ test('Hue EDK sidecar renderer does not replay one CS2 effect across animation f
 
   await renderer.render(cs2Frame('flash', [{ r: 0.45, g: 0.6, b: 0.8 }], {
     effectKey: 'flash-1',
+    effectPhase: 'sustain',
     attackSeconds: 0.12,
     holdSeconds: 0.08,
     fadeSeconds: 0.7,
@@ -341,6 +344,7 @@ test('Hue EDK sidecar renderer does not replay one CS2 effect across animation f
   }));
   await renderer.render(cs2Frame('flash', [{ r: 1, g: 1, b: 1 }], {
     effectKey: 'flash-1',
+    effectPhase: 'sustain',
     attackSeconds: 0.12,
     holdSeconds: 0.08,
     fadeSeconds: 0.7,
@@ -352,6 +356,41 @@ test('Hue EDK sidecar renderer does not replay one CS2 effect across animation f
     '/session/start',
     '/effect/sphere',
   ]);
+});
+
+test('Hue EDK sidecar renderer allows flash release for the same effect key', async () => {
+  const { createHueEdkSidecarRenderer } = await loadSidecarRendererModule();
+  const recorder = recordingFetch();
+  const renderer = createHueEdkSidecarRenderer(config, {
+    baseUrl: 'http://hue-edk-sidecar:8787',
+    fetch: recorder.fetch,
+  });
+
+  await renderer.render(cs2Frame('flash', [{ r: 1, g: 1, b: 1 }], {
+    effectKey: 'flash-1',
+    effectPhase: 'sustain',
+    attackSeconds: 0.12,
+    holdSeconds: 0.08,
+    fadeSeconds: 0.7,
+    transitionSeconds: 0.08,
+  }));
+  await renderer.render(cs2Frame('flash', [{ r: 1, g: 1, b: 1 }], {
+    effectKey: 'flash-1',
+    effectPhase: 'release',
+    attackSeconds: 0.12,
+    holdSeconds: 0.08,
+    fadeSeconds: 0.7,
+    transitionSeconds: 0.08,
+  }));
+
+  assert.deepEqual(recorder.calls.map(call => call.path), [
+    '/configure',
+    '/session/start',
+    '/effect/sphere',
+    '/effect/sphere',
+  ]);
+  assert.equal((recorder.calls[2]?.body as Record<string, unknown>).phase, 'sustain');
+  assert.equal((recorder.calls[3]?.body as Record<string, unknown>).phase, 'release');
 });
 
 test('Hue EDK sidecar renderer refuses CS2 rendering without streaming credentials', async () => {
@@ -510,6 +549,7 @@ function cs2Frame(
       source: 'cs2',
       reason,
       effectKey: overrides.effectKey,
+      effectPhase: overrides.effectPhase,
       mode: overrides.mode ?? 'competitive',
       transitionSeconds,
       attackSeconds: overrides.attackSeconds ?? 0,

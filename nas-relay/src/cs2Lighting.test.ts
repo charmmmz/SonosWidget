@@ -945,7 +945,7 @@ test('CS2 lighting service keeps Hue streaming warm during static ambience', asy
   }
 });
 
-test('CS2 flash effect attacks from team color to white and releases back smoothly', async () => {
+test('CS2 flash effect holds white until flashed clears, then releases smoothly', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'cs2-lighting-'));
   try {
     const store = new HueAmbienceConfigStore(dir);
@@ -977,14 +977,28 @@ test('CS2 flash effect attacks from team color to white and releases back smooth
     }));
     const peak = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
 
-    now += 260;
+    now += 1200;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 1 } },
+    }));
+    const sustained = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 20;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
+    const releaseStart = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
+
+    now += 500;
     await service.receive(snapshot({
       receivedAt: new Date(now),
       player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
     }));
     const release = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
 
-    now += 500;
+    now += 300;
     await service.receive(snapshot({
       receivedAt: new Date(now),
       player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
@@ -994,6 +1008,8 @@ test('CS2 flash effect attacks from team color to white and releases back smooth
     assert.deepEqual(ambient, { r: 0.05, g: 0.18, b: 0.44 });
     assert(attack && attack.r > ambient!.r && attack.r < 1);
     assert.deepEqual(peak, { r: 1, g: 1, b: 1 });
+    assert.deepEqual(sustained, { r: 1, g: 1, b: 1 });
+    assert.deepEqual(releaseStart, { r: 1, g: 1, b: 1 });
     assert(release && release.r > ambient!.r && release.r < 1);
     assert.deepEqual(restored, ambient);
   } finally {
@@ -1102,7 +1118,6 @@ test('CS2 flash overlay restores to planted bomb background', async () => {
       round: { bomb: 'planted' },
       player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
     }));
-    const bombBackground = renderer.renderedFrames.at(-1)?.targets[0]?.lights[0]?.colors[0];
 
     now += 20;
     await service.receive(snapshot({
@@ -1117,9 +1132,20 @@ test('CS2 flash overlay restores to planted bomb background', async () => {
       round: { bomb: 'planted' },
       player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
     }));
+    const releaseStartFrame = renderer.renderedFrames.at(-1);
+
+    now += 800;
+    await service.receive(snapshot({
+      receivedAt: new Date(now),
+      round: { bomb: 'planted' },
+      player: { team: 'CT', state: { health: 100, burning: 0, flashed: 0 } },
+    }));
     const restoredFrame = renderer.renderedFrames.at(-1);
 
-    assert.deepEqual(restoredFrame?.targets[0]?.lights[0]?.colors[0], bombBackground);
+    assert.deepEqual(releaseStartFrame?.targets[0]?.lights[0]?.colors[0], { r: 1, g: 1, b: 1 });
+    const restoredColor = restoredFrame?.targets[0]?.lights[0]?.colors[0];
+    assert.equal(restoredFrame?.effect?.reason, 'bombPlanted');
+    assert(restoredColor && restoredColor.r > restoredColor.g && restoredColor.g > restoredColor.b);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -129,11 +129,13 @@ class HueEdkSidecarRenderer implements HueAmbienceRenderer {
 
     const effect = frame.effect;
     if (effect?.source === 'cs2' && effect.reason === 'flash') {
-      if (!this.markEffectForPlayback(effect.effectKey, frame.createdAt)) {
+      const effectPhase = flashEffectPhase(effect.effectPhase);
+      if (!this.markEffectForPlayback(effect.effectKey, frame.createdAt, effectPhase)) {
         return { transport: 'entertainmentStreaming', nativeEffectActive: true };
       }
       await this.post('/effect/sphere', {
         kind: 'flash',
+        phase: effectPhase,
         r: 1,
         g: 1,
         b: 1,
@@ -334,11 +336,12 @@ class HueEdkSidecarRenderer implements HueAmbienceRenderer {
     return fetchFn as HueEdkSidecarFetch;
   }
 
-  private markEffectForPlayback(effectKey: string | undefined, createdAt: Date): boolean {
+  private markEffectForPlayback(effectKey: string | undefined, createdAt: Date, phase?: string): boolean {
     if (!effectKey) return true;
-    if (this.playedEffectKeys.has(effectKey)) return false;
+    const playbackKey = phase ? `${effectKey}:${phase}` : effectKey;
+    if (this.playedEffectKeys.has(playbackKey)) return false;
 
-    this.playedEffectKeys.set(effectKey, createdAt.getTime());
+    this.playedEffectKeys.set(playbackKey, createdAt.getTime());
     if (this.playedEffectKeys.size > 128) {
       const oldest = [...this.playedEffectKeys.entries()]
         .sort((a, b) => a[1] - b[1])
@@ -513,6 +516,10 @@ function framePalette(frame: HueAmbienceFrame): HueRGBColor[] {
     }
   }
   return colors.length > 0 ? colors : [{ r: 0, g: 0, b: 0 }];
+}
+
+function flashEffectPhase(value: string | undefined): 'sustain' | 'release' {
+  return value === 'release' ? 'release' : 'sustain';
 }
 
 function frameIntensity(frame: HueAmbienceFrame): number {
